@@ -268,10 +268,10 @@ class FakeClaude:
 
 class FakeEmail:
     def __init__(self) -> None:
-        self.sent: list[tuple[str, str, list[str]]] = []
+        self.sent: list[tuple[str, str, list[str], str | None]] = []
 
-    def send_email(self, subject: str, body: str, recipients: list[str]) -> bool:
-        self.sent.append((subject, body, recipients))
+    def send_email(self, subject: str, body: str, recipients: list[str], html_body: str | None = None) -> bool:
+        self.sent.append((subject, body, recipients, html_body))
         return True
 
 
@@ -737,7 +737,7 @@ class MarketingOsAgentTests(unittest.TestCase):
         app.notion = self.h.notion
         app.claude = self.h.claude
         self.h.notion.tasks = [
-            task("email-preview-1", "Completed", name="Finished task", deadline=date(2026, 5, 15)),
+            task("email-preview-1", "Completed", name="Finished task", deadline=date.today()),
             task("email-preview-2", "Blocked", name="Blocked task", needs="Need Emil"),
         ]
         sent, recipients = app.send_test_email(["one@example.com,two@example.com", "one@example.com"])
@@ -745,8 +745,11 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(recipients, ["one@example.com", "two@example.com"])
         self.assertEqual(fake_email.sent[0][0], "[Test] Friday Marketing Roundup Preview")
         self.assertEqual(fake_email.sent[0][2], recipients)
-        self.assertIn("live preview of the Friday roundup", fake_email.sent[0][1])
-        self.assertIn("Completed:", fake_email.sent[0][1])
+        self.assertIn("TEST PREVIEW", fake_email.sent[0][1])
+        self.assertIn("Completed (1)", fake_email.sent[0][1])
+        self.assertIsNotNone(fake_email.sent[0][3])
+        self.assertIn("<html>", fake_email.sent[0][3] or "")
+        self.assertNotIn("##", fake_email.sent[0][1])
 
 
 if __name__ == "__main__":

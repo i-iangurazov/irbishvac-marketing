@@ -13,6 +13,7 @@ from .clients.slack import SlackClient
 from .config import HealthReport, Settings
 from .domain.campaign_health import CampaignHealthService
 from .domain.owner_mapping import OwnerResolver
+from .domain.formatting import format_friday_roundup_email
 from .domain.reports import ReportService, month_bounds, quarter_bounds, week_bounds
 from .domain.task_processor import TaskProcessor
 from .http_server import AgentHttpServer
@@ -238,22 +239,8 @@ class AgentApp:
             next_start,
             next_end,
         )
-        roundup_body = self.claude.draft_friday_roundup(sections)
-        body = "\n".join(
-            [
-                "Marketing OS Agent email test.",
-                "This is a live preview of the Friday roundup email format using current Notion task data.",
-                "",
-                f"Sent at: {now.isoformat()}",
-                f"Environment: {self.settings.app_env}",
-                f"SMTP host: {self.settings.smtp_host}",
-                f"From: {self.settings.email_from}",
-                f"Preview week: {week_start.isoformat()} to {week_end.isoformat()}",
-                "",
-                roundup_body,
-            ]
-        )
-        sent = self.email.send_email("[Test] Friday Marketing Roundup Preview", body, cleaned_recipients)
+        body, html_body = format_friday_roundup_email(sections, week_start, week_end, preview=True)
+        sent = self.email.send_email("[Test] Friday Marketing Roundup Preview", body, cleaned_recipients, html_body=html_body)
         logger.info("email_test_completed", extra={"sent": sent, "recipients": cleaned_recipients})
         return sent, cleaned_recipients
 

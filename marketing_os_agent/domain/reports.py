@@ -10,7 +10,7 @@ from ..clients.slack import SlackClient
 from ..config import Settings
 from ..models import Campaign, OPEN_STATUSES, Task
 from ..persistence import Persistence
-from .formatting import campaign_brief_line, section, task_line
+from .formatting import campaign_brief_line, format_friday_roundup_email, section, task_line
 from .owner_mapping import OwnerResolver
 
 
@@ -77,7 +77,8 @@ class ReportService:
             body = self.claude.draft_friday_roundup(sections)
             self.slack.post_message(self.settings.slack_marketing_ops_channel_id, body)
             recipients = [email for email in [self.settings.tim_email, self.settings.vadim_email] if email]
-            self.email.send_email("Friday Marketing Roundup", body, recipients)
+            email_text, email_html = format_friday_roundup_email(sections, start, end)
+            self.email.send_email("Friday Marketing Roundup", email_text, recipients, html_body=email_html)
             self.db.log_run_complete(run_id, "completed", {"sections": {k: len(v) for k, v in sections.items()}})
             logger.info("scheduled_job_completed", extra={"job": "friday_roundup"})
             return body

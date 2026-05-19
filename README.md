@@ -111,7 +111,7 @@ Use `repost-missing-slack-updates` after fixing Slack channel membership if an e
 Use `debug-tasks` when a Notion edit is being read but no transition posts. It prints current Notion status next to the saved local baseline status.
 Use `transition-counts` to inspect observed status transitions, including repeated completions that the service actually saw.
 Use `list-claude-models` when Anthropic returns a model 404. It prints model IDs available to the configured `ANTHROPIC_API_KEY`.
-Use `test-email` after configuring SMTP. It sends a live Friday-roundup preview using current Notion task data without posting to Slack. By default it sends to `TIM_EMAIL` and `VADIM_EMAIL`; pass `--to you@example.com` to send only to a specific address.
+Use `test-email` after configuring SMTP. It sends a live HTML Friday-roundup preview using current Notion task data without posting to Slack. By default it sends to `TIM_EMAIL` and `VADIM_EMAIL`; pass `--to you@example.com` to send only to a specific address.
 
 Marketing Calendar import support:
 
