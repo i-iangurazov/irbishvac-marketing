@@ -734,11 +734,19 @@ class MarketingOsAgentTests(unittest.TestCase):
         app = AgentApp(self.h.settings)
         fake_email = FakeEmail()
         app.email = fake_email
+        app.notion = self.h.notion
+        app.claude = self.h.claude
+        self.h.notion.tasks = [
+            task("email-preview-1", "Completed", name="Finished task", deadline=date(2026, 5, 15)),
+            task("email-preview-2", "Blocked", name="Blocked task", needs="Need Emil"),
+        ]
         sent, recipients = app.send_test_email(["one@example.com,two@example.com", "one@example.com"])
         self.assertTrue(sent)
         self.assertEqual(recipients, ["one@example.com", "two@example.com"])
-        self.assertEqual(fake_email.sent[0][0], "Marketing OS Agent email test")
+        self.assertEqual(fake_email.sent[0][0], "[Test] Friday Marketing Roundup Preview")
         self.assertEqual(fake_email.sent[0][2], recipients)
+        self.assertIn("live preview of the Friday roundup", fake_email.sent[0][1])
+        self.assertIn("Completed:", fake_email.sent[0][1])
 
 
 if __name__ == "__main__":

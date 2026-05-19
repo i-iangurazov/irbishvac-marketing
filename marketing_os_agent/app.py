@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .clients.claude import ClaudeClient
@@ -13,7 +13,7 @@ from .clients.slack import SlackClient
 from .config import HealthReport, Settings
 from .domain.campaign_health import CampaignHealthService
 from .domain.owner_mapping import OwnerResolver
-from .domain.reports import ReportService, month_bounds, quarter_bounds
+from .domain.reports import ReportService, month_bounds, quarter_bounds, week_bounds
 from .domain.task_processor import TaskProcessor
 from .http_server import AgentHttpServer
 from .models import ValidationReport
@@ -227,20 +227,33 @@ class AgentApp:
             logger.warning("email_test_recipient_missing")
             return False, []
 
-        sent_at = datetime.now(ZoneInfo(self.settings.timezone)).isoformat()
+        now = datetime.now(ZoneInfo(self.settings.timezone))
+        week_start, week_end = week_bounds(now.date())
+        next_start = week_end + timedelta(days=1)
+        next_end = next_start + timedelta(days=6)
+        sections = self.reports.build_friday_sections(
+            self.notion.query_all_tasks(),
+            week_start,
+            week_end,
+            next_start,
+            next_end,
+        )
+        roundup_body = self.claude.draft_friday_roundup(sections)
         body = "\n".join(
             [
                 "Marketing OS Agent email test.",
+                "This is a live preview of the Friday roundup email format using current Notion task data.",
                 "",
-                f"Sent at: {sent_at}",
+                f"Sent at: {now.isoformat()}",
                 f"Environment: {self.settings.app_env}",
                 f"SMTP host: {self.settings.smtp_host}",
                 f"From: {self.settings.email_from}",
+                f"Preview week: {week_start.isoformat()} to {week_end.isoformat()}",
                 "",
-                "If you received this, SMTP is configured correctly for Friday roundups.",
+                roundup_body,
             ]
         )
-        sent = self.email.send_email("Marketing OS Agent email test", body, cleaned_recipients)
+        sent = self.email.send_email("[Test] Friday Marketing Roundup Preview", body, cleaned_recipients)
         logger.info("email_test_completed", extra={"sent": sent, "recipients": cleaned_recipients})
         return sent, cleaned_recipients
 
