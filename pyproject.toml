@@ -1,0 +1,14 @@
+[project]
+name = "marketing-os-agent"
+version = "0.1.0"
+description = "Marketing Operating System automation service for Notion, Slack, Claude, and email."
+requires-python = ">=3.11"
+authors = [{ name = "Irbis HVAC" }]
+readme = "README.md"
+
+[project.scripts]
+marketing-os-agent = "marketing_os_agent.__main__:main"
+
+[tool.unittest]
+start-dir = "tests"
+

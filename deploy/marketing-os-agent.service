@@ -1,0 +1,20 @@
+[Unit]
+Description=Marketing OS Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/marketing-os-agent
+EnvironmentFile=/opt/marketing-os-agent/.env
+ExecStart=/usr/bin/python3 -m marketing_os_agent run
+Restart=always
+RestartSec=5
+User=marketing-os-agent
+Group=marketing-os-agent
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
