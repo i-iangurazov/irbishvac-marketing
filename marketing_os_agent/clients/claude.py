@@ -80,11 +80,11 @@ class ClaudeClient:
         )
 
     def draft_monday_owner_message(self, owner_name: str, task_lines: list[str]) -> str:
-        fallback = f"Good morning {owner_name}. This week's open marketing tasks:\n" + "\n".join(task_lines)
+        fallback = f"Good morning {owner_name}. Monday marketing task update:\n" + "\n".join(task_lines)
         prompt = {
             "owner": owner_name,
             "tasks": task_lines,
-            "instruction": "Draft a concise Slack DM. Do not add tasks or dates.",
+            "instruction": "Draft a concise Slack DM. Preserve the sections and facts. Do not add tasks or dates.",
         }
         return self.complete("You draft concise operational marketing task messages.", str(prompt), max_tokens=500) or fallback
 

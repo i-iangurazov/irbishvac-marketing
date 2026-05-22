@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 from ..clients.claude import ClaudeClient
@@ -15,6 +14,15 @@ from .owner_mapping import OwnerResolver
 
 
 logger = logging.getLogger(__name__)
+
+MONDAY_SECTION_TITLES = (
+    "Open tasks due this week",
+    "Not completed last week",
+    "Moved to this week",
+)
+
+FRIDAY_ROLLOVER_SECTION = "Not completed, needs rollover"
+FRIDAY_ROLLOVER_STATUSES = OPEN_STATUSES
 
 
 class ReportService:
@@ -38,23 +46,37 @@ class ReportService:
         run_id = self.db.log_run_start("monday_push")
         try:
             start, end = week_bounds(now.date())
-            grouped: dict[str, list[Task]] = defaultdict(list)
+            grouped_sections: dict[str, dict[str, list[Task]]] = {}
             for task in tasks:
-                if task.status in OPEN_STATUSES and task.deadline and start <= task.deadline <= end:
-                    grouped[task.owner_name].append(task)
-            for owner_name, owner_tasks in grouped.items():
+                if task.status not in OPEN_STATUSES or not task.deadline:
+                    continue
+                owner_sections = grouped_sections.setdefault(
+                    task.owner_name,
+                    {title: [] for title in MONDAY_SECTION_TITLES},
+                )
+                if start <= task.deadline <= end:
+                    owner_sections["Open tasks due this week"].append(task)
+                if task.deadline < start:
+                    owner_sections["Not completed last week"].append(task)
+                if _moved_to_week(task, start, end):
+                    owner_sections["Moved to this week"].append(task)
+
+            grouped = {
+                owner_name: _unique_section_tasks(owner_sections)
+                for owner_name, owner_sections in grouped_sections.items()
+                if any(owner_sections.values())
+            }
+
+            for owner_name, owner_tasks in sorted(grouped.items()):
                 owner = owner_tasks[0].owner
                 slack_user_id = self.owner_resolver.resolve_slack_user(owner)
-                lines = [task_line(task) for task in owner_tasks]
+                lines = _monday_owner_lines(grouped_sections[owner_name])
                 message = self.claude.draft_monday_owner_message(owner_name, lines)
                 if slack_user_id:
                     self.slack.dm_user(slack_user_id, message)
                 else:
                     self._alert_tim_owner_unreachable(owner_name, "Monday push")
-            summary_lines = [
-                f"- {owner}: {len(owner_tasks)} open task(s) due this week"
-                for owner, owner_tasks in sorted(grouped.items())
-            ]
+            summary_lines = _monday_channel_summary(grouped_sections)
             self.slack.post_message(
                 self.settings.slack_marketing_ops_channel_id,
                 section("Monday Marketing Task Push", summary_lines),
@@ -99,6 +121,7 @@ class ReportService:
             "Completed": [],
             "Delayed, with new deadline and reason": [],
             "Blocked": [],
+            FRIDAY_ROLLOVER_SECTION: [],
             "Canceled": [],
             "Coming next week": [],
         }
@@ -111,6 +134,8 @@ class ReportService:
                 sections["Delayed, with new deadline and reason"].append(f"{task_line(task)} | reason: {reason}")
             if task.status == "Blocked":
                 sections["Blocked"].append(f"{task_line(task)} | needs: {task.needs_from_others or 'not specified'}")
+            if task.status in FRIDAY_ROLLOVER_STATUSES and task.deadline and task.deadline <= week_end:
+                sections[FRIDAY_ROLLOVER_SECTION].append(_task_line_with_original_deadline(task))
             if task.status == "Canceled" and in_week:
                 sections["Canceled"].append(task_line(task))
             if task.status in {"Not Started", "In Progress", "Needs Review"} and task.deadline and next_start <= task.deadline <= next_end:
@@ -180,3 +205,71 @@ def quarter_bounds(today: date) -> tuple[date, date]:
 
 def select_campaigns_starting_between(campaigns: list[Campaign], start: date, end: date) -> list[Campaign]:
     return [campaign for campaign in campaigns if campaign.start_date and start <= campaign.start_date <= end]
+
+
+def _moved_to_week(task: Task, start: date, end: date) -> bool:
+    return bool(task.deadline and task.original_deadline and task.original_deadline < start <= task.deadline <= end)
+
+
+def _task_line_with_original_deadline(task: Task) -> str:
+    line = task_line(task)
+    if task.original_deadline and task.deadline and task.original_deadline != task.deadline:
+        line = f"{line} | original due {task.original_deadline.isoformat()}"
+    return line
+
+
+def _unique_section_tasks(sections: dict[str, list[Task]]) -> list[Task]:
+    seen: set[str] = set()
+    unique: list[Task] = []
+    for title in MONDAY_SECTION_TITLES:
+        for task in sections[title]:
+            if task.id in seen:
+                continue
+            seen.add(task.id)
+            unique.append(task)
+    return unique
+
+
+def _monday_owner_lines(sections: dict[str, list[Task]]) -> list[str]:
+    lines: list[str] = []
+    for title in MONDAY_SECTION_TITLES:
+        lines.append(title)
+        tasks = sections[title]
+        lines.extend([_task_line_with_original_deadline(task) for task in tasks] or ["- None"])
+    return lines
+
+
+def _monday_channel_summary(grouped_sections: dict[str, dict[str, list[Task]]]) -> list[str]:
+    if not grouped_sections:
+        return ["- None"]
+
+    lines: list[str] = []
+    for owner_name, sections in sorted(grouped_sections.items()):
+        if not any(sections.values()):
+            continue
+        lines.append(
+            "- "
+            f"{owner_name}: "
+            f"{len(sections['Open tasks due this week'])} due this week, "
+            f"{len(sections['Not completed last week'])} not completed last week, "
+            f"{len(sections['Moved to this week'])} moved to this week"
+        )
+
+    carryover = [
+        f"- {task.owner_name}: {_task_line_with_original_deadline(task).removeprefix('- ')}"
+        for sections in grouped_sections.values()
+        for task in sections["Not completed last week"]
+    ]
+    moved = [
+        f"- {task.owner_name}: {_task_line_with_original_deadline(task).removeprefix('- ')}"
+        for sections in grouped_sections.values()
+        for task in sections["Moved to this week"]
+    ]
+
+    if carryover:
+        lines.extend(["", "Not completed last week"])
+        lines.extend(carryover)
+    if moved:
+        lines.extend(["", "Moved to this week"])
+        lines.extend(moved)
+    return lines or ["- None"]

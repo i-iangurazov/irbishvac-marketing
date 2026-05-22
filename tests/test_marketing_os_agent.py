@@ -121,6 +121,7 @@ def task(
     name: str = "Task",
     owner_name: str = "Emil",
     deadline: date | None = date(2026, 5, 15),
+    original_deadline: date | None = None,
     deliverable_link: str = "",
     notes: str = "",
     needs: str = "",
@@ -132,7 +133,7 @@ def task(
         name=name,
         owner=owner(owner_name),
         deadline=deadline,
-        original_deadline=deadline,
+        original_deadline=deadline if original_deadline is None else original_deadline,
         status=status,
         priority="High",
         department="Marketing",
@@ -386,6 +387,8 @@ class MarketingOsAgentTests(unittest.TestCase):
                 task("r3", "Blocked", deadline=date(2026, 5, 16), needs="Emil"),
                 task("r4", "Canceled", deadline=date(2026, 5, 15)),
                 task("r5", "Not Started", deadline=date(2026, 5, 18)),
+                task("r6", "In Progress", deadline=date(2026, 5, 15)),
+                task("r7", "Needs Review", deadline=date(2026, 5, 8)),
             ],
             week_start,
             week_end,
@@ -395,6 +398,7 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(len(sections["Completed"]), 1)
         self.assertEqual(len(sections["Delayed, with new deadline and reason"]), 1)
         self.assertEqual(len(sections["Blocked"]), 1)
+        self.assertEqual(len(sections["Not completed, needs rollover"]), 3)
         self.assertEqual(len(sections["Canceled"]), 1)
         self.assertEqual(len(sections["Coming next week"]), 1)
 
@@ -404,11 +408,18 @@ class MarketingOsAgentTests(unittest.TestCase):
                 task("m1", "Not Started", owner_name="Emil", deadline=date(2026, 5, 11)),
                 task("m2", "In Progress", owner_name="Vadim", deadline=date(2026, 5, 12)),
                 task("m3", "Completed", owner_name="Emil", deadline=date(2026, 5, 13)),
+                task("m4", "In Progress", owner_name="Emil", deadline=date(2026, 5, 8)),
+                task("m5", "Not Started", owner_name="Emil", deadline=date(2026, 5, 14), original_deadline=date(2026, 5, 8)),
             ],
             datetime(2026, 5, 11, 8, tzinfo=timezone.utc),
         )
         self.assertEqual(set(grouped), {"Emil", "Vadim"})
+        self.assertEqual(len(grouped["Emil"]), 3)
         self.assertEqual(len(self.h.slack.dms), 2)
+        channel_text = "\n".join(message[1] for message in self.h.slack.messages)
+        self.assertIn("Not completed last week", channel_text)
+        self.assertIn("Moved to this week", channel_text)
+        self.assertIn("original due 2026-05-08", channel_text)
 
     def test_monthly_kickoff_selects_campaigns_starting_in_month(self) -> None:
         start, end = month_bounds(date(2026, 6, 1))

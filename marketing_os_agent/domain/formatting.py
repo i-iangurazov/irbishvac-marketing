@@ -77,17 +77,20 @@ def format_friday_roundup_email(
         "Completed",
         "Delayed, with new deadline and reason",
         "Blocked",
+        "Not completed, needs rollover",
         "Canceled",
         "Coming next week",
     ]
     counts = {name: len(sections.get(name, [])) for name in section_order}
-    summary = (
-        f"Completed: {counts['Completed']} | "
-        f"Delayed: {counts['Delayed, with new deadline and reason']} | "
-        f"Blocked: {counts['Blocked']} | "
-        f"Canceled: {counts['Canceled']} | "
-        f"Coming next week: {counts['Coming next week']}"
-    )
+    labels = {
+        "Completed": "Completed",
+        "Delayed, with new deadline and reason": "Delayed",
+        "Blocked": "Blocked",
+        "Not completed, needs rollover": "Needs rollover",
+        "Canceled": "Canceled",
+        "Coming next week": "Coming next week",
+    }
+    summary = " | ".join(f"{labels[name]}: {counts[name]}" for name in section_order)
 
     text_lines = []
     if preview:

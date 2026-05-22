@@ -48,6 +48,16 @@ Also update:
 
 A second delay on the same task is escalated to Tim.
 
+## Monday Update
+
+The Monday update comes from Notion task data. It includes:
+
+- Open tasks due this week
+- Tasks not completed last week
+- Tasks moved to this week
+
+Each owner receives a Slack DM with their tasks. `#marketing-ops` receives the team summary so everyone can see carry-over work.
+
 ## When a Task Is Blocked
 
 Set Status to `Blocked`.
@@ -66,8 +76,8 @@ The Friday roundup comes from Notion task and campaign data. It includes:
 - Completed
 - Delayed
 - Blocked
+- Not completed, needs rollover
 - Canceled
 - Coming next week
 
 Keep Notion current before Friday afternoon.
-

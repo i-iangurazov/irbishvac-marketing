@@ -27,12 +27,12 @@ Expected daily automation:
 
 Monday 8 AM:
 
-- Each owner receives a DM with open tasks due that week.
-- `#marketing-ops` receives a summary by owner.
+- Each owner receives a DM with open tasks due that week, tasks not completed last week, and tasks moved into the week.
+- `#marketing-ops` receives a summary by owner plus carry-over and moved-task details.
 
 Friday 4 PM:
 
-- `#marketing-ops` receives the Friday roundup.
+- `#marketing-ops` receives the Friday roundup, including not-completed tasks that need rollover.
 - Tim and Vadim receive the same roundup by email.
 
 Emil reviews the Friday roundup for marketing output and follow-up.
@@ -104,4 +104,3 @@ Manual catch-up after downtime:
 python3 -m marketing_os_agent poll-once
 python3 -m marketing_os_agent campaign-health-scan
 ```
-

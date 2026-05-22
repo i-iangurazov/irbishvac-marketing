@@ -129,8 +129,8 @@ The importer needs Emil’s real campaign data. It does not invent campaign entr
 - Comments back on the Notion task for verification gaps.
 - Flags `Needs Verification` when the configured checkbox exists.
 - DMs Tim only for double-delay, repeated verification flags, campaign budget overrun, campaign progress risk, or unreachable owners.
-- Sends Monday owner DMs and a channel summary at Monday 8 AM.
-- Sends Friday roundup to Slack and email at Friday 4 PM.
+- Sends Monday owner DMs and a channel summary at Monday 8 AM, including due-this-week, carry-over, and moved-to-this-week tasks.
+- Sends Friday roundup to Slack and email at Friday 4 PM, including not-completed tasks that need rollover.
 - Sends monthly and quarterly campaign kickoff briefings at 9 AM on the first day.
 - Runs daily campaign health scan at 7 AM.
 
