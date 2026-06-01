@@ -42,6 +42,7 @@ NOTION_TASK_NOTES_PROPERTY=
 NOTION_TASK_NEEDS_FROM_OTHERS_PROPERTY=
 NOTION_TASK_CREATED_PROPERTY=
 NOTION_TASK_LAST_EDITED_PROPERTY=
+NOTION_TASK_LAST_REMINDER_SENT_PROPERTY=
 ```
 
 For the Marketing Calendar screen shown in the current workspace, these names already match the app defaults:
@@ -85,6 +86,7 @@ When optional fields are missing, validation shows warnings instead of blocking 
 - no `Notes / Issues` property means delayed/blocker reason checks cannot read a reason
 - no `Linked Tasks` relation means campaign progress risk cannot calculate completion from linked tasks
 - no `Needs Verification` checkbox means flags are logged/commented but not stored as a Notion checkbox
+- no `Last Reminder Sent At` date property means reminder duplicate prevention still works from SQLite, but sent reminder state is not visible in Notion
 
 ## Tasks Database Schema
 
@@ -93,7 +95,7 @@ Required properties:
 | Property | Type | Requirement |
 | --- | --- | --- |
 | Task name | Title | Required |
-| Owner | Person | Required, one person only |
+| Owner | Person | Required, one person only; email is used for automatic Slack reminder lookup when Notion exposes it |
 | Deadline | Date | Required |
 | Original Deadline | Date | Service sets from Deadline when missing |
 | Status | Select | Required |
@@ -106,6 +108,7 @@ Required properties:
 | Created | Created time | Required |
 | Last Edited | Last edited time | Required |
 | Needs Verification | Checkbox | Recommended service-managed flag |
+| Last Reminder Sent At | Date | Optional service-managed reminder audit field |
 
 Status options:
 

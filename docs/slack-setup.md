@@ -22,7 +22,7 @@ Recommended bot scopes:
 - `chat:write`
 - `im:write`
 - `users:read`
-- `users:read.email` if owner mapping by email is needed
+- `users:read.email` for automatic deadline-reminder recipient lookup by Notion owner email
 - `channels:read`
 - `groups:read` if private channels are used
 
@@ -46,9 +46,20 @@ Slack request signatures are verified with `SLACK_SIGNING_SECRET`.
 
 The current automation does not depend on Slack Workflow Builder. Notion status-change automation is handled by polling, because Notion native webhook availability varies by workspace/API setup.
 
-## Owner Mapping
+## Reminder Recipient Lookup
 
-The service must be able to map Notion owners to Slack users for Monday DMs and escalation routing.
+Deadline reminders do not require every employee to be listed in environment variables. The normal path is:
+
+1. Read the Notion task Owner person.
+2. Use the Owner email from Notion.
+3. Call Slack `users.lookupByEmail`.
+4. Open a DM and send the reminder.
+
+This requires Notion to expose the owner email in the people property and the Slack app to have `users:read.email`.
+
+## Owner Mapping Fallback
+
+Use `OWNER_SLACK_MAP_JSON` only for exceptions where Notion has no email, Slack lookup by email fails, or a non-reminder workflow still needs explicit routing.
 
 Use `OWNER_SLACK_MAP_JSON`:
 
@@ -63,6 +74,8 @@ Keys can be:
 - Notion email
 
 Values must be Slack user IDs.
+
+Deadline reminders try Slack email lookup first even when a fallback mapping exists. Successful email lookups are cached in SQLite. If email lookup fails, the service tries `OWNER_SLACK_MAP_JSON`; if both fail, it logs `task_reminder_skipped_unmapped_owner` and skips the reminder without crashing.
 
 If the agent cannot reach an owner, it DMs Tim when `SLACK_TIM_USER_ID` is configured.
 
@@ -81,4 +94,3 @@ Rules for the team:
 - Link files from Google Drive or Notion.
 - Put final task state and important decisions in Notion.
 - Use Slack for notifications and lightweight verification only.
-

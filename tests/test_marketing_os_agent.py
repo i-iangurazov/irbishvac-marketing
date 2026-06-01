@@ -35,6 +35,8 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         sqlite_path=sqlite_path,
         poll_interval_seconds=120,
         poll_overlap_seconds=3600,
+        task_reminder_minutes_before=60,
+        task_date_only_deadline_hour=17,
         anthropic_api_key="",
         claude_model="claude-test",
         notion_api_key="notion",
@@ -47,6 +49,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         notion_workbooks_database_id="workbooks-db",
         notion_workbooks_data_source_id="workbooks-source",
         notion_needs_verification_property="Needs Verification",
+        notion_task_last_reminder_sent_property="",
         notion_child_tasks_property="Child Tasks",
         notion_dependencies_property="Dependencies",
         notion_task_name_property="Task name",
@@ -119,9 +122,11 @@ def task(
     status: str,
     *,
     name: str = "Task",
-    owner_name: str = "Emil",
+    owner_name: str | None = "Emil",
     deadline: date | None = date(2026, 5, 15),
     original_deadline: date | None = None,
+    deadline_at: datetime | None = None,
+    last_reminder_sent_at: datetime | None = None,
     deliverable_link: str = "",
     notes: str = "",
     needs: str = "",
@@ -131,7 +136,7 @@ def task(
     return Task(
         id=task_id,
         name=name,
-        owner=owner(owner_name),
+        owner=owner(owner_name) if owner_name else None,
         deadline=deadline,
         original_deadline=deadline if original_deadline is None else original_deadline,
         status=status,
@@ -144,6 +149,8 @@ def task(
         created_time=datetime(2026, 5, 1, tzinfo=timezone.utc),
         last_edited_time=edited or datetime(2026, 5, 14, 12, tzinfo=timezone.utc),
         url=f"https://notion.so/{task_id}",
+        deadline_at=deadline_at,
+        last_reminder_sent_at=last_reminder_sent_at,
     )
 
 
@@ -183,6 +190,7 @@ class FakeNotion:
         self.tasks: list[Task] = []
         self.campaigns: list[Campaign] = []
         self.original_deadlines: list[str] = []
+        self.last_reminders: list[tuple[str, datetime]] = []
 
     def add_task_comment(self, task: Task, text: str, mention_owner: bool = False) -> None:
         self.comments.append((task.id, text, mention_owner))
@@ -192,6 +200,9 @@ class FakeNotion:
 
     def set_original_deadline_if_missing(self, task: Task) -> None:
         self.original_deadlines.append(task.id)
+
+    def set_last_reminder_sent_at(self, task_id: str, sent_at: datetime) -> None:
+        self.last_reminders.append((task_id, sent_at))
 
     def query_all_campaigns(self) -> list[Campaign]:
         return self.campaigns
@@ -235,6 +246,8 @@ class FakeSlack:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str, str | None]] = []
         self.dms: list[tuple[str, str]] = []
+        self.email_lookup: dict[str, str] = {}
+        self.email_lookup_calls: list[str] = []
         self.counter = 0
 
     def post_message(self, channel: str, text: str, blocks: object | None = None, thread_ts: str | None = None) -> str:
@@ -249,10 +262,20 @@ class FakeSlack:
         self.dms.append((user_id, text))
         return f"dm-{len(self.dms)}"
 
+    def lookup_user_by_email(self, email: str) -> str | None:
+        self.email_lookup_calls.append(email)
+        return self.email_lookup.get(email)
+
 
 class FailingSlack(FakeSlack):
     def post_message(self, channel: str, text: str, blocks: object | None = None, thread_ts: str | None = None) -> str | None:
         self.messages.append((channel, text, thread_ts))
+        return None
+
+
+class FailingDMSlack(FakeSlack):
+    def dm_user(self, user_id: str, text: str) -> str | None:
+        self.dms.append((user_id, text))
         return None
 
 
@@ -441,6 +464,114 @@ class MarketingOsAgentTests(unittest.TestCase):
         status_posts = [message for message in self.h.slack.messages if "Task:" in message[1]]
         self.assertEqual(len(status_posts), 1)
 
+    def test_deadline_reminder_sends_dm_within_one_hour_once(self) -> None:
+        item = task(
+            "reminder-1",
+            "In Progress",
+            name="Finish landing page",
+            deadline=date(2026, 5, 15),
+            deadline_at=datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
+        )
+        self.h.slack.email_lookup["emil@example.com"] = "UEMAIL"
+        now = datetime(2026, 5, 15, 14, 5, tzinfo=timezone.utc)
+        self.assertEqual(self.h.processor.process_deadline_reminders([item], now=now), 1)
+        self.assertEqual(len(self.h.slack.dms), 1)
+        self.assertEqual(self.h.slack.email_lookup_calls, ["emil@example.com"])
+        self.assertEqual(self.h.slack.dms[0][0], "UEMAIL")
+        self.assertIn("Finish landing page", self.h.slack.dms[0][1])
+        self.assertEqual(len(self.h.notion.last_reminders), 1)
+
+        self.assertEqual(self.h.processor.process_deadline_reminders([item], now=now), 0)
+        self.assertEqual(len(self.h.slack.dms), 1)
+
+    def test_deadline_reminder_waits_until_one_hour_window(self) -> None:
+        item = task(
+            "reminder-early",
+            "In Progress",
+            deadline=date(2026, 5, 15),
+            deadline_at=datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
+        )
+        now = datetime(2026, 5, 15, 13, 59, tzinfo=timezone.utc)
+        self.assertEqual(self.h.processor.process_deadline_reminders([item], now=now), 0)
+        self.assertEqual(self.h.slack.dms, [])
+
+    def test_deadline_reminder_skips_completed_missing_owner_and_missing_deadline(self) -> None:
+        now = datetime(2026, 5, 15, 14, 5, tzinfo=timezone.utc)
+        tasks = [
+            task("reminder-done", "Completed", deadline_at=datetime(2026, 5, 15, 15, tzinfo=timezone.utc)),
+            task("reminder-no-owner", "In Progress", owner_name=None, deadline_at=datetime(2026, 5, 15, 15, tzinfo=timezone.utc)),
+            task("reminder-no-deadline", "In Progress", deadline=None),
+        ]
+        self.assertEqual(self.h.processor.process_deadline_reminders(tasks, now=now), 0)
+        self.assertEqual(self.h.slack.dms, [])
+
+    def test_deadline_reminder_logs_unmapped_owner_without_crashing(self) -> None:
+        item = task(
+            "reminder-unmapped",
+            "In Progress",
+            owner_name="NoMap",
+            deadline_at=datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
+        )
+        now = datetime(2026, 5, 15, 14, 5, tzinfo=timezone.utc)
+        self.assertEqual(self.h.processor.process_deadline_reminders([item], now=now), 0)
+        self.assertEqual(self.h.slack.dms, [])
+
+    def test_deadline_reminder_can_resolve_slack_user_by_email(self) -> None:
+        item = task(
+            "reminder-email",
+            "In Progress",
+            owner_name="Unmapped",
+            deadline_at=datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
+        )
+        self.h.slack.email_lookup["unmapped@example.com"] = "UEMAIL"
+        now = datetime(2026, 5, 15, 14, 5, tzinfo=timezone.utc)
+        self.assertEqual(self.h.processor.process_deadline_reminders([item], now=now), 1)
+        self.assertEqual(self.h.slack.dms[0][0], "UEMAIL")
+
+    def test_deadline_reminder_falls_back_to_owner_mapping_after_email_lookup_fails(self) -> None:
+        item = task(
+            "reminder-fallback",
+            "In Progress",
+            owner_name="Emil",
+            deadline_at=datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
+        )
+        now = datetime(2026, 5, 15, 14, 5, tzinfo=timezone.utc)
+        self.assertEqual(self.h.processor.process_deadline_reminders([item], now=now), 1)
+        self.assertEqual(self.h.slack.email_lookup_calls, ["emil@example.com"])
+        self.assertEqual(self.h.slack.dms[0][0], "UEMIL")
+
+    def test_deadline_reminder_slack_failure_does_not_record_duplicate_state(self) -> None:
+        item = task(
+            "reminder-fail",
+            "In Progress",
+            deadline_at=datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
+        )
+        now = datetime(2026, 5, 15, 14, 5, tzinfo=timezone.utc)
+        self.h.slack = FailingDMSlack()
+        self.h.processor.slack = self.h.slack
+        self.assertEqual(self.h.processor.process_deadline_reminders([item], now=now), 0)
+
+        self.h.slack = FakeSlack()
+        self.h.processor.slack = self.h.slack
+        self.assertEqual(self.h.processor.process_deadline_reminders([item], now=now), 1)
+        self.assertEqual(len(self.h.slack.dms), 1)
+
+    def test_date_only_deadline_uses_configured_local_hour(self) -> None:
+        item = task("reminder-date-only", "In Progress", deadline=date(2026, 5, 15), deadline_at=None)
+        now = datetime(2026, 5, 15, 16, 0, tzinfo=timezone.utc)
+        self.assertEqual(self.h.processor.process_deadline_reminders([item], now=now), 1)
+
+    def test_notion_reminder_property_suppresses_duplicate_after_state_loss(self) -> None:
+        item = task(
+            "reminder-notion-state",
+            "In Progress",
+            deadline_at=datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
+            last_reminder_sent_at=datetime(2026, 5, 15, 14, 1, tzinfo=timezone.utc),
+        )
+        now = datetime(2026, 5, 15, 14, 30, tzinfo=timezone.utc)
+        self.assertEqual(self.h.processor.process_deadline_reminders([item], now=now), 0)
+        self.assertEqual(self.h.slack.dms, [])
+
     def test_missing_external_credentials_fail_safely(self) -> None:
         missing = settings(
             str(Path(self.h.tmp.name) / "missing.sqlite3"),
@@ -456,6 +587,14 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertIsNone(SlackClient(missing).post_message("COPS", "hello"))
         self.assertIsNone(ClaudeClient(missing).complete("system", "user"))
         self.assertEqual(ClaudeClient(missing).list_models(), [])
+
+    def test_slack_lookup_user_by_email_uses_web_api_lookup(self) -> None:
+        client = SlackClient(
+            self.h.settings,
+            FakeHttp([HttpResponse(200, {"ok": True, "user": {"id": "UEMAIL"}}, {})]),
+        )
+        self.assertEqual(client.lookup_user_by_email("emil@example.com"), "UEMAIL")
+        self.assertIn("/users.lookupByEmail?email=emil%40example.com", client.http.calls[0])
 
     def test_claude_model_listing_returns_available_ids(self) -> None:
         client = ClaudeClient(
@@ -558,6 +697,34 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(parsed.status, "In Progress")
         self.assertEqual(parsed.priority, "Critical")
         self.assertEqual(parsed.department, "SEO")
+        self.assertIsNone(parsed.deadline_at)
+
+    def test_parses_task_deadline_time_and_optional_reminder_state(self) -> None:
+        reminder_settings = settings(
+            str(Path(self.h.tmp.name) / "reminder-parse.sqlite3"),
+            notion_task_last_reminder_sent_property="Last Reminder Sent At",
+        )
+        client = NotionClient(reminder_settings)
+        page = {
+            "id": "timed-task",
+            "url": "https://notion.so/timed-task",
+            "created_time": "2026-05-01T00:00:00Z",
+            "last_edited_time": "2026-05-15T00:00:00Z",
+            "properties": {
+                "Task name": {"type": "title", "title": [{"plain_text": "Timed task"}]},
+                "Owner": {
+                    "type": "people",
+                    "people": [{"id": "owner-1", "name": "Emil", "person": {"email": "emil@example.com"}}],
+                },
+                "Deadline": {"type": "date", "date": {"start": "2026-05-15T15:00:00+00:00"}},
+                "Status": {"type": "status", "status": {"name": "In progress"}},
+                "Last Reminder Sent At": {"type": "date", "date": {"start": "2026-05-15T14:05:00+00:00"}},
+            },
+        }
+        parsed = client.parse_task(page)
+        self.assertEqual(parsed.deadline, date(2026, 5, 15))
+        self.assertEqual(parsed.deadline_at, datetime(2026, 5, 15, 15, tzinfo=timezone.utc))
+        self.assertEqual(parsed.last_reminder_sent_at, datetime(2026, 5, 15, 14, 5, tzinfo=timezone.utc))
 
     def test_validation_accepts_existing_fixed_database_schema_with_optional_warnings(self) -> None:
         fixed_settings = settings(

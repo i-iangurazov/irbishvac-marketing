@@ -20,6 +20,7 @@ sudo journalctl -u marketing-os-agent -f
 Expected daily automation:
 
 - Notion polling every `NOTION_POLL_INTERVAL_SECONDS`.
+- Personal Slack DM reminders for open assigned tasks inside the configured reminder window, default 1 hour before deadline.
 - Daily campaign health scan at 7 AM.
 - Status changes to Completed, Delayed, Blocked, and Canceled posted to `#marketing-ops`.
 
@@ -96,7 +97,8 @@ SQLite failures:
 Duplicate posts:
 
 - The service stores status transition dedupe keys in SQLite.
-- If a duplicate is suppressed, logs include `duplicate_status_transition_suppressed`.
+- The service stores task reminder keys in SQLite, keyed by task, reminder window, and deadline time.
+- If a duplicate is suppressed, logs include `duplicate_status_transition_suppressed` or `duplicate_task_reminder_suppressed`.
 
 Manual catch-up after downtime:
 

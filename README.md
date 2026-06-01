@@ -46,16 +46,22 @@ Required for full production operation:
 - Optional but recommended for current Notion API: `NOTION_TASKS_DATA_SOURCE_ID`, `NOTION_MARKETING_CALENDAR_DATA_SOURCE_ID`, `NOTION_WORKBOOKS_DATA_SOURCE_ID`
 - `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_MARKETING_OPS_CHANNEL_ID`, `SLACK_TIM_USER_ID`
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM`, `TIM_EMAIL`, `VADIM_EMAIL`
-- `OWNER_SLACK_MAP_JSON` for Notion owner to Slack user routing
+- `OWNER_SLACK_MAP_JSON` only for fallback Slack routing exceptions; deadline reminders normally resolve users from Notion owner email via Slack lookup.
 
 Defaults:
 
 - `TIMEZONE=America/Los_Angeles`
 - `NOTION_API_VERSION=2026-03-11`
 - `NOTION_POLL_INTERVAL_SECONDS=120`
+- `TASK_REMINDER_MINUTES_BEFORE=60`
+- `TASK_DATE_ONLY_DEADLINE_HOUR=17`, used in `TIMEZONE` when a Notion deadline has a date but no time.
 - `BUDGET_OVERRUN_THRESHOLD_PERCENT=0`, which flags any actual spend at or over plan.
 - `CAMPAIGN_RISK_WINDOW_PERCENT=80`
 - `CAMPAIGN_RISK_TASK_COMPLETION_PERCENT=20`
+
+Optional reminder state mirror:
+
+- `NOTION_TASK_LAST_REMINDER_SENT_PROPERTY`, for example `Last Reminder Sent At`, can point to a Notion Date property. SQLite remains the required duplicate-prevention store; this Notion field gives visible state and prevents duplicate reminders if local state is rebuilt or lost.
 
 If email or external credentials are missing, the service logs clear warnings and skips only the affected external action.
 
@@ -129,6 +135,7 @@ The importer needs Emil’s real campaign data. It does not invent campaign entr
 - Comments back on the Notion task for verification gaps.
 - Flags `Needs Verification` when the configured checkbox exists.
 - DMs Tim only for double-delay, repeated verification flags, campaign budget overrun, campaign progress risk, or unreachable owners.
+- DMs task assignees once when an open assigned task is inside the configured deadline reminder window, default 1 hour before due time.
 - Sends Monday owner DMs and a channel summary at Monday 8 AM, including due-this-week, carry-over, and moved-to-this-week tasks.
 - Sends Friday roundup to Slack and email at Friday 4 PM, including not-completed tasks that need rollover.
 - Sends monthly and quarterly campaign kickoff briefings at 9 AM on the first day.
@@ -158,6 +165,16 @@ The importer needs Emil’s real campaign data. It does not invent campaign entr
    - Slack receives a task update in `SLACK_MARKETING_OPS_CHANNEL_ID`
 
 Polling limitation: the Notion API returns the current page state, not every intermediate status edit. If a task is changed `Done -> In progress -> Done` between two polls, the service may only see `Done` before and after and cannot infer the hidden intermediate change. For toggle testing, set `NOTION_POLL_INTERVAL_SECONDS=10` and wait for one poll after each status change.
+
+Deadline reminder checklist:
+
+1. Create or choose an open task whose Notion Owner has an email matching a Slack user, Deadline more than 1 hour away, then run `poll-once`; no DM should be sent.
+2. Set Deadline within the next hour, including a time if possible, then run `poll-once`; the owner should receive one Slack DM.
+3. Run `poll-once` again with the same deadline; no duplicate DM should be sent.
+4. Mark the task Completed or Canceled; no reminder should be sent.
+5. Remove the owner; no reminder should be sent.
+6. Use an owner without a Notion email, Slack email lookup result, or fallback mapping; logs should show `task_reminder_skipped_unmapped_owner` and polling should continue.
+7. Temporarily break Slack credentials in a non-production environment; logs should show a Slack failure and polling should continue.
 
 Run scheduled jobs manually:
 

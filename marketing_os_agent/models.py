@@ -59,6 +59,8 @@ class Task:
     url: str = ""
     child_task_ids: list[str] = field(default_factory=list)
     dependency_task_ids: list[str] = field(default_factory=list)
+    deadline_at: datetime | None = None
+    last_reminder_sent_at: datetime | None = None
 
     @property
     def owner_name(self) -> str:
@@ -140,4 +142,3 @@ class ValidationReport:
         for warning in self.warnings:
             lines.append(f"WARNING: {warning}")
         return "\n".join(lines)
-

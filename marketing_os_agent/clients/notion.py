@@ -298,6 +298,25 @@ class NotionClient:
                 extra={"task_id": task_id, "property": property_name},
             )
 
+    def set_last_reminder_sent_at(self, task_id: str, sent_at: datetime) -> None:
+        property_name = self.settings.notion_task_last_reminder_sent_property
+        if not property_name:
+            return
+        try:
+            sent_at_utc = sent_at.astimezone(timezone.utc).replace(microsecond=0)
+            self.update_page_properties(task_id, {property_name: {"date": {"start": sent_at_utc.isoformat()}}})
+        except NotionApiError as exc:
+            logger.warning(
+                "notion_last_reminder_update_failed",
+                extra={"task_id": task_id, "property": property_name, "status": exc.status, "code": exc.code, "notion_message": exc.message},
+            )
+        except Exception:
+            logger.warning(
+                "notion_last_reminder_update_failed",
+                exc_info=True,
+                extra={"task_id": task_id, "property": property_name},
+            )
+
     def update_page_properties(self, page_id: str, properties: dict[str, Any]) -> None:
         self._request("PATCH", f"/pages/{page_id}", {"properties": properties})
 
@@ -321,11 +340,13 @@ class NotionClient:
             _select_name(_prop(props, self.settings.notion_task_priority_property, [])),
             self.settings.task_priority_map,
         )
+        deadline_prop = _prop(props, self.settings.notion_task_deadline_property, ["Due date", "Due Date"])
+        deadline_start = _date_start(deadline_prop)
         return Task(
             id=page["id"],
             name=_title(_prop(props, self.settings.notion_task_name_property, ["Name"])),
             owner=owner,
-            deadline=parse_notion_date(_date_start(_prop(props, self.settings.notion_task_deadline_property, ["Due date", "Due Date"]))),
+            deadline=parse_notion_date(deadline_start),
             original_deadline=parse_notion_date(_date_start(_prop(props, self.settings.notion_task_original_deadline_property, []))),
             status=status,
             priority=priority,
@@ -339,6 +360,10 @@ class NotionClient:
             url=page.get("url", ""),
             child_task_ids=_relation_ids(props.get(self.settings.notion_child_tasks_property)),
             dependency_task_ids=_relation_ids(props.get(self.settings.notion_dependencies_property)),
+            deadline_at=_date_start_datetime(deadline_start),
+            last_reminder_sent_at=_date_start_datetime(
+                _date_start(_prop(props, self.settings.notion_task_last_reminder_sent_property, []))
+            ),
         )
 
     def parse_campaign(self, page: dict[str, Any]) -> Campaign:
@@ -374,6 +399,7 @@ class NotionClient:
             PropertySpec("priority", self.settings.notion_task_priority_property, ("select", "status"), False, ()),
             PropertySpec("department/category", self.settings.notion_task_department_property, ("select", "multi_select", "rich_text"), False, ("Type",)),
             PropertySpec("original deadline", self.settings.notion_task_original_deadline_property, ("date",), False, ()),
+            PropertySpec("last reminder sent", self.settings.notion_task_last_reminder_sent_property, ("date",), False, ()),
             PropertySpec("linked campaign", self.settings.notion_task_campaign_property, ("relation",), False, ()),
             PropertySpec("deliverable link", self.settings.notion_task_deliverable_property, ("url", "files", "rich_text"), False, ("Deliverable", "Link")),
             PropertySpec("notes/issues", self.settings.notion_task_notes_property, ("rich_text",), False, ("Notes", "Issues", "Comments")),
@@ -560,6 +586,12 @@ def _select_or_multi_select_names(prop: dict[str, Any] | None) -> list[str]:
 def _date_start(prop: dict[str, Any] | None) -> str | None:
     date_obj = (prop or {}).get("date")
     return date_obj.get("start") if date_obj else None
+
+
+def _date_start_datetime(value: str | None) -> datetime | None:
+    if not value or "T" not in value:
+        return None
+    return parse_notion_datetime(value)
 
 
 def _url(prop: dict[str, Any] | None) -> str:

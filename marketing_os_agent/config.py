@@ -76,6 +76,8 @@ class Settings:
     sqlite_path: str
     poll_interval_seconds: int
     poll_overlap_seconds: int
+    task_reminder_minutes_before: int
+    task_date_only_deadline_hour: int
 
     anthropic_api_key: str
     claude_model: str
@@ -90,6 +92,7 @@ class Settings:
     notion_workbooks_database_id: str
     notion_workbooks_data_source_id: str
     notion_needs_verification_property: str
+    notion_task_last_reminder_sent_property: str
     notion_child_tasks_property: str
     notion_dependencies_property: str
     notion_task_name_property: str
@@ -160,6 +163,8 @@ class Settings:
             sqlite_path=sqlite_path,
             poll_interval_seconds=_int_env("NOTION_POLL_INTERVAL_SECONDS", 120),
             poll_overlap_seconds=_int_env("NOTION_POLL_OVERLAP_SECONDS", 3600),
+            task_reminder_minutes_before=_int_env("TASK_REMINDER_MINUTES_BEFORE", 60),
+            task_date_only_deadline_hour=_int_env("TASK_DATE_ONLY_DEADLINE_HOUR", 17),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
             claude_model=_env("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
             notion_api_key=_env("NOTION_API_KEY"),
@@ -172,6 +177,7 @@ class Settings:
             notion_workbooks_database_id=_env("NOTION_WORKBOOKS_DATABASE_ID"),
             notion_workbooks_data_source_id=_env("NOTION_WORKBOOKS_DATA_SOURCE_ID"),
             notion_needs_verification_property=_env("NOTION_NEEDS_VERIFICATION_PROPERTY", "Needs Verification"),
+            notion_task_last_reminder_sent_property=_env("NOTION_TASK_LAST_REMINDER_SENT_PROPERTY"),
             notion_child_tasks_property=_env("NOTION_CHILD_TASKS_PROPERTY", "Child Tasks"),
             notion_dependencies_property=_env("NOTION_DEPENDENCIES_PROPERTY", "Dependencies"),
             notion_task_name_property=_env("NOTION_TASK_NAME_PROPERTY", "Task name"),

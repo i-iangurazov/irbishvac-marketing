@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import logging
 import time
+from urllib.parse import urlencode
 from typing import Any
 
 from ..config import Settings
@@ -44,6 +45,21 @@ class SlackClient:
             return None
         return response.data
 
+    def _api_get(self, method: str, params: dict[str, Any]) -> dict[str, Any] | None:
+        if not self.available:
+            logger.warning("slack_credentials_missing", extra={"method": method})
+            return None
+        try:
+            query = urlencode({key: value for key, value in params.items() if value is not None})
+            response = self.http.request_json("GET", f"{self.base_url}/{method}?{query}", headers=self._headers())
+        except Exception:
+            logger.exception("slack_api_failure", extra={"method": method})
+            return None
+        if not response.data.get("ok"):
+            logger.warning("slack_api_error", extra={"method": method, "response": response.data})
+            return None
+        return response.data
+
     def post_message(self, channel: str, text: str, blocks: list[dict[str, Any]] | None = None, thread_ts: str | None = None) -> str | None:
         if not channel:
             logger.warning("slack_channel_missing", extra={"text": text[:120]})
@@ -72,6 +88,17 @@ class SlackClient:
             logger.warning("slack_dm_open_failed", extra={"user_id": user_id})
             return None
         return self.post_message(channel, text)
+
+    def lookup_user_by_email(self, email: str) -> str | None:
+        if not email:
+            return None
+        response = self._api_get("users.lookupByEmail", {"email": email})
+        user_id = ((response or {}).get("user") or {}).get("id")
+        if user_id:
+            logger.info("slack_user_lookup_by_email_succeeded", extra={"email": email, "slack_user_id": user_id})
+            return str(user_id)
+        logger.warning("slack_user_lookup_by_email_failed", extra={"email": email})
+        return None
 
     def verify_signature(self, timestamp: str, body: bytes, signature: str) -> bool:
         if not self.settings.slack_signing_secret:

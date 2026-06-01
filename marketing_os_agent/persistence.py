@@ -65,6 +65,16 @@ class Persistence:
                     PRIMARY KEY (task_id, status, ts)
                 );
 
+                CREATE TABLE IF NOT EXISTS task_reminders (
+                    reminder_key TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    reminder_type TEXT NOT NULL,
+                    owner_notion_user_id TEXT NOT NULL DEFAULT '',
+                    slack_user_id TEXT NOT NULL DEFAULT '',
+                    deadline_at TEXT NOT NULL,
+                    sent_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS owner_mappings (
                     mapping_key TEXT PRIMARY KEY,
                     owner_name TEXT NOT NULL,
@@ -238,6 +248,37 @@ class Persistence:
                 """
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def has_task_reminder(self, reminder_key: str) -> bool:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM task_reminders WHERE reminder_key = ?", (reminder_key,)).fetchone()
+            return row is not None
+
+    def record_task_reminder_sent(
+        self,
+        *,
+        reminder_key: str,
+        task_id: str,
+        reminder_type: str,
+        owner_notion_user_id: str,
+        slack_user_id: str,
+        deadline_at: str,
+        sent_at: str,
+    ) -> bool:
+        with self._lock, self._connect() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO task_reminders (
+                        reminder_key, task_id, reminder_type, owner_notion_user_id,
+                        slack_user_id, deadline_at, sent_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (reminder_key, task_id, reminder_type, owner_notion_user_id, slack_user_id, deadline_at, sent_at),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
 
     def get_status_transition_counts(self) -> list[dict[str, Any]]:
         with self._lock, self._connect() as conn:

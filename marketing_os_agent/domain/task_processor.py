@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from ..clients.claude import ClaudeClient
 from ..clients.notion import NotionApiError, NotionClient, last_edited_or_now
@@ -12,6 +12,7 @@ from ..persistence import Persistence
 from .campaign_health import CampaignHealthService
 from .formatting import status_update_text, task_status_blocks
 from .owner_mapping import OwnerResolver
+from .reminders import REMINDER_TYPE_1H, reminder_decision, reminder_message
 
 
 logger = logging.getLogger(__name__)
@@ -51,21 +52,23 @@ class TaskProcessor:
             if self.db.get_kv("notion_tasks_baseline_initialized") != "true" or self.db.count_task_states() == 0:
                 tasks = self.notion.query_all_tasks()
                 self.process_tasks(tasks, emit_transitions=False)
+                reminders_sent = self._process_deadline_reminders_safely(tasks)
                 max_last_edited = max((last_edited_or_now(task) for task in tasks), default=None)
                 if max_last_edited:
                     self.db.set_kv("notion_tasks_last_processed", max_last_edited)
                 self.db.set_kv("notion_tasks_baseline_initialized", "true")
-                self.db.log_run_complete(run_id, "baseline_initialized", {"tasks_seen": len(tasks)})
-                logger.info("notion_poll_baseline_initialized", extra={"tasks_seen": len(tasks)})
+                self.db.log_run_complete(run_id, "baseline_initialized", {"tasks_seen": len(tasks), "reminders_sent": reminders_sent})
+                logger.info("notion_poll_baseline_initialized", extra={"tasks_seen": len(tasks), "reminders_sent": reminders_sent})
                 return 0
             since = self._poll_since_with_overlap(self.db.get_kv("notion_tasks_last_processed"))
             tasks = self.notion.query_tasks_modified_since(since)
             processed = self.process_tasks(tasks)
+            reminders_sent = self._process_deadline_reminders_safely()
             max_last_edited = max((last_edited_or_now(task) for task in tasks), default=since)
             if max_last_edited:
                 self.db.set_kv("notion_tasks_last_processed", max_last_edited)
-            self.db.log_run_complete(run_id, "completed", {"tasks_seen": len(tasks), "transitions": processed})
-            logger.info("notion_poll_completed", extra={"tasks_seen": len(tasks), "transitions": processed})
+            self.db.log_run_complete(run_id, "completed", {"tasks_seen": len(tasks), "transitions": processed, "reminders_sent": reminders_sent})
+            logger.info("notion_poll_completed", extra={"tasks_seen": len(tasks), "transitions": processed, "reminders_sent": reminders_sent})
             return processed
         except NotionApiError as exc:
             self.db.log_run_complete(
@@ -100,6 +103,76 @@ class TaskProcessor:
                 continue
             self._save_state(task)
         return transitions
+
+    def _process_deadline_reminders_safely(self, tasks: list[Task] | None = None) -> int:
+        try:
+            reminder_tasks = tasks if tasks is not None else self.notion.query_all_tasks()
+            return self.process_deadline_reminders(reminder_tasks)
+        except Exception as exc:
+            logger.warning("task_reminder_scan_failed", exc_info=True, extra={"error": str(exc)})
+            return 0
+
+    def process_deadline_reminders(self, tasks: list[Task], now: datetime | None = None) -> int:
+        now = now or datetime.now(timezone.utc)
+        sent_count = 0
+        for task in tasks:
+            decision = reminder_decision(
+                task,
+                now,
+                self.settings.timezone,
+                minutes_before=self.settings.task_reminder_minutes_before,
+                date_only_deadline_hour=self.settings.task_date_only_deadline_hour,
+            )
+            if not decision.eligible:
+                continue
+            if not decision.reminder_key or not decision.deadline_at:
+                continue
+            if self.db.has_task_reminder(decision.reminder_key):
+                logger.info("duplicate_task_reminder_suppressed", extra={"task_id": task.id, "reminder_type": REMINDER_TYPE_1H})
+                continue
+            slack_user_id = self._resolve_task_slack_user(task)
+            if not slack_user_id:
+                logger.warning(
+                    "task_reminder_skipped_unmapped_owner",
+                    extra={"task_id": task.id, "owner": task.owner_name, "owner_email": task.owner_email},
+                )
+                continue
+            sent_at = datetime.now(timezone.utc)
+            ts = self.slack.dm_user(slack_user_id, reminder_message(task))
+            if not ts:
+                logger.warning("task_reminder_slack_failed", extra={"task_id": task.id, "slack_user_id": slack_user_id})
+                continue
+            if not self.db.record_task_reminder_sent(
+                reminder_key=decision.reminder_key,
+                task_id=task.id,
+                reminder_type=REMINDER_TYPE_1H,
+                owner_notion_user_id=task.owner_notion_user_id,
+                slack_user_id=slack_user_id,
+                deadline_at=decision.deadline_at.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+                sent_at=sent_at.replace(microsecond=0).isoformat(),
+            ):
+                logger.info("duplicate_task_reminder_suppressed", extra={"task_id": task.id, "reminder_type": REMINDER_TYPE_1H})
+                continue
+            self.notion.set_last_reminder_sent_at(task.id, sent_at)
+            sent_count += 1
+            logger.info(
+                "task_reminder_sent",
+                extra={"task_id": task.id, "owner": task.owner_name, "slack_user_id": slack_user_id, "deadline_at": decision.deadline_at.isoformat()},
+            )
+        return sent_count
+
+    def _resolve_task_slack_user(self, task: Task) -> str | None:
+        owner_email = self.owner_resolver.resolve_owner_email(task.owner)
+        if owner_email:
+            slack_user_id = self.slack.lookup_user_by_email(owner_email)
+            if slack_user_id:
+                self.db.upsert_owner_mapping(owner_email, task.owner_name, slack_user_id, owner_email)
+                return slack_user_id
+            logger.warning(
+                "task_reminder_email_lookup_failed",
+                extra={"task_id": task.id, "owner": task.owner_name, "owner_email": owner_email},
+            )
+        return self.owner_resolver.resolve_slack_user(task.owner)
 
     def process_pending_transitions(self) -> int:
         tasks = self.notion.query_all_tasks()
