@@ -107,6 +107,28 @@ class Persistence:
                     PRIMARY KEY (campaign_id, flag_type)
                 );
 
+                CREATE TABLE IF NOT EXISTS service_titan_audit_violations (
+                    violation_key TEXT PRIMARY KEY,
+                    service_titan_job_id TEXT NOT NULL,
+                    appointment_id TEXT NOT NULL DEFAULT '',
+                    technician_id TEXT NOT NULL DEFAULT '',
+                    technician_name TEXT NOT NULL DEFAULT '',
+                    dispatcher_id TEXT NOT NULL DEFAULT '',
+                    dispatcher_name TEXT NOT NULL DEFAULT '',
+                    rule_id TEXT NOT NULL,
+                    ruleset TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    first_detected_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    alert_sent_at TEXT,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    recommended_action TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
                 CREATE TABLE IF NOT EXISTS kv (
                     key TEXT PRIMARY KEY,
                     value TEXT,
@@ -419,6 +441,105 @@ class Persistence:
                 return True
             except sqlite3.IntegrityError:
                 return False
+
+    def upsert_service_titan_violation(
+        self,
+        *,
+        violation_key: str,
+        service_titan_job_id: str,
+        appointment_id: str,
+        technician_id: str,
+        technician_name: str,
+        dispatcher_id: str,
+        dispatcher_name: str,
+        rule_id: str,
+        ruleset: str,
+        severity: str,
+        title: str,
+        description: str,
+        recommended_action: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now_iso()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO service_titan_audit_violations (
+                    violation_key, service_titan_job_id, appointment_id, technician_id,
+                    technician_name, dispatcher_id, dispatcher_name, rule_id, ruleset,
+                    severity, status, first_detected_at, last_seen_at, resolved_at,
+                    title, description, recommended_action, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, NULL, ?, ?, ?, ?)
+                ON CONFLICT(violation_key) DO UPDATE SET
+                    service_titan_job_id=excluded.service_titan_job_id,
+                    appointment_id=excluded.appointment_id,
+                    technician_id=excluded.technician_id,
+                    technician_name=excluded.technician_name,
+                    dispatcher_id=excluded.dispatcher_id,
+                    dispatcher_name=excluded.dispatcher_name,
+                    rule_id=excluded.rule_id,
+                    ruleset=excluded.ruleset,
+                    severity=excluded.severity,
+                    status='open',
+                    last_seen_at=excluded.last_seen_at,
+                    resolved_at=NULL,
+                    title=excluded.title,
+                    description=excluded.description,
+                    recommended_action=excluded.recommended_action,
+                    metadata_json=excluded.metadata_json
+                """,
+                (
+                    violation_key,
+                    service_titan_job_id,
+                    appointment_id,
+                    technician_id,
+                    technician_name,
+                    dispatcher_id,
+                    dispatcher_name,
+                    rule_id,
+                    ruleset,
+                    severity,
+                    now,
+                    now,
+                    title,
+                    description,
+                    recommended_action,
+                    json.dumps(metadata),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM service_titan_audit_violations WHERE violation_key = ?",
+                (violation_key,),
+            ).fetchone()
+            return dict(row)
+
+    def mark_service_titan_alert_sent(self, violation_key: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE service_titan_audit_violations SET alert_sent_at = ? WHERE violation_key = ?",
+                (utc_now_iso(), violation_key),
+            )
+
+    def resolve_service_titan_violation(self, violation_key: str) -> bool:
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE service_titan_audit_violations
+                SET status = 'resolved', resolved_at = ?, last_seen_at = ?
+                WHERE violation_key = ? AND status != 'resolved'
+                """,
+                (utc_now_iso(), utc_now_iso(), violation_key),
+            )
+            return cur.rowcount > 0
+
+    def get_service_titan_violation(self, violation_key: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM service_titan_audit_violations WHERE violation_key = ?",
+                (violation_key,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def ping(self) -> bool:
         try:

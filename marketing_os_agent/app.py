@@ -9,12 +9,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .clients.claude import ClaudeClient
 from .clients.email_client import EmailClient
 from .clients.notion import NotionClient
+from .clients.servicetitan import ServiceTitanClient
 from .clients.slack import SlackClient
 from .config import HealthReport, Settings
 from .domain.campaign_health import CampaignHealthService
 from .domain.owner_mapping import OwnerResolver
 from .domain.formatting import format_friday_roundup_email
 from .domain.reports import ReportService, month_bounds, quarter_bounds, week_bounds
+from .domain.service_titan_audit import ServiceTitanAuditLoop, ServiceTitanAuditService, ServiceTitanAuditSummary
 from .domain.task_processor import TaskProcessor
 from .http_server import AgentHttpServer
 from .models import ValidationReport
@@ -39,6 +41,7 @@ class AgentApp:
         self.settings = settings
         self.db = Persistence(settings.sqlite_path)
         self.notion = NotionClient(settings)
+        self.service_titan = ServiceTitanClient(settings)
         self.slack = SlackClient(settings)
         self.claude = ClaudeClient(settings)
         self.email = EmailClient(settings)
@@ -54,6 +57,7 @@ class AgentApp:
             self.campaign_health,
         )
         self.reports = ReportService(settings, self.db, self.slack, self.claude, self.email, self.owner_resolver)
+        self.service_titan_audit = ServiceTitanAuditService(settings, self.db, self.service_titan, self.slack)
 
     def initialize_storage(self) -> None:
         self.db.initialize()
@@ -66,6 +70,8 @@ class AgentApp:
             logger.warning("runtime_credentials_missing", extra={"missing": missing})
         if self.settings.missing_email_credentials():
             logger.warning("email_credentials_missing", extra={"missing": self.settings.missing_email_credentials()})
+        if self.settings.missing_service_titan_credentials():
+            logger.warning("servicetitan_credentials_missing", extra={"missing": self.settings.missing_service_titan_credentials()})
         self._validate_timezone()
 
         scheduler = Scheduler(self.settings, self.db)
@@ -87,6 +93,15 @@ class AgentApp:
             threading.Thread(target=PollingLoop(self.settings, self.poll_once).run_loop, args=(stop_event,), name="notion-polling", daemon=True),
             threading.Thread(target=scheduler.run_loop, args=(stop_event,), name="scheduler", daemon=True),
         ]
+        if self.settings.service_titan_audit_enabled:
+            threads.append(
+                threading.Thread(
+                    target=ServiceTitanAuditLoop(self.settings, self.run_service_titan_audit_once).run_loop,
+                    args=(stop_event,),
+                    name="servicetitan-audit",
+                    daemon=True,
+                )
+            )
         for thread in threads:
             thread.start()
         stop_event.wait()
@@ -106,6 +121,9 @@ class AgentApp:
     def repost_missing_slack_updates(self) -> int:
         return self.processor.repost_missing_slack_updates()
 
+    def run_service_titan_audit_once(self, *, force: bool = False) -> ServiceTitanAuditSummary:
+        return self.service_titan_audit.audit_once(require_enabled=not force)
+
     def validate_notion(self) -> ValidationReport:
         return self.notion.validate_databases()
 
@@ -118,17 +136,21 @@ class AgentApp:
         checks = {
             "sqlite": self.db.ping(),
             "timezone": self._timezone_ok(),
+            "servicetitan_timezone": (not self.settings.service_titan_audit_enabled) or self._timezone_ok(self.settings.service_titan_audit_timezone),
             "notion_config": bool(self.settings.notion_api_key and self.settings.notion_tasks_database_id and self.settings.notion_marketing_calendar_database_id),
             "slack_config": bool(self.settings.slack_bot_token and self.settings.slack_marketing_ops_channel_id),
             "claude_config": bool(self.settings.anthropic_api_key),
             "email_config": not self.settings.missing_email_credentials(),
+            "servicetitan_config": not self.settings.missing_service_titan_credentials(),
         }
         messages = []
         for key in self.settings.missing_runtime_credentials():
             messages.append(f"Missing {key}")
         for key in self.settings.missing_email_credentials():
             messages.append(f"Missing {key}")
-        core_ok = checks["sqlite"] and checks["timezone"] and checks["notion_config"] and checks["slack_config"] and checks["claude_config"]
+        for key in self.settings.missing_service_titan_credentials():
+            messages.append(f"Missing {key}")
+        core_ok = checks["sqlite"] and checks["timezone"] and checks["servicetitan_timezone"] and checks["notion_config"] and checks["slack_config"] and checks["claude_config"]
         return HealthReport(ok=core_ok, checks=checks, messages=messages)
 
     def smoke_test_text(self) -> str:
@@ -304,10 +326,12 @@ class AgentApp:
     def _validate_timezone(self) -> None:
         if not self._timezone_ok():
             raise ValueError(f"Invalid TIMEZONE: {self.settings.timezone}")
+        if self.settings.service_titan_audit_enabled and not self._timezone_ok(self.settings.service_titan_audit_timezone):
+            raise ValueError(f"Invalid SERVICE_TITAN_AUDIT_TIMEZONE: {self.settings.service_titan_audit_timezone}")
 
-    def _timezone_ok(self) -> bool:
+    def _timezone_ok(self, timezone_name: str | None = None) -> bool:
         try:
-            ZoneInfo(self.settings.timezone)
+            ZoneInfo(timezone_name or self.settings.timezone)
             return True
         except ZoneInfoNotFoundError:
             return False

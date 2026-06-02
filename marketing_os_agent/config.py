@@ -67,6 +67,31 @@ def _json_map_env(name: str) -> dict[str, str]:
     return parsed
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = _env(name, "")
+    if raw == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
+def _json_list_env(name: str, default: list[str] | None = None) -> list[str]:
+    raw = _env(name, "").strip()
+    if not raw:
+        return list(default or [])
+    try:
+        parsed: Any = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be valid JSON") from exc
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise ValueError(f"{name} must be a JSON array of strings")
+    return parsed
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str
@@ -78,6 +103,15 @@ class Settings:
     poll_overlap_seconds: int
     task_reminder_minutes_before: int
     task_date_only_deadline_hour: int
+    service_titan_audit_enabled: bool
+    service_titan_audit_poll_interval_seconds: int
+    service_titan_audit_lookback_minutes: int
+    service_titan_audit_overlap_seconds: int
+    service_titan_audit_max_pages: int
+    service_titan_audit_page_size: int
+    service_titan_audit_timezone: str
+    service_titan_audit_dry_run: bool
+    service_titan_audit_debug_fields: bool
 
     anthropic_api_key: str
     claude_model: str
@@ -131,6 +165,16 @@ class Settings:
     slack_signing_secret: str
     slack_marketing_ops_channel_id: str
     slack_tim_user_id: str
+    slack_alert_channel_id: str
+
+    servicetitan_client_id: str
+    servicetitan_client_secret: str
+    servicetitan_tenant_id: str
+    servicetitan_app_key: str
+    servicetitan_environment: str
+    servicetitan_base_url: str
+    servicetitan_auth_url: str
+    servicetitan_job_url_template: str
 
     smtp_host: str
     smtp_port: int
@@ -143,11 +187,21 @@ class Settings:
     budget_overrun_threshold_percent: float
     campaign_risk_window_percent: float
     campaign_risk_task_completion_percent: float
+    service_titan_arrival_grace_minutes: int
+    service_titan_min_lunch_break_minutes: int
+    service_titan_lunch_required_after_hours: float
+    service_titan_min_note_length: int
+    service_titan_alert_include_customer_name: bool
+    technician_compliance_enabled: bool
+    dispatcher_audit_enabled: bool
 
     owner_slack_map: dict[str, str] = field(default_factory=dict)
     owner_email_map: dict[str, str] = field(default_factory=dict)
     task_status_map: dict[str, str] = field(default_factory=dict)
     task_priority_map: dict[str, str] = field(default_factory=dict)
+    service_titan_diagnostic_fee_keywords: list[str] = field(default_factory=list)
+    service_titan_required_phases: list[str] = field(default_factory=list)
+    service_titan_required_operational_fields: list[str] = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -155,6 +209,13 @@ class Settings:
         app_env = _env("APP_ENV", _env("NODE_ENV", "development"))
         timezone = _env("TIMEZONE", _env("TZ", "America/Los_Angeles"))
         sqlite_path = _env("SQLITE_PATH", "data/marketing_os_agent.sqlite3")
+        service_titan_environment = _env("SERVICETITAN_ENVIRONMENT", "production").strip().lower()
+        service_titan_base_url = _env(
+            "SERVICETITAN_BASE_URL",
+            "https://api-integration.servicetitan.io"
+            if service_titan_environment == "integration"
+            else "https://api.servicetitan.io",
+        ).rstrip("/")
         return cls(
             app_env=app_env,
             port=_int_env("PORT", 8080),
@@ -165,6 +226,15 @@ class Settings:
             poll_overlap_seconds=_int_env("NOTION_POLL_OVERLAP_SECONDS", 3600),
             task_reminder_minutes_before=_int_env("TASK_REMINDER_MINUTES_BEFORE", 60),
             task_date_only_deadline_hour=_int_env("TASK_DATE_ONLY_DEADLINE_HOUR", 17),
+            service_titan_audit_enabled=_bool_env("SERVICE_TITAN_AUDIT_ENABLED", False),
+            service_titan_audit_poll_interval_seconds=_int_env("SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS", 300),
+            service_titan_audit_lookback_minutes=_int_env("SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES", 240),
+            service_titan_audit_overlap_seconds=_int_env("SERVICE_TITAN_AUDIT_OVERLAP_SECONDS", 300),
+            service_titan_audit_max_pages=_int_env("SERVICE_TITAN_AUDIT_MAX_PAGES", 5),
+            service_titan_audit_page_size=_int_env("SERVICE_TITAN_AUDIT_PAGE_SIZE", 100),
+            service_titan_audit_timezone=_env("SERVICE_TITAN_AUDIT_TIMEZONE", timezone),
+            service_titan_audit_dry_run=_bool_env("SERVICE_TITAN_AUDIT_DRY_RUN", False),
+            service_titan_audit_debug_fields=_bool_env("SERVICE_TITAN_AUDIT_DEBUG_FIELDS", False),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
             claude_model=_env("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
             notion_api_key=_env("NOTION_API_KEY"),
@@ -215,6 +285,15 @@ class Settings:
             slack_signing_secret=_env("SLACK_SIGNING_SECRET"),
             slack_marketing_ops_channel_id=_env("SLACK_MARKETING_OPS_CHANNEL_ID"),
             slack_tim_user_id=_env("SLACK_TIM_USER_ID"),
+            slack_alert_channel_id=_env("SLACK_ALERT_CHANNEL_ID"),
+            servicetitan_client_id=_env("SERVICETITAN_CLIENT_ID"),
+            servicetitan_client_secret=_env("SERVICETITAN_CLIENT_SECRET"),
+            servicetitan_tenant_id=_env("SERVICETITAN_TENANT_ID"),
+            servicetitan_app_key=_env("SERVICETITAN_APP_KEY"),
+            servicetitan_environment=service_titan_environment,
+            servicetitan_base_url=service_titan_base_url,
+            servicetitan_auth_url=_env("SERVICETITAN_AUTH_URL", "https://auth.servicetitan.io/connect/token"),
+            servicetitan_job_url_template=_env("SERVICETITAN_JOB_URL_TEMPLATE"),
             smtp_host=_env("SMTP_HOST"),
             smtp_port=_int_env("SMTP_PORT", 587),
             smtp_user=_env("SMTP_USER"),
@@ -225,6 +304,13 @@ class Settings:
             budget_overrun_threshold_percent=_float_env("BUDGET_OVERRUN_THRESHOLD_PERCENT", 0.0),
             campaign_risk_window_percent=_float_env("CAMPAIGN_RISK_WINDOW_PERCENT", 80.0),
             campaign_risk_task_completion_percent=_float_env("CAMPAIGN_RISK_TASK_COMPLETION_PERCENT", 20.0),
+            service_titan_arrival_grace_minutes=_int_env("SERVICE_TITAN_ARRIVAL_GRACE_MINUTES", 30),
+            service_titan_min_lunch_break_minutes=_int_env("SERVICE_TITAN_MIN_LUNCH_BREAK_MINUTES", 30),
+            service_titan_lunch_required_after_hours=_float_env("SERVICE_TITAN_LUNCH_REQUIRED_AFTER_HOURS", 5.0),
+            service_titan_min_note_length=_int_env("SERVICE_TITAN_MIN_NOTE_LENGTH", 15),
+            service_titan_alert_include_customer_name=_bool_env("SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME", False),
+            technician_compliance_enabled=_bool_env("TECHNICIAN_COMPLIANCE_ENABLED", True),
+            dispatcher_audit_enabled=_bool_env("DISPATCHER_AUDIT_ENABLED", True),
             owner_slack_map=_json_map_env("OWNER_SLACK_MAP_JSON"),
             owner_email_map=_json_map_env("OWNER_EMAIL_MAP_JSON"),
             task_status_map={
@@ -251,6 +337,12 @@ class Settings:
                 "critical": "Critical",
                 **_json_map_env("TASK_PRIORITY_MAP_JSON"),
             },
+            service_titan_diagnostic_fee_keywords=_json_list_env(
+                "SERVICE_TITAN_DIAGNOSTIC_FEE_KEYWORDS_JSON",
+                ["diagnostic"],
+            ),
+            service_titan_required_phases=_json_list_env("SERVICE_TITAN_REQUIRED_PHASES_JSON"),
+            service_titan_required_operational_fields=_json_list_env("SERVICE_TITAN_REQUIRED_OPERATIONAL_FIELDS_JSON"),
         )
 
     @property
@@ -278,6 +370,19 @@ class Settings:
             "TIM_EMAIL": self.tim_email,
             "VADIM_EMAIL": self.vadim_email,
         }
+        return [key for key, value in required.items() if not value]
+
+    def missing_service_titan_credentials(self, *, require_enabled: bool = True) -> list[str]:
+        if require_enabled and not self.service_titan_audit_enabled:
+            return []
+        required = {
+            "SERVICETITAN_CLIENT_ID": self.servicetitan_client_id,
+            "SERVICETITAN_CLIENT_SECRET": self.servicetitan_client_secret,
+            "SERVICETITAN_TENANT_ID": self.servicetitan_tenant_id,
+            "SERVICETITAN_APP_KEY": self.servicetitan_app_key,
+        }
+        if not self.service_titan_audit_dry_run:
+            required["SLACK_ALERT_CHANNEL_ID or SLACK_MARKETING_OPS_CHANNEL_ID"] = self.slack_alert_channel_id or self.slack_marketing_ops_channel_id
         return [key for key, value in required.items() if not value]
 
 

@@ -11,13 +11,16 @@ from logging import LogRecord
 
 from marketing_os_agent.clients.email_client import EmailClient
 from marketing_os_agent.clients.claude import ClaudeClient
-from marketing_os_agent.clients.http import HttpResponse
+from marketing_os_agent.clients.http import DEFAULT_USER_AGENT, HttpResponse
 from marketing_os_agent.clients.notion import NotionApiError, NotionClient
+from marketing_os_agent.clients.servicetitan import ServiceTitanApiError, ServiceTitanClient, ServiceTitanJob
 from marketing_os_agent.clients.slack import SlackClient
 from marketing_os_agent.config import Settings, load_dotenv
 from marketing_os_agent.domain.campaign_health import CampaignHealthService
 from marketing_os_agent.domain.owner_mapping import OwnerResolver
 from marketing_os_agent.domain.reports import ReportService, month_bounds, select_campaigns_starting_between, week_bounds
+from marketing_os_agent.domain.service_titan_audit import ServiceTitanAuditService, ServiceTitanAuditSummary
+from marketing_os_agent.domain.service_titan_rules import RESULT_FAIL, RESULT_INSUFFICIENT, RESULT_PASS, active_service_titan_rules
 from marketing_os_agent.domain.task_processor import TaskProcessor
 from marketing_os_agent.models import Campaign, Owner, Task
 from marketing_os_agent.persistence import Persistence
@@ -37,6 +40,15 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         poll_overlap_seconds=3600,
         task_reminder_minutes_before=60,
         task_date_only_deadline_hour=17,
+        service_titan_audit_enabled=False,
+        service_titan_audit_poll_interval_seconds=300,
+        service_titan_audit_lookback_minutes=240,
+        service_titan_audit_overlap_seconds=300,
+        service_titan_audit_max_pages=5,
+        service_titan_audit_page_size=100,
+        service_titan_audit_timezone="UTC",
+        service_titan_audit_dry_run=False,
+        service_titan_audit_debug_fields=False,
         anthropic_api_key="",
         claude_model="claude-test",
         notion_api_key="notion",
@@ -87,6 +99,15 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         slack_signing_secret="secret",
         slack_marketing_ops_channel_id="COPS",
         slack_tim_user_id="UTIM",
+        slack_alert_channel_id="CST",
+        servicetitan_client_id="st-client",
+        servicetitan_client_secret="st-secret",
+        servicetitan_tenant_id="12345",
+        servicetitan_app_key="ak1.test",
+        servicetitan_environment="production",
+        servicetitan_base_url="https://api.servicetitan.io",
+        servicetitan_auth_url="https://auth.servicetitan.io/connect/token",
+        servicetitan_job_url_template="https://go.servicetitan.com/#/Job/Index/{job_id}",
         smtp_host="",
         smtp_port=587,
         smtp_user="",
@@ -97,6 +118,13 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         budget_overrun_threshold_percent=0.0,
         campaign_risk_window_percent=80.0,
         campaign_risk_task_completion_percent=20.0,
+        service_titan_arrival_grace_minutes=30,
+        service_titan_min_lunch_break_minutes=30,
+        service_titan_lunch_required_after_hours=5.0,
+        service_titan_min_note_length=15,
+        service_titan_alert_include_customer_name=False,
+        technician_compliance_enabled=True,
+        dispatcher_audit_enabled=True,
         owner_slack_map={"Emil": "UEMIL", "Vadim": "UVADIM"},
         owner_email_map={},
         task_status_map={
@@ -108,6 +136,9 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
             "canceled": "Canceled",
         },
         task_priority_map={"urgent": "Critical", "critical": "Critical"},
+        service_titan_diagnostic_fee_keywords=["diagnostic"],
+        service_titan_required_phases=["diagnosis", "estimate"],
+        service_titan_required_operational_fields=["System Type"],
     )
     base.update(overrides)
     return Settings(**base)
@@ -182,6 +213,81 @@ def campaign(
     )
 
 
+def st_job(
+    job_id: str = "1001",
+    *,
+    status: str = "Completed",
+    appointment_id: str = "2001",
+    technician_id: str = "tech-1",
+    technician_name: str = "Tech One",
+    dispatcher_id: str = "disp-1",
+    dispatcher_name: str = "Dispatcher One",
+    modified_on: datetime | None = None,
+    clock_in_at: datetime | None = datetime(2026, 5, 15, 9, tzinfo=timezone.utc),
+    clock_out_at: datetime | None = datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
+    lunch_break_minutes: int | None = 30,
+    line_items: list[str] | None = None,
+    completed_phases: list[str] | None = None,
+    operational_data: dict[str, str] | None = None,
+    operational_data_complete: bool | None = True,
+    options_presented: bool | None = True,
+    notes: str | None = "Completed diagnostic and presented options.",
+    photo_count: int | None = 2,
+    supporting_evidence_count: int | None = 1,
+    arrival_window_start: datetime | None = datetime(2026, 5, 15, 9, tzinfo=timezone.utc),
+    arrival_window_end: datetime | None = datetime(2026, 5, 15, 11, tzinfo=timezone.utc),
+    arrived_at: datetime | None = datetime(2026, 5, 15, 9, 10, tzinfo=timezone.utc),
+    present_fields: set[str] | None = None,
+) -> ServiceTitanJob:
+    fields = present_fields or {
+        "status",
+        "technician",
+        "dispatcher",
+        "clock_in",
+        "clock_out",
+        "lunch_break",
+        "invoice_line_items",
+        "completed_phases",
+        "operational_data",
+        "operational_data_fields",
+        "options_presented",
+        "notes",
+        "photos",
+        "supporting_evidence",
+        "arrival_window",
+        "arrived_at",
+    }
+    return ServiceTitanJob(
+        job_id=job_id,
+        job_number=f"J-{job_id}",
+        status=status,
+        modified_on=modified_on or datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
+        completed_on=datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
+        appointment_id=appointment_id,
+        technician_id=technician_id,
+        technician_name=technician_name,
+        dispatcher_id=dispatcher_id,
+        dispatcher_name=dispatcher_name,
+        arrival_window_start=arrival_window_start,
+        arrival_window_end=arrival_window_end,
+        arrived_at=arrived_at,
+        clock_in_at=clock_in_at,
+        clock_out_at=clock_out_at,
+        lunch_break_minutes=lunch_break_minutes,
+        invoice_line_items=line_items if line_items is not None else ["Diagnostic Fee", "Capacitor"],
+        completed_phases=completed_phases if completed_phases is not None else ["diagnosis", "estimate"],
+        operational_data=operational_data if operational_data is not None else {"System Type": "Split"},
+        operational_data_complete=operational_data_complete,
+        options_presented=options_presented,
+        notes=notes,
+        photo_count=photo_count,
+        supporting_evidence_count=supporting_evidence_count,
+        url=f"https://go.servicetitan.com/#/Job/Index/{job_id}",
+        present_fields=fields,
+        raw={"id": job_id},
+    )
+
+
 class FakeNotion:
     def __init__(self) -> None:
         self.available = True
@@ -236,9 +342,16 @@ class FakeHttp:
     def __init__(self, responses: list[HttpResponse]) -> None:
         self.responses = responses
         self.calls: list[str] = []
+        self.requests: list[dict[str, object]] = []
 
     def request_json(self, method: str, url: str, *, headers: dict[str, str] | None = None, body: dict[str, object] | None = None) -> HttpResponse:
         self.calls.append(url)
+        self.requests.append({"method": method, "url": url, "headers": headers or {}, "body": body or {}, "kind": "json"})
+        return self.responses.pop(0)
+
+    def request_form(self, method: str, url: str, *, headers: dict[str, str] | None = None, body: dict[str, str] | None = None) -> HttpResponse:
+        self.calls.append(url)
+        self.requests.append({"method": method, "url": url, "headers": headers or {}, "body": body or {}, "kind": "form"})
         return self.responses.pop(0)
 
 
@@ -277,6 +390,77 @@ class FailingDMSlack(FakeSlack):
     def dm_user(self, user_id: str, text: str) -> str | None:
         self.dms.append((user_id, text))
         return None
+
+
+class FakeServiceTitan:
+    def __init__(self, jobs: list[ServiceTitanJob] | None = None, fail: bool = False) -> None:
+        self.jobs = jobs or []
+        self.fail = fail
+        self.since_seen: datetime | None = None
+
+    def query_recent_jobs(self, modified_on_or_after: datetime) -> list[ServiceTitanJob]:
+        self.since_seen = modified_on_or_after
+        if self.fail:
+            raise ServiceTitanApiError(503, {"message": "unavailable"})
+        return self.jobs
+
+
+def st_enrichment_http(
+    *,
+    job_payload: dict[str, object] | None = None,
+    appointments: list[dict[str, object]] | None = None,
+    assignments: list[dict[str, object]] | None = None,
+    invoices: list[dict[str, object]] | None = None,
+    invoice_items: list[dict[str, object]] | None = None,
+    timesheets: list[dict[str, object]] | None = None,
+    non_job_timesheets: list[dict[str, object]] | None = None,
+    notes: list[dict[str, object]] | None = None,
+    attachments: list[dict[str, object]] | None = None,
+    history: list[dict[str, object]] | None = None,
+    estimates: list[dict[str, object]] | None = None,
+    opportunities: list[dict[str, object]] | None = None,
+) -> FakeHttp:
+    responses = [
+        HttpResponse(200, {"access_token": "token", "expires_in": 900}, {}),
+        HttpResponse(
+            200,
+            {
+                "data": [
+                    job_payload
+                    or {
+                        "id": 123,
+                        "jobNumber": "J123",
+                        "status": "Completed",
+                        "modifiedOn": "2026-05-15T16:00:00Z",
+                    }
+                ],
+                "hasMore": False,
+            },
+            {},
+        ),
+        HttpResponse(200, {"data": appointments or [], "hasMore": False}, {}),
+    ]
+    if appointments:
+        responses.append(HttpResponse(200, {"data": assignments or [], "hasMore": False}, {}))
+    responses.extend(
+        [
+            HttpResponse(200, {"data": invoices or [], "hasMore": False}, {}),
+            HttpResponse(200, {"data": invoice_items or [], "hasMore": False}, {}),
+            HttpResponse(200, {"data": timesheets or [], "hasMore": False}, {}),
+        ]
+    )
+    if timesheets:
+        responses.append(HttpResponse(200, {"data": non_job_timesheets or [], "hasMore": False}, {}))
+    responses.extend(
+        [
+            HttpResponse(200, {"data": notes or [], "hasMore": False}, {}),
+            HttpResponse(200, {"data": attachments or [], "hasMore": False}, {}),
+            HttpResponse(200, {"data": history or [], "hasMore": False}, {}),
+            HttpResponse(200, {"data": estimates or [], "hasMore": False}, {}),
+            HttpResponse(200, {"data": opportunities or [], "hasMore": False}, {}),
+        ]
+    )
+    return FakeHttp(responses)
 
 
 class FakeClaude:
@@ -337,6 +521,13 @@ class Harness:
             original_deadline=deadline,
             last_edited_time="2026-05-13T12:00:00+00:00",
         )
+
+
+def _st_rule(audit_settings: Settings, rule_id: str):
+    for rule in active_service_titan_rules(audit_settings):
+        if rule.rule_id == rule_id:
+            return rule
+    raise AssertionError(f"Rule not found: {rule_id}")
 
 
 class MarketingOsAgentTests(unittest.TestCase):
@@ -571,6 +762,344 @@ class MarketingOsAgentTests(unittest.TestCase):
         now = datetime(2026, 5, 15, 14, 30, tzinfo=timezone.utc)
         self.assertEqual(self.h.processor.process_deadline_reminders([item], now=now), 0)
         self.assertEqual(self.h.slack.dms, [])
+
+    def test_service_titan_rule_passes_when_required_condition_satisfied(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        rule = _st_rule(audit_settings, "tech_clock_in_missing")
+        result = rule.run(st_job(), audit_settings)
+        self.assertEqual(result.status, RESULT_PASS)
+
+    def test_service_titan_rule_fails_when_violation_present(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        rule = _st_rule(audit_settings, "tech_clock_out_missing")
+        result = rule.run(st_job(clock_out_at=None), audit_settings)
+        self.assertEqual(result.status, RESULT_FAIL)
+        self.assertIn("clock-out", result.explanation)
+
+    def test_service_titan_rule_returns_insufficient_data_when_fields_missing(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        rule = _st_rule(audit_settings, "tech_clock_in_missing")
+        result = rule.run(st_job(clock_in_at=None, present_fields={"status", "technician"}), audit_settings)
+        self.assertEqual(result.status, RESULT_INSUFFICIENT)
+
+    def test_service_titan_duplicate_violations_do_not_alert_twice(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = FakeServiceTitan([st_job("dup-st", clock_out_at=None)])
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, client, self.h.slack)
+        first = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        second = audit.audit_once(datetime(2026, 5, 15, 16, 5, tzinfo=timezone.utc))
+        self.assertEqual(first.alerts_sent, 1)
+        self.assertEqual(second.alerts_sent, 0)
+        self.assertEqual(second.alerts_skipped_dedupe, 1)
+        alerts = [message for message in self.h.slack.messages if "ServiceTitan Operations Audit" in message[1]]
+        self.assertEqual(len(alerts), 1)
+
+    def test_service_titan_polling_continues_if_one_job_fails_evaluation(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = FakeServiceTitan([st_job("bad"), st_job("good", clock_out_at=None)])
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, client, self.h.slack)
+        original = audit._evaluate_job
+
+        def evaluate(job: ServiceTitanJob):
+            if job.job_id == "bad":
+                raise RuntimeError("bad payload")
+            return original(job)
+
+        audit._evaluate_job = evaluate  # type: ignore[method-assign]
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.alerts_sent, 1)
+        self.assertEqual(summary.errors, 1)
+        self.assertEqual(len(self.h.slack.messages), 1)
+
+    def test_service_titan_api_failure_does_not_crash_agent(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan(fail=True), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.status, "api_error")
+        self.assertEqual(summary.errors, 1)
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_service_titan_auth_403_returns_api_error_without_logging_crash(self) -> None:
+        logging.disable(logging.NOTSET)
+        audit_logger = logging.getLogger("marketing_os_agent.domain.service_titan_audit")
+        old_propagate = audit_logger.propagate
+        handler = logging.NullHandler()
+        audit_logger.addHandler(handler)
+        audit_logger.propagate = False
+        try:
+            audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+            http = FakeHttp([HttpResponse(403, {"error": "error code: 1010"}, {})])
+            client = ServiceTitanClient(audit_settings, http)
+            audit = ServiceTitanAuditService(audit_settings, self.h.db, client, self.h.slack)
+            summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+            self.assertEqual(summary.status, "api_error")
+            self.assertEqual(summary.errors, 1)
+            self.assertEqual(self.h.slack.messages, [])
+            self.assertEqual(http.calls, [audit_settings.servicetitan_auth_url])
+
+            request = http.requests[0]
+            self.assertEqual(request["kind"], "form")
+            self.assertEqual(request["method"], "POST")
+            self.assertEqual(request["url"], audit_settings.servicetitan_auth_url)
+            headers = request["headers"]
+            body = request["body"]
+            self.assertEqual(headers["Content-Type"], "application/x-www-form-urlencoded")
+            self.assertEqual(headers["User-Agent"], DEFAULT_USER_AGENT)
+            self.assertEqual(headers["Accept"], "application/json")
+            self.assertEqual(body["grant_type"], "client_credentials")
+            self.assertEqual(body["client_id"], audit_settings.servicetitan_client_id)
+            self.assertEqual(body["client_secret"], audit_settings.servicetitan_client_secret)
+        finally:
+            audit_logger.removeHandler(handler)
+            audit_logger.propagate = old_propagate
+            logging.disable(logging.CRITICAL)
+
+    def test_service_titan_slack_failure_retries_alert_later(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = FakeServiceTitan([st_job("retry-st", clock_out_at=None)])
+        failing_slack = FailingSlack()
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, client, failing_slack)
+        failed = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(failed.alerts_sent, 0)
+        violation = self.h.db.get_service_titan_violation("servicetitan:retry-st:2001:tech_clock_out_missing:tech-1")
+        self.assertIsNotNone(violation)
+        self.assertIsNone(violation["alert_sent_at"])
+
+        audit.slack = self.h.slack
+        retried = audit.audit_once(datetime(2026, 5, 15, 16, 5, tzinfo=timezone.utc))
+        self.assertEqual(retried.alerts_sent, 1)
+        self.assertEqual(len(self.h.slack.messages), 1)
+
+    def test_service_titan_dry_run_evaluates_without_alerts_or_dedupe_writes(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_dry_run=True,
+            slack_alert_channel_id="",
+            slack_marketing_ops_channel_id="",
+        )
+        client = FakeServiceTitan([st_job("dry-run-st", clock_out_at=None)])
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, client, self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.status, "completed")
+        self.assertTrue(summary.dry_run)
+        self.assertEqual(summary.jobs_scanned, 1)
+        self.assertEqual(summary.alerts_sent, 0)
+        self.assertEqual(summary.alerts_would_send, 1)
+        self.assertEqual(self.h.slack.messages, [])
+        self.assertIsNone(self.h.db.get_service_titan_violation("servicetitan:dry-run-st:2001:tech_clock_out_missing:tech-1"))
+        self.assertIsNone(self.h.db.get_kv("servicetitan_audit_last_processed"))
+
+    def test_service_titan_missing_credentials_return_config_error(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True, servicetitan_client_secret="")
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([]), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.status, "config_error")
+        self.assertIn("SERVICETITAN_CLIENT_SECRET", summary.config_errors)
+
+    def test_service_titan_cli_force_can_validate_when_continuous_polling_disabled(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=False, service_titan_audit_dry_run=True)
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([st_job("forced", clock_out_at=None)]), self.h.slack)
+        skipped = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        forced = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc), require_enabled=False)
+        self.assertEqual(skipped.status, "disabled")
+        self.assertEqual(forced.status, "completed")
+        self.assertEqual(forced.alerts_would_send, 1)
+
+    def test_service_titan_rulesets_can_be_disabled_independently(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=True,
+        )
+        rule_ids = {rule.rule_id for rule in active_service_titan_rules(audit_settings)}
+        self.assertNotIn("tech_clock_out_missing", rule_ids)
+        self.assertIn("dispatch_notes_missing", rule_ids)
+
+    def test_service_titan_polling_uses_last_processed_overlap(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        self.h.db.set_kv("servicetitan_audit_last_processed", "2026-05-15T16:00:00+00:00")
+        client = FakeServiceTitan([])
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, client, self.h.slack)
+        audit.audit_once(datetime(2026, 5, 15, 16, 10, tzinfo=timezone.utc))
+        self.assertEqual(client.since_seen, datetime(2026, 5, 15, 15, 55, tzinfo=timezone.utc))
+
+    def test_service_titan_closed_jobs_are_audited_for_dispatch_quality(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        rule = _st_rule(audit_settings, "dispatch_photos_missing")
+        result = rule.run(st_job(photo_count=0), audit_settings)
+        self.assertEqual(result.status, RESULT_FAIL)
+
+    def test_service_titan_client_parses_job_payload_and_uses_token(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload={
+                    "id": 123,
+                    "jobNumber": "J123",
+                    "status": "Completed",
+                    "modifiedOn": "2026-05-15T16:00:00Z",
+                    "technician": {"id": 7, "name": "Tech"},
+                    "invoice": {"lineItems": [{"name": "Diagnostic Fee"}]},
+                }
+            ),
+        )
+        jobs = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))
+        self.assertEqual(jobs[0].job_id, "123")
+        self.assertIn("Diagnostic Fee", jobs[0].invoice_line_items)
+        self.assertIn("/jpm/v2/tenant/12345/jobs", client.http.calls[1])
+
+    def test_service_titan_enrichment_maps_appointment_arrival_and_time_data(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                appointments=[
+                    {
+                        "id": "appt-1",
+                        "arrivalWindowStart": "2026-05-15T09:00:00Z",
+                        "arrivalWindowEnd": "2026-05-15T11:00:00Z",
+                    }
+                ],
+                assignments=[{"technicianId": "tech-7", "technicianName": "Tech Seven", "arrivedOn": "2026-05-15T09:12:00Z"}],
+                timesheets=[{"technicianId": "tech-7", "clockInOn": "2026-05-15T09:00:00Z", "clockOutOn": "2026-05-15T15:30:00Z"}],
+                non_job_timesheets=[{"name": "Lunch Break", "startedOn": "2026-05-15T12:00:00Z", "endedOn": "2026-05-15T12:30:00Z"}],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        self.assertEqual(job.appointment_id, "appt-1")
+        self.assertEqual(job.technician_id, "tech-7")
+        self.assertEqual(job.arrival_window_start, datetime(2026, 5, 15, 9, tzinfo=timezone.utc))
+        self.assertEqual(job.arrived_at, datetime(2026, 5, 15, 9, 12, tzinfo=timezone.utc))
+        self.assertEqual(job.clock_in_at, datetime(2026, 5, 15, 9, tzinfo=timezone.utc))
+        self.assertEqual(job.clock_out_at, datetime(2026, 5, 15, 15, 30, tzinfo=timezone.utc))
+        self.assertEqual(job.lunch_break_minutes, 30)
+        self.assertEqual(job.related_counts["appointments"], 1)
+        self.assertEqual(job.related_counts["technician_time_records"], 2)
+
+    def test_service_titan_enrichment_maps_invoice_items_for_diagnostic_rules(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        pass_client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(invoices=[{"id": "inv-1"}], invoice_items=[{"name": "Diagnostic Fee"}]),
+        )
+        pass_job = pass_client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        pass_result = _st_rule(audit_settings, "tech_invoice_diagnostic_fee_missing").run(pass_job, audit_settings)
+        self.assertIn("Diagnostic Fee", pass_job.invoice_line_items)
+        self.assertEqual(pass_result.status, RESULT_PASS)
+
+        fail_client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(invoices=[{"id": "inv-2"}], invoice_items=[{"name": "Capacitor"}]),
+        )
+        fail_job = fail_client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        fail_result = _st_rule(audit_settings, "tech_invoice_diagnostic_fee_missing").run(fail_job, audit_settings)
+        self.assertEqual(fail_result.status, RESULT_FAIL)
+
+    def test_service_titan_enrichment_maps_notes_and_photos_for_dispatch_rules(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        pass_client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                notes=[{"text": "Completed diagnosis, documented outcome, and next step."}],
+                attachments=[{"fileName": "system-photo.jpg"}],
+            ),
+        )
+        pass_job = pass_client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        self.assertEqual(_st_rule(audit_settings, "dispatch_notes_missing").run(pass_job, audit_settings).status, RESULT_PASS)
+        self.assertEqual(_st_rule(audit_settings, "dispatch_photos_missing").run(pass_job, audit_settings).status, RESULT_PASS)
+        self.assertEqual(_st_rule(audit_settings, "dispatch_supporting_evidence_missing").run(pass_job, audit_settings).status, RESULT_PASS)
+
+        fail_client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(notes=[], attachments=[]),
+        )
+        fail_job = fail_client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        self.assertEqual(_st_rule(audit_settings, "dispatch_notes_missing").run(fail_job, audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "dispatch_photos_missing").run(fail_job, audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "dispatch_supporting_evidence_missing").run(fail_job, audit_settings).status, RESULT_FAIL)
+
+    def test_service_titan_rules_remain_insufficient_when_related_endpoint_unavailable(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        http = FakeHttp(
+            [
+                HttpResponse(200, {"access_token": "token", "expires_in": 900}, {}),
+                HttpResponse(200, {"data": [{"id": 123, "status": "Completed", "modifiedOn": "2026-05-15T16:00:00Z"}], "hasMore": False}, {}),
+                HttpResponse(200, {"data": [], "hasMore": False}, {}),
+                HttpResponse(403, {"error": "invoice scope missing"}, {}),
+                HttpResponse(200, {"data": [], "hasMore": False}, {}),
+                HttpResponse(200, {"data": [], "hasMore": False}, {}),
+                HttpResponse(200, {"data": [], "hasMore": False}, {}),
+                HttpResponse(200, {"data": [], "hasMore": False}, {}),
+                HttpResponse(200, {"data": [], "hasMore": False}, {}),
+                HttpResponse(200, {"data": [], "hasMore": False}, {}),
+            ]
+        )
+        job = ServiceTitanClient(audit_settings, http).query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "tech_invoice_diagnostic_fee_missing").run(job, audit_settings)
+        self.assertEqual(result.status, RESULT_INSUFFICIENT)
+        self.assertIn("accounting", result.explanation)
+
+    def test_service_titan_debug_field_mode_does_not_log_secret_or_pii_values(self) -> None:
+        logging.disable(logging.NOTSET)
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_debug_fields=True,
+        )
+        service_titan_logger = logging.getLogger("marketing_os_agent.clients.servicetitan")
+        old_propagate = service_titan_logger.propagate
+        old_level = service_titan_logger.level
+        records: list[LogRecord] = []
+
+        class Capture(logging.Handler):
+            def emit(self, record: LogRecord) -> None:
+                records.append(record)
+
+        handler = Capture()
+        service_titan_logger.addHandler(handler)
+        service_titan_logger.propagate = False
+        service_titan_logger.setLevel(logging.INFO)
+        try:
+            client = ServiceTitanClient(
+                audit_settings,
+                st_enrichment_http(
+                    job_payload={
+                        "id": 123,
+                        "status": "Completed",
+                        "modifiedOn": "2026-05-15T16:00:00Z",
+                        "customerName": "Private Customer",
+                        "address": "123 Secret St",
+                        "phone": "555-1212",
+                        "email": "private@example.com",
+                        "description": "Raw private note",
+                    },
+                    notes=[{"text": "Private note body"}],
+                    attachments=[{"fileName": "unit-photo.jpg"}],
+                ),
+            )
+            client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))
+            rendered = "\n".join(str(record.__dict__) for record in records)
+            self.assertIn("servicetitan_field_availability", rendered)
+            self.assertNotIn(audit_settings.servicetitan_client_secret, rendered)
+            self.assertNotIn("token", rendered)
+            self.assertNotIn("Private Customer", rendered)
+            self.assertNotIn("123 Secret St", rendered)
+            self.assertNotIn("555-1212", rendered)
+            self.assertNotIn("private@example.com", rendered)
+            self.assertNotIn("Raw private note", rendered)
+            self.assertNotIn("Private note body", rendered)
+        finally:
+            service_titan_logger.removeHandler(handler)
+            service_titan_logger.propagate = old_propagate
+            service_titan_logger.setLevel(old_level)
+            logging.disable(logging.CRITICAL)
+
+    def test_service_titan_dry_run_summary_lines_show_true_when_enabled(self) -> None:
+        lines = ServiceTitanAuditSummary(dry_run=True).to_lines()
+        self.assertIn("- dry_run: True", lines)
 
     def test_missing_external_credentials_fail_safely(self) -> None:
         missing = settings(

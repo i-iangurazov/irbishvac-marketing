@@ -9,7 +9,7 @@ There is no admin UI because this repo started empty and the assignment focuses 
 - `marketing_os_agent/config.py` loads environment configuration and safe defaults.
 - `marketing_os_agent/persistence.py` stores task state, status history, counters, Slack thread mappings, owner mappings, campaign flags, and run logs in SQLite.
 - `marketing_os_agent/clients/` contains Notion, Slack, Claude, and SMTP clients with retry/error logging.
-- `marketing_os_agent/domain/` contains deterministic business logic for status verification, campaign health, owner mapping, and scheduled reports.
+- `marketing_os_agent/domain/` contains deterministic business logic for status verification, campaign health, owner mapping, scheduled reports, and ServiceTitan operations audit rules.
 - `marketing_os_agent/scheduler.py` runs timezone-aware scheduled jobs.
 - `marketing_os_agent/http_server.py` exposes `/healthz`, `/readyz`, and Slack/Notion webhook endpoints.
 
@@ -45,6 +45,8 @@ Required for full production operation:
 - `NOTION_WORKBOOKS_PAGE_ID`, `NOTION_WORKBOOKS_DATABASE_ID`
 - Optional but recommended for current Notion API: `NOTION_TASKS_DATA_SOURCE_ID`, `NOTION_MARKETING_CALENDAR_DATA_SOURCE_ID`, `NOTION_WORKBOOKS_DATA_SOURCE_ID`
 - `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_MARKETING_OPS_CHANNEL_ID`, `SLACK_TIM_USER_ID`
+- Optional for ServiceTitan audit alerts: `SLACK_ALERT_CHANNEL_ID`; not required while `SERVICE_TITAN_AUDIT_DRY_RUN=true`
+- Required only when continuous ServiceTitan audit is enabled or when running `servicetitan-audit-once`: `SERVICETITAN_CLIENT_ID`, `SERVICETITAN_CLIENT_SECRET`, `SERVICETITAN_TENANT_ID`, `SERVICETITAN_APP_KEY`
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM`, `TIM_EMAIL`, `VADIM_EMAIL`
 - `OWNER_SLACK_MAP_JSON` only for fallback Slack routing exceptions; deadline reminders normally resolve users from Notion owner email via Slack lookup.
 
@@ -55,6 +57,14 @@ Defaults:
 - `NOTION_POLL_INTERVAL_SECONDS=120`
 - `TASK_REMINDER_MINUTES_BEFORE=60`
 - `TASK_DATE_ONLY_DEADLINE_HOUR=17`, used in `TIMEZONE` when a Notion deadline has a date but no time.
+- `SERVICE_TITAN_AUDIT_ENABLED=false`
+- `SERVICE_TITAN_AUDIT_DRY_RUN=false`
+- `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=false`
+- `SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS=300`
+- `SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES=240`
+- `SERVICE_TITAN_AUDIT_OVERLAP_SECONDS=300`
+- `TECHNICIAN_COMPLIANCE_ENABLED=true`
+- `DISPATCHER_AUDIT_ENABLED=true`
 - `BUDGET_OVERRUN_THRESHOLD_PERCENT=0`, which flags any actual spend at or over plan.
 - `CAMPAIGN_RISK_WINDOW_PERCENT=80`
 - `CAMPAIGN_RISK_TASK_COMPLETION_PERCENT=20`
@@ -95,6 +105,7 @@ python3 -m marketing_os_agent validate-notion
 python3 -m marketing_os_agent rebuild-task-baseline
 python3 -m marketing_os_agent process-pending-transitions
 python3 -m marketing_os_agent repost-missing-slack-updates
+python3 -m marketing_os_agent servicetitan-audit-once
 python3 -m marketing_os_agent seed-workbooks
 python3 -m marketing_os_agent poll-once
 python3 -m marketing_os_agent monday-push
@@ -114,6 +125,7 @@ Use `smoke-test` after configuring Notion. It reads Tasks and Marketing Calendar
 Use `rebuild-task-baseline` after changing database IDs, data source IDs, or field mappings. It reads all current tasks into SQLite without posting old statuses to Slack.
 Use `process-pending-transitions` when `debug-tasks` shows `notion_status` differs from `local_status`; it scans all tasks once and posts pending transitions.
 Use `repost-missing-slack-updates` after fixing Slack channel membership if an earlier transition was recorded before a Slack timestamp was stored.
+Use `servicetitan-audit-once` after configuring ServiceTitan credentials to run one operations audit cycle without waiting for the background interval.
 Use `debug-tasks` when a Notion edit is being read but no transition posts. It prints current Notion status next to the saved local baseline status.
 Use `transition-counts` to inspect observed status transitions, including repeated completions that the service actually saw.
 Use `list-claude-models` when Anthropic returns a model 404. It prints model IDs available to the configured `ANTHROPIC_API_KEY`.
@@ -140,6 +152,20 @@ The importer needs Emil’s real campaign data. It does not invent campaign entr
 - Sends Friday roundup to Slack and email at Friday 4 PM, including not-completed tasks that need rollover.
 - Sends monthly and quarterly campaign kickoff briefings at 9 AM on the first day.
 - Runs daily campaign health scan at 7 AM.
+- When enabled, continuously audits recent ServiceTitan jobs for Technician Compliance and Dispatcher / Job Quality violations, dedupes findings in SQLite, and sends actionable Slack alerts.
+
+## ServiceTitan Operations Audit
+
+The ServiceTitan Operations Audit Agent is disabled by default and runs in the same process as the Task Dispatcher when `SERVICE_TITAN_AUDIT_ENABLED=true`. It uses one shared ServiceTitan client, one shared SQLite store, and one Slack alert path for two independent rulesets:
+
+- Technician Compliance: clock-in, clock-out, lunch break, diagnostic fee, required phases, and required operational data.
+- Dispatcher / Job Quality Audit: arrival inside the first 30 minutes of the arrival window, diagnostic fee reflected, options presented, notes, photos, and supporting evidence.
+
+Rules return `pass`, `fail`, `insufficient_data`, or `error`. `insufficient_data` is logged and not alerted, so unavailable ServiceTitan fields do not create false positives.
+
+Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` for first production validation. Dry-run fetches real ServiceTitan jobs, evaluates rules, prints the one-time run summary, and skips Slack alerts and audit dedupe writes. The `servicetitan-audit-once` command runs one cycle and exits, even when continuous polling is still disabled. Set `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true` only when you need sanitized field availability logs for ServiceTitan payloads.
+
+See [docs/servicetitan-operations-audit.md](docs/servicetitan-operations-audit.md) for setup, required scopes, dedupe behavior, adding rules, manual QA, known field limitations, and Render deployment notes.
 
 ## Manual Testing
 

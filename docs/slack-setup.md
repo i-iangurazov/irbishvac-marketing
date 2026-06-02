@@ -13,6 +13,8 @@ Create these channels:
 
 The service posts automation output to `#marketing-ops`. Other channels can be used by humans, but important decisions must be mirrored into Notion.
 
+For ServiceTitan Operations Audit alerts, create a dedicated channel such as `#servicetitan-audits` and set `SLACK_ALERT_CHANNEL_ID` to that channel ID. If this is blank, ServiceTitan alerts fall back to `SLACK_MARKETING_OPS_CHANNEL_ID`. No ServiceTitan alert channel is required while `SERVICE_TITAN_AUDIT_DRY_RUN=true`.
+
 ## Slack App
 
 Create a Slack app for the workspace and install it with a bot token.
@@ -32,6 +34,7 @@ Copy values into `.env`:
 - `SLACK_SIGNING_SECRET`
 - `SLACK_MARKETING_OPS_CHANNEL_ID`
 - `SLACK_TIM_USER_ID`
+- `SLACK_ALERT_CHANNEL_ID`, optional dedicated ServiceTitan audit alert channel
 
 Find channel/user IDs from Slack profile details or by copying links.
 

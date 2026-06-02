@@ -21,6 +21,8 @@ Expected daily automation:
 
 - Notion polling every `NOTION_POLL_INTERVAL_SECONDS`.
 - Personal Slack DM reminders for open assigned tasks inside the configured reminder window, default 1 hour before deadline.
+- ServiceTitan Operations Audit polling every `SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS`, when `SERVICE_TITAN_AUDIT_ENABLED=true`.
+- ServiceTitan dry-run validation with `SERVICE_TITAN_AUDIT_DRY_RUN=true` fetches real data and evaluates rules without sending Slack alerts.
 - Daily campaign health scan at 7 AM.
 - Status changes to Completed, Delayed, Blocked, and Canceled posted to `#marketing-ops`.
 
@@ -98,7 +100,8 @@ Duplicate posts:
 
 - The service stores status transition dedupe keys in SQLite.
 - The service stores task reminder keys in SQLite, keyed by task, reminder window, and deadline time.
-- If a duplicate is suppressed, logs include `duplicate_status_transition_suppressed` or `duplicate_task_reminder_suppressed`.
+- The ServiceTitan audit stores violation keys in SQLite, keyed by job, appointment, rule, and actor.
+- If a duplicate is suppressed, logs include `duplicate_status_transition_suppressed`, `duplicate_task_reminder_suppressed`, or `servicetitan_duplicate_alert_suppressed`.
 
 Manual catch-up after downtime:
 

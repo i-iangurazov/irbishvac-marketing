@@ -22,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("rebuild-task-baseline", help="Rebuild local task baseline from all Notion tasks without posting transitions")
     sub.add_parser("process-pending-transitions", help="Scan all Notion tasks once and post any status transitions vs local baseline")
     sub.add_parser("repost-missing-slack-updates", help="Retry transition Slack posts that previously failed before a Slack timestamp was stored")
+    sub.add_parser("servicetitan-audit-once", help="Run one ServiceTitan operations audit cycle")
     sub.add_parser("health-check", help="Run local integration health checks")
     sub.add_parser("monday-push", help="Run Monday push immediately")
     sub.add_parser("friday-roundup", help="Run Friday roundup immediately")
@@ -87,6 +88,12 @@ def main(argv: list[str] | None = None) -> int:
         count = app.repost_missing_slack_updates()
         print(f"Reposted {count} missing Slack update(s)")
         return 0
+
+    if command == "servicetitan-audit-once":
+        app.initialize_storage()
+        summary = app.run_service_titan_audit_once(force=True)
+        print("\n".join(summary.to_lines()))
+        return 1 if summary.status in {"config_error", "api_error"} else 0
 
     if command == "health-check":
         app.initialize_storage()
