@@ -6,6 +6,7 @@ from typing import Callable
 
 from ..clients.servicetitan import ServiceTitanJob
 from ..config import Settings
+from .service_titan_handbook import handbook_rule_by_id
 
 
 RESULT_PASS = "pass"
@@ -15,6 +16,9 @@ RESULT_ERROR = "error"
 
 RULESET_TECHNICIAN = "Technician Compliance"
 RULESET_DISPATCHER = "Dispatcher / Job Quality Audit"
+RULESET_SERVICE_CALL = "Service Call Handbook Audit"
+RULESET_PLY_MATERIALS = "Ply / PO Materials Audit"
+RULESET_FOLLOW_UP = "Follow-up / Escalation Audit"
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,9 @@ class RuleResult:
     required_fields: tuple[str, ...]
     violation_key: str
     metadata: dict[str, object]
+    handbook_source: str
+    recommended_alert_recipient: str
+    delivery: str
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,10 @@ class AuditRule:
     required_fields: tuple[str, ...]
     action: str
     evaluate: Callable[[ServiceTitanJob, Settings, "AuditRule"], RuleResult]
+    handbook_source: str = ""
+    recommended_alert_recipient: str = "slack audit channel"
+    delivery: str = "immediate"
+    enabled_by_default: bool = True
 
     def run(self, job: ServiceTitanJob, settings: Settings) -> RuleResult:
         try:
@@ -62,6 +73,9 @@ class AuditRule:
             required_fields=self.required_fields,
             violation_key=violation_key(job, self.rule_id),
             metadata=metadata or {},
+            handbook_source=self.handbook_source,
+            recommended_alert_recipient=self.recommended_alert_recipient,
+            delivery=self.delivery,
         )
 
 
@@ -71,7 +85,9 @@ def active_service_titan_rules(settings: Settings) -> list[AuditRule]:
         rules.extend(technician_compliance_rules())
     if settings.dispatcher_audit_enabled:
         rules.extend(dispatcher_audit_rules())
-    return rules
+        rules.extend(handbook_audit_rules())
+    disabled = {rule_id.strip() for rule_id in settings.service_titan_disabled_rule_ids if rule_id.strip()}
+    return [rule for rule in rules if rule.enabled_by_default and rule.rule_id not in disabled]
 
 
 def technician_compliance_rules() -> list[AuditRule]:
@@ -202,6 +218,57 @@ def dispatcher_audit_rules() -> list[AuditRule]:
             _supporting_evidence,
         ),
     ]
+
+
+def handbook_audit_rules() -> list[AuditRule]:
+    evaluators: dict[str, Callable[[ServiceTitanJob, Settings, AuditRule], RuleResult]] = {
+        "first_call_on_time_arrival": _first_call_arrival,
+        "arrival_outside_window_start_threshold": _arrival_window,
+        "missing_job_completion_notes": _missing_completion_notes,
+        "job_notes_too_short": _notes,
+        "missing_required_photos": _photos,
+        "missing_equipment_registration": _equipment_registration,
+        "missing_hhr_or_service_form": _hhr_or_service_form,
+        "missing_three_repair_options": _three_repair_options,
+        "missing_home_comfort_plan_option": _home_comfort_plan_option,
+        "missing_same_day_estimate": _same_day_estimate,
+        "missing_price_authorization": _price_authorization,
+        "missing_diagnostic_fee_when_repair_not_sold": _diagnostic_fee_when_no_repair,
+        "diagnostic_fee_not_waived_when_repair_sold": _diagnostic_fee_waiver_when_repair_sold,
+        "missing_payment_on_completed_job": _payment_on_completed_job,
+        "missing_follow_up_task_when_follow_up_needed": _follow_up_task,
+        "special_order_missing_required_notes": _special_order_required_notes,
+        "special_order_missing_service_titan_reminder": _special_order_reminder,
+        "missing_downpayment_for_special_order": _special_order_downpayment,
+        "lead_turnover_missing_required_documentation": _lead_turnover_documentation,
+        "po_received_not_reconciled": _po_received_not_reconciled,
+        "po_missing_vendor_document": _po_missing_vendor_document,
+        "po_missing_attachments": _po_missing_attachments,
+        "po_not_synced_to_service_titan": _po_not_synced_to_service_titan,
+        "ply_st_material_sync_blocked": _ply_st_material_sync_blocked,
+        "scope_change_missing_escalation_note": _scope_change_escalation,
+        "cancellation_after_materials_missing_escalation": _cancellation_after_materials_escalation,
+        "defective_part_missing_warranty_claim_data": _defective_part_warranty_claim,
+    }
+    return [_handbook_rule(rule_id, evaluator) for rule_id, evaluator in evaluators.items()]
+
+
+def _handbook_rule(rule_id: str, evaluator: Callable[[ServiceTitanJob, Settings, AuditRule], RuleResult]) -> AuditRule:
+    definition = handbook_rule_by_id(rule_id)
+    return AuditRule(
+        definition.rule_id,
+        definition.ruleset,
+        definition.severity,
+        definition.title,
+        definition.business_reason,
+        definition.required_data_fields,
+        definition.recommended_action,
+        evaluator,
+        handbook_source=definition.handbook_source,
+        recommended_alert_recipient=definition.recommended_alert_recipient,
+        delivery=definition.delivery,
+        enabled_by_default=definition.enabled_by_default,
+    )
 
 
 def violation_key(job: ServiceTitanJob, rule_id: str) -> str:
@@ -395,3 +462,316 @@ def _supporting_evidence(job: ServiceTitanJob, _settings: Settings, rule: AuditR
     if job.supporting_evidence_count <= 0:
         return rule.result(job, RESULT_FAIL, "Closed job has no supporting evidence attached.", rule.action)
     return rule.result(job, RESULT_PASS, "Supporting evidence is present.", rule.action)
+
+
+def _first_call_arrival(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:
+    return _arrival_with_grace(job, settings.service_titan_first_call_grace_minutes, rule, "first-call")
+
+
+def _missing_completion_notes(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "notes" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Job notes were not available from ServiceTitan."), rule.action)
+    if not (job.notes or "").strip():
+        return rule.result(job, RESULT_FAIL, "Closed job has no completion notes.", rule.action)
+    return rule.result(job, RESULT_PASS, "Completion notes are present.", rule.action)
+
+
+def _equipment_registration(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if not settings.service_titan_require_equipment_registration:
+        return rule.result(job, RESULT_PASS, "Equipment registration requirement is disabled.", rule.action)
+    if "equipment" not in job.present_fields or job.equipment_count is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "equipment", "Equipment records were not available from ServiceTitan."), rule.action)
+    if job.equipment_count <= 0:
+        return rule.result(job, RESULT_FAIL, "Closed job has no equipment registration records.", rule.action)
+    if job.equipment_complete is False:
+        return rule.result(job, RESULT_FAIL, "Equipment records are missing required registration fields.", rule.action)
+    return rule.result(job, RESULT_PASS, "Equipment registration is present and complete.", rule.action)
+
+
+def _hhr_or_service_form(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if not settings.service_titan_require_hhr:
+        return rule.result(job, RESULT_PASS, "HHR requirement is disabled.", rule.action)
+    if "hhr" not in job.present_fields or job.hhr_completed is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "hhr", "HHR/form submissions were not available from ServiceTitan."), rule.action)
+    if not job.hhr_completed:
+        return rule.result(job, RESULT_FAIL, "Closed job has no HHR or configured equivalent service form.", rule.action)
+    return rule.result(job, RESULT_PASS, "HHR or configured equivalent service form is present.", rule.action)
+
+
+def _three_repair_options(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "estimates" not in job.present_fields or job.estimate_count is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "estimates", "Estimate/option records were not available from ServiceTitan."), rule.action)
+    if job.estimate_count < settings.service_titan_min_repair_options:
+        return rule.result(
+            job,
+            RESULT_FAIL,
+            f"Only {job.estimate_count} repair option(s) were found; required minimum is {settings.service_titan_min_repair_options}.",
+            rule.action,
+            {"estimate_count": job.estimate_count},
+        )
+    return rule.result(job, RESULT_PASS, "Configured minimum repair option count is satisfied.", rule.action)
+
+
+def _home_comfort_plan_option(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if not settings.service_titan_require_home_comfort_plan_option:
+        return rule.result(job, RESULT_PASS, "Home Comfort Plan option requirement is disabled.", rule.action)
+    if "home_comfort_plan_option" not in job.present_fields or job.home_comfort_plan_option_present is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "home_comfort_plan_option", "Home Comfort Plan option data was not available from ServiceTitan."), rule.action)
+    if not job.home_comfort_plan_option_present:
+        return rule.result(job, RESULT_FAIL, "No configured Home Comfort Plan option indicator was found.", rule.action)
+    return rule.result(job, RESULT_PASS, "Home Comfort Plan option is present.", rule.action)
+
+
+def _same_day_estimate(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "same_day_estimate" not in job.present_fields or job.same_day_estimate_present is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "same_day_estimate", "Same-day estimate data was not available from ServiceTitan."), rule.action)
+    if not job.same_day_estimate_present:
+        return rule.result(job, RESULT_FAIL, "No same-day estimate was found for the closed job.", rule.action)
+    return rule.result(job, RESULT_PASS, "Same-day estimate evidence is present.", rule.action)
+
+
+def _price_authorization(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "authorization" not in job.present_fields or job.authorization_count is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "authorization", "Authorization/signature data was not available from ServiceTitan."), rule.action)
+    if job.authorization_count <= 0:
+        return rule.result(job, RESULT_FAIL, "No customer price authorization or signature evidence was found.", rule.action)
+    return rule.result(job, RESULT_PASS, "Customer authorization evidence is present.", rule.action)
+
+
+def _diagnostic_fee_when_no_repair(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "invoice_line_items" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "invoice_line_items", "Invoice line items were not available from ServiceTitan."), rule.action)
+    if job.repair_sold is None:
+        return rule.result(job, RESULT_INSUFFICIENT, "Repair-sold status could not be determined from invoice data.", rule.action)
+    if job.repair_sold:
+        return rule.result(job, RESULT_PASS, "Repair was sold; diagnostic collection rule does not apply.", rule.action)
+    if job.diagnostic_fee_present:
+        return rule.result(job, RESULT_PASS, "Diagnostic fee is present for a non-repair job.", rule.action)
+    if _approved_waiver_note(job):
+        return rule.result(job, RESULT_PASS, "Approved diagnostic fee waiver reason is documented.", rule.action)
+    return rule.result(job, RESULT_FAIL, "No repair was sold and no diagnostic fee or approved waiver was found.", rule.action)
+
+
+def _diagnostic_fee_waiver_when_repair_sold(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "invoice_line_items" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "invoice_line_items", "Invoice line items were not available from ServiceTitan."), rule.action)
+    if job.repair_sold is None:
+        return rule.result(job, RESULT_INSUFFICIENT, "Repair-sold status could not be determined from invoice data.", rule.action)
+    if not job.repair_sold:
+        return rule.result(job, RESULT_PASS, "Repair was not sold; diagnostic waiver rule does not apply.", rule.action)
+    if job.diagnostic_fee_charged is None and job.diagnostic_fee_present:
+        return rule.result(job, RESULT_INSUFFICIENT, "Diagnostic fee line item was present, but amount/waiver status was unavailable.", rule.action)
+    if job.diagnostic_fee_charged and not job.diagnostic_fee_waived:
+        return rule.result(job, RESULT_FAIL, "Repair was sold and a positive diagnostic fee charge was visible without waiver evidence.", rule.action)
+    return rule.result(job, RESULT_PASS, "Diagnostic fee waiver rule is satisfied for the sold repair.", rule.action)
+
+
+def _payment_on_completed_job(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "payments" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "payments", "Payment fields were not available from ServiceTitan."), rule.action)
+    if job.invoice_total is None:
+        return rule.result(job, RESULT_INSUFFICIENT, "Invoice total was not available from ServiceTitan.", rule.action)
+    if job.invoice_total <= 0:
+        return rule.result(job, RESULT_PASS, "Invoice total is not positive; payment rule does not apply.", rule.action)
+    if (job.payment_total or 0) > 0 or (job.invoice_balance is not None and job.invoice_balance <= 0) or "paid" in job.invoice_status.lower():
+        return rule.result(job, RESULT_PASS, "Payment or paid invoice status is present.", rule.action)
+    return rule.result(job, RESULT_FAIL, "Completed job has a positive invoice total but no visible payment or paid status.", rule.action)
+
+
+def _follow_up_task(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    if "notes" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Follow-up notes were not available from ServiceTitan."), rule.action)
+    if not job.follow_up_needed:
+        return rule.result(job, RESULT_PASS, "No follow-up need was detected.", rule.action)
+    if job.follow_up_task_present:
+        return rule.result(job, RESULT_PASS, "Follow-up task/reminder evidence is present.", rule.action)
+    return rule.result(job, RESULT_FAIL, "Follow-up was indicated but no follow-up task/reminder evidence was found.", rule.action)
+
+
+def _special_order_required_notes(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    if "notes" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Special-order notes were not available from ServiceTitan."), rule.action)
+    if not job.special_order_detected:
+        return rule.result(job, RESULT_PASS, "No special-order work was detected.", rule.action)
+    if job.special_order_missing_fields:
+        return rule.result(job, RESULT_FAIL, "Special-order note field(s) missing: " + ", ".join(job.special_order_missing_fields), rule.action, {"missing_fields": job.special_order_missing_fields})
+    return rule.result(job, RESULT_PASS, "Special-order notes contain the configured required fields.", rule.action)
+
+
+def _special_order_reminder(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    if "notes" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Special-order notes were not available from ServiceTitan."), rule.action)
+    if not job.special_order_detected:
+        return rule.result(job, RESULT_PASS, "No special-order work was detected.", rule.action)
+    return rule.result(
+        job,
+        RESULT_INSUFFICIENT,
+        "ServiceTitan reminder/task endpoint is not integrated yet; reminder evidence cannot be verified without creating false positives.",
+        rule.action,
+    )
+
+
+def _special_order_downpayment(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    if "notes" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Special-order notes were not available from ServiceTitan."), rule.action)
+    if not job.special_order_detected:
+        return rule.result(job, RESULT_PASS, "No special-order work was detected.", rule.action)
+    if "payments" not in job.present_fields and "invoice_line_items" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, "Payment and invoice item data are unavailable for special-order downpayment verification.", rule.action)
+    if job.downpayment_recorded:
+        return rule.result(job, RESULT_PASS, "Special-order downpayment/payment evidence is present.", rule.action)
+    return rule.result(job, RESULT_FAIL, "Special order was detected without downpayment/payment evidence.", rule.action)
+
+
+def _lead_turnover_documentation(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    if "notes" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Lead turnover notes were not available from ServiceTitan."), rule.action)
+    if not job.lead_turnover_required:
+        return rule.result(job, RESULT_PASS, "No lead turnover was detected.", rule.action)
+    missing_sources = [field for field in ("hhr", "photos", "estimates", "equipment") if field not in job.present_fields]
+    if missing_sources:
+        return rule.result(job, RESULT_INSUFFICIENT, "Lead turnover source(s) unavailable: " + ", ".join(missing_sources), rule.action)
+    missing: list[str] = []
+    if not job.hhr_completed:
+        missing.append("HHR")
+    if not job.photo_count:
+        missing.append("equipment/photos")
+    if not job.estimate_count:
+        missing.append("options")
+    if not job.equipment_count:
+        missing.append("equipment registration")
+    if not job.lead_turnover_documented:
+        missing.append("lead turnover notes")
+    if missing:
+        return rule.result(job, RESULT_FAIL, "Lead turnover documentation missing: " + ", ".join(missing), rule.action, {"missing": missing})
+    return rule.result(job, RESULT_PASS, "Lead turnover documentation is complete.", rule.action)
+
+
+def _po_received_not_reconciled(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    insufficient = _po_insufficient(job, "po_reconciliation", "PO reconciliation data was not available from ServiceTitan.")
+    if insufficient:
+        return rule.result(job, RESULT_INSUFFICIENT, insufficient, rule.action)
+    if (job.po_received_not_reconciled_count or 0) > 0:
+        return rule.result(job, RESULT_FAIL, f"{job.po_received_not_reconciled_count} received PO(s) are not reconciled.", rule.action)
+    return rule.result(job, RESULT_PASS, "No received unreconciled PO was found.", rule.action)
+
+
+def _po_missing_vendor_document(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    insufficient = _po_insufficient(job, "po_vendor_document", "PO vendor document data was not available from ServiceTitan.")
+    if insufficient:
+        return rule.result(job, RESULT_INSUFFICIENT, insufficient, rule.action)
+    if (job.po_missing_vendor_document_count or 0) > 0:
+        return rule.result(job, RESULT_FAIL, f"{job.po_missing_vendor_document_count} received PO(s) are missing vendor document numbers.", rule.action)
+    return rule.result(job, RESULT_PASS, "Received POs have vendor document numbers.", rule.action)
+
+
+def _po_missing_attachments(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    insufficient = _po_insufficient(job, "po_attachments", "PO attachment data was not available from ServiceTitan.")
+    if insufficient:
+        return rule.result(job, RESULT_INSUFFICIENT, insufficient, rule.action)
+    if (job.po_missing_attachment_count or 0) > 0:
+        return rule.result(job, RESULT_FAIL, f"{job.po_missing_attachment_count} received PO(s) are missing attachments.", rule.action)
+    return rule.result(job, RESULT_PASS, "Received POs have attachments.", rule.action)
+
+
+def _po_not_synced_to_service_titan(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    if not job.ply_data_available:
+        return rule.result(job, RESULT_INSUFFICIENT, "Ply API/client is not configured in this repository; Ply-to-ServiceTitan PO sync cannot be verified.", rule.action)
+    if job.po_not_synced_count and job.po_not_synced_count > 0:
+        return rule.result(job, RESULT_FAIL, f"{job.po_not_synced_count} Ply PO(s) are not synced to ServiceTitan.", rule.action)
+    return rule.result(job, RESULT_PASS, "Ply POs are synced to ServiceTitan.", rule.action)
+
+
+def _ply_st_material_sync_blocked(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    if not job.ply_data_available:
+        return rule.result(job, RESULT_INSUFFICIENT, "Ply API/client is not configured in this repository; material sync status cannot be verified.", rule.action)
+    return rule.result(job, RESULT_PASS, "No blocked Ply/ST sync was detected.", rule.action)
+
+
+def _scope_change_escalation(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    return _escalation_rule(job, rule, job.scope_change_detected, job.scope_change_escalated, "scope change")
+
+
+def _cancellation_after_materials_escalation(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    return _escalation_rule(job, rule, job.cancellation_after_materials_detected, job.cancellation_escalated, "cancellation after materials")
+
+
+def _defective_part_warranty_claim(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    if "notes" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Defective part notes were not available from ServiceTitan."), rule.action)
+    if not job.defective_part_detected:
+        return rule.result(job, RESULT_PASS, "No defective-part issue was detected.", rule.action)
+    if job.warranty_claim_documented:
+        return rule.result(job, RESULT_PASS, "Warranty claim/RMA evidence is documented.", rule.action)
+    return rule.result(job, RESULT_FAIL, "Defective part was detected without warranty claim/RMA evidence.", rule.action)
+
+
+def _arrival_with_grace(job: ServiceTitanJob, grace_minutes: int, rule: AuditRule, label: str) -> RuleResult:
+    missing = _missing_fields(job, ("arrival_window", "arrived_at"))
+    if missing:
+        return rule.result(job, RESULT_INSUFFICIENT, _missing_field_explanation(job, ("arrival_window", "arrived_at")), rule.action)
+    if not job.arrival_window_start or not job.arrived_at:
+        return rule.result(job, RESULT_INSUFFICIENT, "Arrival window start and arrival time are required.", rule.action)
+    latest_expected = job.arrival_window_start + timedelta(minutes=grace_minutes)
+    if job.arrived_at > latest_expected:
+        return rule.result(
+            job,
+            RESULT_FAIL,
+            f"Technician arrived after the configured {label} threshold of {grace_minutes} minute(s).",
+            rule.action,
+            {"arrival_window_start": job.arrival_window_start.isoformat(), "arrived_at": job.arrived_at.isoformat()},
+        )
+    return rule.result(job, RESULT_PASS, f"Technician arrived inside the configured {label} threshold.", rule.action)
+
+
+def _approved_waiver_note(job: ServiceTitanJob) -> bool:
+    text = (job.notes or "").lower()
+    return "waiver approved" in text or "approved waiver" in text or "manager approved" in text
+
+
+def _po_insufficient(job: ServiceTitanJob, field: str, fallback: str) -> str:
+    if "purchase_orders" not in job.present_fields or field not in job.present_fields:
+        return _field_unavailable(job, field, fallback)
+    if job.purchase_orders_count is None:
+        return fallback
+    return ""
+
+
+def _escalation_rule(job: ServiceTitanJob, rule: AuditRule, detected: bool | None, escalated: bool | None, label: str) -> RuleResult:
+    if "notes" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", f"{label.title()} notes were not available from ServiceTitan."), rule.action)
+    if not detected:
+        return rule.result(job, RESULT_PASS, f"No {label} was detected.", rule.action)
+    if escalated:
+        return rule.result(job, RESULT_PASS, f"{label.title()} escalation evidence is documented.", rule.action)
+    return rule.result(job, RESULT_FAIL, f"{label.title()} was detected without escalation evidence.", rule.action)

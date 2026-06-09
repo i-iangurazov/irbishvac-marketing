@@ -7,10 +7,34 @@ It does not replace Agent 1. Notion task dispatching, Slack task reminders, sche
 ## Architecture
 
 - `marketing_os_agent/clients/servicetitan.py` handles OAuth client credentials, `ST-App-Key`, API calls, pagination, token caching, and conservative ServiceTitan job parsing.
-- `marketing_os_agent/domain/service_titan_rules.py` contains the rule engine and the two independent rulesets.
+- `marketing_os_agent/domain/service_titan_rules.py` contains the rule engine, legacy audit rules, and handbook-backed rule evaluators.
+- `marketing_os_agent/domain/service_titan_handbook.py` contains the handbook-backed rule matrix: rule ID, handbook source, business reason, data requirements, current availability, routing, delivery mode, and default enabled state.
 - `marketing_os_agent/domain/service_titan_audit.py` coordinates polling, rule execution, durable violation storage, Slack alerting, and retry behavior.
 - `marketing_os_agent/persistence.py` stores audit violations in SQLite.
 - `AgentApp` starts a separate ServiceTitan audit thread only when the feature is enabled.
+
+## Current-State Report
+
+Current data flow:
+
+1. The one-time command and the audit loop call `ServiceTitanClient.query_recent_jobs(modified_on_or_after)`.
+2. The client fetches `/jpm/v2/tenant/{tenant}/jobs` using `modifiedOnOrAfter`, pagination, `ST-App-Key`, and OAuth client credentials.
+3. Each job is parsed into a conservative `ServiceTitanJob`, then enriched with related ServiceTitan records where the tenant and scopes expose them.
+4. Rules evaluate only mapped fields. If a required source is absent, unavailable, or not scoped, the rule returns `insufficient_data`.
+5. Only `fail` results can create stored violations and Slack alerts. Dry-run does not write violations, send Slack, or advance the checkpoint.
+
+Why appointments scanned may be `0`:
+
+- The `/jpm/v2/tenant/{tenant}/appointments?jobId=...` endpoint can return no records for jobs where the appointment is embedded differently, outside the lookback, cancelled, or hidden by scope/tenant permissions.
+- If the endpoint returns HTTP 400/401/403/404/405, the related category is disabled for that process and arrival rules return `insufficient_data`.
+- If appointments exist but do not expose arrival-window or arrival timestamps, appointment counts may be nonzero while arrival rules still return `insufficient_data`.
+
+Why many handbook rules can still return `insufficient_data`:
+
+- ServiceTitan tenant scopes may not expose invoice items, payments, forms, installed equipment, purchase orders, reminders/tasks, signatures, or detailed attachments.
+- Some handbook requirements need Ply data. There is no Ply API/client/config in this repository, so Ply-only checks are intentionally `insufficient_data`.
+- Several checks require positive evidence, not inference. For example, a diagnostic fee line name without an amount is not enough to fail the repair-sold waiver rule.
+- The two actual handbook PDFs were not present in the provided attachment folder during this pass; the matrix is based on the detailed handbook excerpts in the request and should be reconciled against the PDFs when they are supplied.
 
 ## Rulesets
 
@@ -31,6 +55,35 @@ Dispatcher / Job Quality Audit:
 - Job notes missing or incomplete.
 - Required job photos missing.
 - Supporting evidence missing.
+
+Handbook-backed audit:
+
+- First call on-time arrival.
+- Arrival outside configured window start threshold.
+- Missing or too-short completion notes.
+- Missing required photos.
+- Missing equipment registration.
+- Missing HHR or service form.
+- Missing three repair options.
+- Missing Home Comfort Plan option.
+- Missing same-day estimate.
+- Missing price authorization.
+- Missing diagnostic fee when no repair is sold.
+- Diagnostic fee not waived when repair is sold.
+- Missing payment on completed job.
+- Missing follow-up task when follow-up is needed.
+- Special-order notes missing required fields.
+- Special-order missing ServiceTitan reminder. This remains `insufficient_data` until reminders/tasks are integrated.
+- Missing downpayment for special order.
+- Lead turnover missing documentation.
+- PO received but not reconciled.
+- PO missing vendor document.
+- PO missing attachments.
+- PO not synced to ServiceTitan. This remains `insufficient_data` until Ply is integrated.
+- Ply/ST material sync blocked. This remains `insufficient_data` until Ply is integrated.
+- Scope change missing escalation note.
+- Cancellation after materials missing escalation.
+- Defective part missing warranty claim data.
 
 Each rule returns one of:
 
@@ -64,6 +117,7 @@ SERVICETITAN_AUTH_URL=https://auth.servicetitan.io/connect/token
 SERVICETITAN_JOB_URL_TEMPLATE=
 SERVICE_TITAN_AUDIT_DRY_RUN=false
 SERVICE_TITAN_AUDIT_DEBUG_FIELDS=false
+NOTIFICATIONS_TEST_SEND=false
 SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS=300
 SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES=240
 SERVICE_TITAN_AUDIT_OVERLAP_SECONDS=300
@@ -71,12 +125,22 @@ SERVICE_TITAN_AUDIT_PAGE_SIZE=100
 SERVICE_TITAN_AUDIT_MAX_PAGES=5
 TECHNICIAN_COMPLIANCE_ENABLED=true
 DISPATCHER_AUDIT_ENABLED=true
+SERVICE_TITAN_FIRST_CALL_GRACE_MINUTES=0
 SERVICE_TITAN_ARRIVAL_GRACE_MINUTES=30
 SERVICE_TITAN_MIN_LUNCH_BREAK_MINUTES=30
 SERVICE_TITAN_LUNCH_REQUIRED_AFTER_HOURS=5
-SERVICE_TITAN_MIN_NOTE_LENGTH=15
+SERVICE_TITAN_MIN_NOTE_LENGTH=30
+SERVICE_TITAN_REQUIRE_HHR=true
+SERVICE_TITAN_REQUIRE_EQUIPMENT_REGISTRATION=true
+SERVICE_TITAN_MIN_REPAIR_OPTIONS=3
+SERVICE_TITAN_REQUIRE_HOME_COMFORT_PLAN_OPTION=true
+SERVICE_TITAN_PO_RECONCILE_WITHIN_HOURS=24
 SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME=false
 SERVICE_TITAN_DIAGNOSTIC_FEE_KEYWORDS_JSON=["diagnostic"]
+SERVICE_TITAN_HOME_COMFORT_PLAN_KEYWORDS_JSON=["home comfort plan","comfort plan","membership","maintenance plan"]
+SERVICE_TITAN_HHR_KEYWORDS_JSON=["home health report","hhr","report card"]
+SERVICE_TITAN_SPECIAL_ORDER_REQUIRED_NOTE_FIELDS_JSON=["purchase order number","ordering date","employee ordered","eta","supply house"]
+SERVICE_TITAN_DISABLED_RULE_IDS_JSON=[]
 SERVICE_TITAN_REQUIRED_PHASES_JSON=[]
 SERVICE_TITAN_REQUIRED_OPERATIONAL_FIELDS_JSON=[]
 ```
@@ -117,15 +181,152 @@ The enrichment pass reads related ServiceTitan records when available:
 - `/payroll/v2/tenant/{tenant}/non-job-timesheets`
 - `/jpm/v2/tenant/{tenant}/jobs/{job_id}/notes`
 - `/jpm/v2/tenant/{tenant}/jobs/{job_id}/attachments`
+- `/forms/v2/tenant/{tenant}/submissions`
+- `/equipments/v2/tenant/{tenant}/installed-equipment`
+- `/inventory/v2/tenant/{tenant}/purchase-orders`
 - `/jpm/v2/tenant/{tenant}/jobs/{job_id}/history`
 - `/sales/v2/tenant/{tenant}/estimates`
 - `/sales/v2/tenant/{tenant}/opportunities`
 
 If any related endpoint is unavailable or does not expose a required field, the affected rules remain `insufficient_data` and include source notes in logs/summary context.
 
+## Handbook Rule Matrix Summary
+
+The full structured matrix is in `marketing_os_agent/domain/service_titan_handbook.py`. Every entry includes `rule_id`, title, ruleset/category, handbook source, business reason, severity, required fields, data sources, current availability, evaluation logic, pass/fail/insufficient conditions, alert recipient, recommended action, delivery mode, and default enabled state.
+
+| Rule ID | Handbook source | Availability | Default | Destination | Delivery |
+| --- | --- | --- | --- | --- | --- |
+| `first_call_on_time_arrival` | Service Call arrival protocol | partially_available | enabled | dispatcher channel | immediate |
+| `arrival_outside_window_start_threshold` | Service Call arrival protocol | partially_available | enabled | dispatcher channel | immediate |
+| `missing_job_completion_notes` | Service Call post-call | available | enabled | dispatcher channel | immediate |
+| `job_notes_too_short` | Service Call post-call | available | enabled | dispatcher channel | immediate |
+| `missing_required_photos` | Service Call photos/videos | partially_available | enabled | technician manager | immediate |
+| `missing_equipment_registration` | Service Call equipment registration | partially_available | enabled | technician manager | immediate |
+| `missing_hhr_or_service_form` | Service Call Home Health Report | partially_available | enabled | technician manager | immediate |
+| `missing_three_repair_options` | Service Call repair options | partially_available | enabled | dispatcher channel | immediate |
+| `missing_home_comfort_plan_option` | Service Call repair options | partially_available | enabled | dispatcher channel | immediate |
+| `missing_same_day_estimate` | Service Call repair options | partially_available | enabled | dispatcher channel | immediate |
+| `missing_price_authorization` | Service Call price authorization | partially_available | enabled | accounting/office | immediate |
+| `missing_diagnostic_fee_when_repair_not_sold` | Service Call diagnostic fee/payments | partially_available | enabled | accounting/office | immediate |
+| `diagnostic_fee_not_waived_when_repair_sold` | Service Call diagnostic fee/payments | partially_available | enabled | accounting/office | immediate |
+| `missing_payment_on_completed_job` | Service Call diagnostic fee/payments | partially_available | enabled | accounting/office | immediate |
+| `missing_follow_up_task_when_follow_up_needed` | Service Call post-call | partially_available | enabled | dispatcher channel | immediate |
+| `special_order_missing_required_notes` | Service Call special-order/future work | partially_available | enabled | warehouse/parts | immediate |
+| `special_order_missing_service_titan_reminder` | Service Call special-order/future work | unknown | enabled | warehouse/parts | immediate |
+| `missing_downpayment_for_special_order` | Service Call special-order/future work | partially_available | enabled | accounting/office | immediate |
+| `lead_turnover_missing_required_documentation` | Service Call lead turnover | partially_available | enabled | technician manager | immediate |
+| `po_received_not_reconciled` | Plumbing Dispatcher reconciliation | partially_available | enabled | warehouse/parts | immediate |
+| `po_missing_vendor_document` | Plumbing Dispatcher PO receiving | partially_available | enabled | warehouse/parts | immediate |
+| `po_missing_attachments` | Plumbing Dispatcher PO receiving | partially_available | enabled | warehouse/parts | immediate |
+| `po_not_synced_to_service_titan` | Plumbing Dispatcher ST sync | unavailable | enabled | warehouse/parts | immediate |
+| `ply_st_material_sync_blocked` | Plumbing Dispatcher escalations | unavailable | enabled | Ali/operations escalation | immediate |
+| `scope_change_missing_escalation_note` | Plumbing Dispatcher escalations | partially_available | enabled | dispatcher channel | immediate |
+| `cancellation_after_materials_missing_escalation` | Plumbing Dispatcher escalations | partially_available | enabled | Ali/operations escalation | immediate |
+| `defective_part_missing_warranty_claim_data` | Plumbing Dispatcher escalations | partially_available | enabled | warehouse/parts | immediate |
+
+Production-ready now:
+
+- Rules using notes, attachments/photos, appointment windows, invoice line items, invoice payment fields, estimates/opportunities, forms, equipment, and ServiceTitan purchase orders are production-ready only when those ServiceTitan endpoints are scoped and return the needed fields.
+- Rules intentionally fail only when the source is available and the mapped fact is missing or noncompliant.
+
+Still needs data access:
+
+- Ply-only checks need a real Ply API/client/config before they can pass or fail.
+- ServiceTitan reminder/task verification for special-order parts needs a reminder/task endpoint or another approved task source.
+- Fine-grained photo category checks, ductwork/insulation inspection fields, signature timing before work start, remote authorization email delivery, customer-not-home email status, and customer-sent HHR/photos/temperature readings need tenant-specific ServiceTitan fields or reports before they can be enforced without false positives.
+
+Rule readiness interpretation:
+
+- Production-ready now when source fields are present: `missing_job_completion_notes`, `job_notes_too_short`.
+- Partially-ready and able to produce real `fail` results when the related ServiceTitan endpoint is scoped and returns usable fields: arrival rules, photos, equipment registration, HHR/service form, repair options, Home Comfort Plan option, same-day estimate, price authorization, diagnostic fee/payment, follow-up task indicator, special-order notes/downpayment, lead turnover documentation, PO reconciliation, PO vendor document, PO attachments, scope-change escalation, cancellation-after-materials escalation, and defective part warranty claim data.
+- Insufficient-data only until additional integration exists: `po_not_synced_to_service_titan`, `ply_st_material_sync_blocked`, and `special_order_missing_service_titan_reminder`.
+- Every handbook rule is enabled by default unless listed in `SERVICE_TITAN_DISABLED_RULE_IDS_JSON`.
+- Every `fail` result is routed as an immediate ServiceTitan Slack alert. There is no ServiceTitan digest sender in this codebase.
+
 ## Slack Alerts
 
 Alerts go to `SLACK_ALERT_CHANNEL_ID` or, if blank, `SLACK_MARKETING_OPS_CHANNEL_ID`.
+
+### Production Double-Check
+
+Overall readiness:
+
+- Production-ready for Slack alerting after ServiceTitan scopes, Slack token, alert channel, bot channel membership, and SQLite persistence are configured.
+- Ready for dry-run validation before live Slack alerting.
+- Not production-ready for Ply-only pass/fail checks until a real Ply API/client/config exists.
+- Not production-ready for ServiceTitan audit email alerts because email alerting for ServiceTitan is not implemented.
+
+Exact ServiceTitan alert timing:
+
+- Real violations are evaluated on every `servicetitan-audit-once` run and on every continuous audit polling cycle.
+- Continuous polling uses `ServiceTitanAuditLoop` and `SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS`.
+- Slack sends immediately when a rule returns `fail`, dry-run is false, Slack config is present, and the exact violation was not already successfully alerted.
+- There is no Friday-only or weekly-only ServiceTitan violation alert path.
+- The `delivery` field in the handbook matrix is metadata included in Slack text; ServiceTitan violation alerts are immediate because no ServiceTitan digest sender exists.
+
+Scheduler inventory:
+
+| Scheduler/path | Timing | Purpose | Controls ServiceTitan alerts? |
+| --- | --- | --- | --- |
+| `PollingLoop` | `NOTION_POLL_INTERVAL_SECONDS` | Agent 1 Notion task polling/reminders | no |
+| `Scheduler` / `monday_push` | Monday 8 AM | Scheduled marketing task summary | no |
+| `Scheduler` / `friday_roundup` | Friday 4 PM | Weekly marketing Slack/email report | no |
+| `Scheduler` / `monthly_kickoff` | first day 9 AM | Monthly campaign kickoff report | no |
+| `Scheduler` / `quarterly_kickoff` | first day of quarter 9 AM | Quarterly campaign kickoff report | no |
+| `Scheduler` / `campaign_health_scan` | daily 7 AM | Campaign health scan/DMs | no |
+| `ServiceTitanAuditLoop` | `SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS` | ServiceTitan operations audit | yes |
+| `servicetitan-audit-once` | manual one-time command | One ServiceTitan audit cycle | yes |
+
+Friday/weekly behavior exists only for marketing reports. It does not gate urgent ServiceTitan audit violations.
+
+Runtime mode behavior:
+
+- `SERVICE_TITAN_AUDIT_ENABLED=false`: continuous ServiceTitan polling does not start. The one-time `servicetitan-audit-once` command can still run because it forces a validation cycle.
+- `SERVICE_TITAN_AUDIT_DRY_RUN=true`: real ServiceTitan data may be fetched and rules may be evaluated, but Slack alerts, violation writes, dedupe writes, and checkpoint advancement are skipped. The CLI summary prints `dry_run: True`.
+- `SERVICE_TITAN_AUDIT_DRY_RUN=false`: `fail` results create/open violations and immediately call Slack. `alert_sent_at` is set only after Slack returns a timestamp.
+- Slack failure does not crash the audit cycle and leaves `alert_sent_at=NULL`, so the same violation can retry later.
+- `pass` can resolve an existing open violation.
+- `insufficient_data` is logged and counted in summaries but does not alert by default.
+
+### Notification Architecture Report
+
+ServiceTitan audit Slack alerts are created only in `ServiceTitanAuditService._record_and_alert`.
+
+Required conditions for a live ServiceTitan Slack alert:
+
+1. The audit command/loop runs and ServiceTitan credentials are valid.
+2. The rule engine returns at least one `fail` result.
+3. `SERVICE_TITAN_AUDIT_DRY_RUN=false`.
+4. `SLACK_BOT_TOKEN` is configured.
+5. `SLACK_ALERT_CHANNEL_ID` is configured, or `SLACK_MARKETING_OPS_CHANNEL_ID` is configured as fallback.
+6. The Slack bot is installed and has permission to post in the configured channel. For private channels, invite the bot to the channel.
+7. The deterministic violation key has not already been alerted with `alert_sent_at` set.
+
+Conditions that prevent Slack alerting:
+
+- All rule results are `pass`, `insufficient_data`, or `error`.
+- `violations_detected=0`.
+- `SERVICE_TITAN_AUDIT_DRY_RUN=true`.
+- `SLACK_BOT_TOKEN` is missing.
+- Both `SLACK_ALERT_CHANNEL_ID` and `SLACK_MARKETING_OPS_CHANNEL_ID` are missing.
+- Slack rejects the post, commonly because the bot is not in the channel, the token is invalid, or the channel ID is wrong.
+- A matching stored violation already has `alert_sent_at` set.
+
+Important behavior:
+
+- A `fail` rule result is required for Slack alerting.
+- `insufficient_data` does not alert by design. It appears in logs and the CLI summary to avoid production false positives.
+- Dry-run blocks Slack, violation writes, dedupe writes, and checkpoint advancement.
+- Dedupe suppresses only already-sent alerts. If Slack fails, `alert_sent_at` remains `NULL`, so the alert can retry later.
+- `SLACK_ALERT_CHANNEL_ID` is preferred. If blank, `SLACK_MARKETING_OPS_CHANNEL_ID` is used.
+- `SLACK_BOT_TOKEN` is loaded from env through `Settings.from_env()`.
+- ServiceTitan audit email alerts are not implemented. The repo has SMTP email support for report emails and email test commands, but ServiceTitan audit does not call `EmailClient`.
+
+Exact reason for the latest described run:
+
+- The run had jobs scanned and rules evaluated, but `violations_detected=0`, `fail=0`, and `insufficient_data>0`.
+- That is expected to send no Slack alerts. The alert path is not reached unless a rule result is `fail`.
+- Do not send `insufficient_data` to operations channels by default. Use the CLI summary and debug logs, or build a separate opt-in digest later if needed.
 
 Each alert includes:
 
@@ -138,9 +339,101 @@ Each alert includes:
 - Invoice total when available.
 - Explanation.
 - Recommended action.
+- Intended alert destination and delivery mode from the handbook matrix.
 - ServiceTitan link when `SERVICETITAN_JOB_URL_TEMPLATE` is configured.
 
 Customer names are omitted by default. Set `SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME=true` only if the alert channel is appropriate for that data.
+
+## Notification Test Commands
+
+Validate Slack notification config without sending:
+
+```bash
+python3 -m marketing_os_agent notifications-test
+```
+
+This prints:
+
+- `SERVICE_TITAN_AUDIT_DRY_RUN` status.
+- Slack token presence.
+- `SLACK_ALERT_CHANNEL_ID` and fallback channel presence.
+- Effective Slack channel.
+- `auth.test` result when a token is present.
+- Whether a Slack test message would be sent.
+- A reminder that ServiceTitan audit email alerts are not implemented.
+
+Send a safe Slack test message:
+
+```bash
+NOTIFICATIONS_TEST_SEND=true python3 -m marketing_os_agent notifications-test
+```
+
+Message text:
+
+```text
+[TEST] Marketing OS Agent notification test. If you see this, Slack alert delivery works.
+```
+
+Build a synthetic ServiceTitan alert without calling ServiceTitan, writing violations, or touching dedupe:
+
+```bash
+python3 -m marketing_os_agent servicetitan-alert-test
+```
+
+Send that synthetic ServiceTitan alert to Slack only when explicitly enabled:
+
+```bash
+NOTIFICATIONS_TEST_SEND=true python3 -m marketing_os_agent servicetitan-alert-test
+```
+
+Validate SMTP/email config without sending:
+
+```bash
+python3 -m marketing_os_agent email-test --to you@example.com
+```
+
+Send a safe SMTP test email only when explicitly enabled:
+
+```bash
+NOTIFICATIONS_TEST_SEND=true python3 -m marketing_os_agent email-test --to you@example.com
+```
+
+The existing `test-email` command still sends the Friday-roundup preview immediately. Use `email-test` for safer notification diagnostics.
+
+## Render Notification Env Vars
+
+Required for live ServiceTitan Slack alert delivery:
+
+```env
+SERVICE_TITAN_AUDIT_DRY_RUN=false
+SLACK_BOT_TOKEN=
+SLACK_ALERT_CHANNEL_ID=
+```
+
+Fallback if no dedicated ServiceTitan alert channel is used:
+
+```env
+SLACK_MARKETING_OPS_CHANNEL_ID=
+```
+
+Optional and normally false:
+
+```env
+NOTIFICATIONS_TEST_SEND=false
+SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME=false
+```
+
+Required only for SMTP email/report delivery, not ServiceTitan audit alerts:
+
+```env
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASS=
+EMAIL_FROM=
+TIM_EMAIL=
+VADIM_EMAIL=
+```
 
 ## Dry Run Mode
 
@@ -158,13 +451,19 @@ The summary includes:
 - Appointments scanned.
 - Invoices scanned.
 - Invoice items scanned.
+- Estimates scanned.
 - Notes scanned.
 - Photos scanned.
+- Forms scanned.
+- Equipment records scanned.
+- Purchase orders scanned.
 - Technician time records scanned.
 - Rules evaluated.
+- Pass/fail/insufficient_data/error counts.
 - Violations detected.
 - `insufficient_data` count by rule.
 - Missing data category counts.
+- Alert destinations.
 - Alerts sent.
 - Alerts that would have been sent.
 - Alerts skipped due to dedupe.
@@ -202,6 +501,16 @@ python3 -m marketing_os_agent servicetitan-audit-once
 
 The one-time command runs exactly one cycle and exits. It intentionally does not require `SERVICE_TITAN_AUDIT_ENABLED=true`, so you can validate real ServiceTitan data without enabling continuous polling. Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` until you are ready to send Slack alerts.
 
+Validate notification delivery paths:
+
+```bash
+python3 -m marketing_os_agent notifications-test
+python3 -m marketing_os_agent servicetitan-alert-test
+python3 -m marketing_os_agent email-test --to you@example.com
+```
+
+Set `NOTIFICATIONS_TEST_SEND=true` only when you want the test command to send a real Slack or SMTP test message.
+
 Run the long-lived service:
 
 ```bash
@@ -210,11 +519,44 @@ python3 -m marketing_os_agent run
 
 ## Adding A Rule
 
-1. Add an `AuditRule` in `service_titan_rules.py`.
-2. Keep it inside the correct ruleset builder.
-3. Declare `rule_id`, `ruleset`, `severity`, `title`, `description`, `required_fields`, and recommended action.
-4. Return `insufficient_data` when required fields are unavailable.
-5. Add unit tests for pass, fail, insufficient data, and alert dedupe if the rule creates a new violation class.
+1. Add a `HandbookRuleDefinition` in `service_titan_handbook.py` when the rule comes from a handbook.
+2. Add an `AuditRule` or handbook evaluator in `service_titan_rules.py`.
+3. Keep it inside the correct ruleset builder.
+4. Declare `rule_id`, `ruleset`, `severity`, `title`, `description`, `required_fields`, recommended action, alert recipient, and delivery mode.
+5. Keep thresholds, keyword lists, and noisy rule controls in config/env when the value may change.
+6. Return `insufficient_data` when required fields are unavailable.
+7. Add unit tests for pass, fail, insufficient data, and alert dedupe if the rule creates a new violation class.
+
+Do not:
+
+- Infer violations from absent sources.
+- Add Ply pass/fail checks without a real Ply data source.
+- Include customer names, addresses, phone numbers, emails, raw notes, secrets, or tokens in debug logs.
+
+## Manual Dry-Run Command
+
+Recommended first validation:
+
+```bash
+SERVICE_TITAN_AUDIT_DRY_RUN=true SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true python3 -m marketing_os_agent servicetitan-audit-once
+```
+
+Confirm the output includes:
+
+```text
+- dry_run: True
+```
+
+Review:
+
+- Jobs, appointments, invoices, invoice items, estimates, notes, forms, equipment, purchase orders, and technician time counts.
+- Rule result counts.
+- `insufficient_data by rule`.
+- Missing data category counts.
+- Alerts that would have been sent.
+- Alert destinations.
+
+Keep dry-run enabled until notification delivery and routing are separately verified.
 
 ## Manual QA Checklist
 
@@ -228,6 +570,13 @@ python3 -m marketing_os_agent run
 8. Slack failure: logged, violation remains unalerted and retries later.
 9. Agent restart: existing alerted violations are not re-alerted.
 10. Disabled ruleset: rules from that module do not run.
+11. Handbook matrix loads and includes source, availability, routing, action, and delivery metadata.
+12. Appointment arrival rules pass/fail using mapped appointment or assignment fields.
+13. HHR, equipment, option count, Home Comfort Plan, authorization, payment, and same-day estimate rules pass/fail only when their sources are available.
+14. Diagnostic fee rules do not fail repair-sold waiver checks when amount data is unknown.
+15. Special-order, follow-up, scope-change, cancellation-after-materials, and defective-part rules trigger only when notes/PO text indicate the condition applies.
+16. Ply-only rules remain `insufficient_data` until Ply access exists.
+17. `SERVICE_TITAN_DISABLED_RULE_IDS_JSON` disables a noisy rule without changing code.
 
 ## Render Deployment Notes
 
@@ -242,6 +591,10 @@ python3 -m marketing_os_agent run
 ## Known Limitations
 
 - Some requested checks depend on fields that may not be returned by the ServiceTitan Jobs endpoint in every tenant.
-- Payroll/time-entry, invoice detail, forms/options, photos, notes, and supporting evidence may require additional ServiceTitan endpoints or report/export APIs.
-- The first version records `insufficient_data` in logs rather than guessing.
+- Payroll/time-entry, invoice detail, forms/options, photos, notes, installed equipment, purchase orders, and supporting evidence may require additional ServiceTitan scopes or report/export APIs.
+- Ply-only checks are not pass/fail capable yet because there is no Ply API/client/config in this repository.
+- ServiceTitan reminders/tasks are not integrated yet, so special-order reminder verification remains `insufficient_data`.
+- Fine-grained photo requirements are currently enforced as photo presence. Per-category validation needs attachment tags, form fields, or image classification that is not currently available.
+- The actual handbook PDFs were not included with the provided attachment; reconcile the matrix against the PDFs before treating it as final legal/operations policy.
+- The agent records `insufficient_data` in logs rather than guessing.
 - Resolution tracking is rule-based: a stored violation is marked resolved when the same deterministic rule key later evaluates as `pass`.

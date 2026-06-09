@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .clients.claude import ClaudeClient
 from .clients.email_client import EmailClient
 from .clients.notion import NotionClient
-from .clients.servicetitan import ServiceTitanClient
+from .clients.servicetitan import ServiceTitanClient, ServiceTitanJob
 from .clients.slack import SlackClient
 from .config import HealthReport, Settings
 from .domain.campaign_health import CampaignHealthService
@@ -17,6 +17,7 @@ from .domain.owner_mapping import OwnerResolver
 from .domain.formatting import format_friday_roundup_email
 from .domain.reports import ReportService, month_bounds, quarter_bounds, week_bounds
 from .domain.service_titan_audit import ServiceTitanAuditLoop, ServiceTitanAuditService, ServiceTitanAuditSummary
+from .domain.service_titan_rules import RESULT_FAIL, RuleResult
 from .domain.task_processor import TaskProcessor
 from .http_server import AgentHttpServer
 from .models import ValidationReport
@@ -123,6 +124,130 @@ class AgentApp:
 
     def run_service_titan_audit_once(self, *, force: bool = False) -> ServiceTitanAuditSummary:
         return self.service_titan_audit.audit_once(require_enabled=not force)
+
+    def notifications_test_text(self) -> tuple[bool, str]:
+        send = self.settings.notifications_test_send
+        channel = self.settings.slack_alert_channel_id or self.settings.slack_marketing_ops_channel_id
+        lines = [
+            "Notification diagnostics",
+            f"- NOTIFICATIONS_TEST_SEND: {send}",
+            f"- SERVICE_TITAN_AUDIT_DRY_RUN: {self.settings.service_titan_audit_dry_run}",
+            f"- SLACK_BOT_TOKEN present: {bool(self.settings.slack_bot_token)}",
+            f"- SLACK_ALERT_CHANNEL_ID present: {bool(self.settings.slack_alert_channel_id)}",
+            f"- SLACK_MARKETING_OPS_CHANNEL_ID present: {bool(self.settings.slack_marketing_ops_channel_id)}",
+            f"- effective Slack channel: {channel or '<missing>'}",
+            "- ServiceTitan audit email alerts: not implemented",
+        ]
+        ok = bool(self.settings.slack_bot_token and channel)
+        if self.settings.slack_bot_token:
+            auth = self.slack.auth_test()
+            if auth:
+                lines.append(f"- Slack auth.test: ok (team={auth.get('team') or 'unknown'}, bot/user={auth.get('user') or auth.get('bot_id') or 'unknown'})")
+            else:
+                lines.append("- Slack auth.test: failed")
+                ok = False
+        else:
+            lines.append("- Slack auth.test: skipped because SLACK_BOT_TOKEN is missing")
+
+        if not send:
+            lines.append("- Slack test message: skipped because NOTIFICATIONS_TEST_SEND=false")
+            lines.append("- No Slack/email messages were sent.")
+            return ok, "\n".join(lines)
+
+        if not self.settings.slack_bot_token or not channel:
+            lines.append("- Slack test message: not sent because Slack token or channel is missing")
+            return False, "\n".join(lines)
+
+        ts = self.slack.post_message(channel, "[TEST] Marketing OS Agent notification test. If you see this, Slack alert delivery works.")
+        if ts:
+            lines.append(f"- Slack test message: sent (ts={ts})")
+            return ok, "\n".join(lines)
+        lines.append("- Slack test message: failed. Check bot token, channel ID, and whether the bot is invited to the channel.")
+        return False, "\n".join(lines)
+
+    def email_test_text(self, recipients: list[str] | None = None) -> tuple[bool, str]:
+        send = self.settings.notifications_test_send
+        target_recipients = self._clean_email_recipients(recipients)
+        missing = self.settings.missing_email_credentials()
+        lines = [
+            "Email diagnostics",
+            "- Email subsystem: implemented via SMTP EmailClient",
+            "- ServiceTitan audit email alerts: not implemented",
+            f"- NOTIFICATIONS_TEST_SEND: {send}",
+            f"- SMTP_HOST present: {bool(self.settings.smtp_host)}",
+            f"- SMTP_USER present: {bool(self.settings.smtp_user)}",
+            f"- SMTP_PASS present: {bool(self.settings.smtp_pass)}",
+            f"- EMAIL_FROM present: {bool(self.settings.email_from)}",
+            f"- recipients: {', '.join(target_recipients) if target_recipients else '<missing>'}",
+        ]
+        if missing:
+            lines.append("- missing email config: " + ", ".join(missing))
+        if not send:
+            lines.append("- Email test message: skipped because NOTIFICATIONS_TEST_SEND=false")
+            lines.append("- No email was sent.")
+            return (not missing and bool(target_recipients)), "\n".join(lines)
+        sent, sent_recipients = self.send_test_email(target_recipients)
+        if sent:
+            lines.append("- Email test message: sent to " + ", ".join(sent_recipients))
+            return True, "\n".join(lines)
+        lines.append("- Email test message: failed. Check SMTP_* and EMAIL_FROM, then inspect email_failure logs.")
+        return False, "\n".join(lines)
+
+    def service_titan_alert_test_text(self) -> tuple[bool, str]:
+        send = self.settings.notifications_test_send
+        channel = self.settings.slack_alert_channel_id or self.settings.slack_marketing_ops_channel_id
+        job = ServiceTitanJob(
+            job_id="synthetic-notification-test",
+            job_number="TEST-SERVICETITAN-ALERT",
+            status="Completed",
+            modified_on=datetime.now(timezone.utc),
+            completed_on=datetime.now(timezone.utc),
+            technician_name="Test Technician",
+            dispatcher_name="Test Dispatcher",
+            invoice_total=0.0,
+            present_fields={"status"},
+        )
+        result = RuleResult(
+            rule_id="synthetic_servicetitan_alert_test",
+            ruleset="ServiceTitan Notification Test",
+            severity="test",
+            title="[TEST] Synthetic ServiceTitan audit alert",
+            description="Development-only test alert used to verify Slack routing and formatting.",
+            status=RESULT_FAIL,
+            explanation="[TEST] Synthetic ServiceTitan violation. No customer or ServiceTitan data was used.",
+            recommended_action="No action required. Use this only to verify alert delivery.",
+            required_fields=(),
+            violation_key="servicetitan:synthetic-notification-test:no-appointment:synthetic_servicetitan_alert_test:unknown",
+            metadata={},
+            handbook_source="notification diagnostics",
+            recommended_alert_recipient="slack audit channel",
+            delivery="test",
+        )
+        payload = self.service_titan_audit._alert_text(job, result)
+        lines = [
+            "Synthetic ServiceTitan alert diagnostics",
+            f"- NOTIFICATIONS_TEST_SEND: {send}",
+            f"- SERVICE_TITAN_AUDIT_DRY_RUN: {self.settings.service_titan_audit_dry_run}",
+            "- calls ServiceTitan: false",
+            "- writes violation/dedupe records: false",
+            f"- effective Slack channel: {channel or '<missing>'}",
+            f"- would_send: {bool(self.settings.slack_bot_token and channel)}",
+            "- alert payload:",
+            payload,
+        ]
+        ok = bool(self.settings.slack_bot_token and channel)
+        if not send:
+            lines.append("- Slack send: skipped because NOTIFICATIONS_TEST_SEND=false")
+            return ok, "\n".join(lines)
+        if not self.settings.slack_bot_token or not channel:
+            lines.append("- Slack send: not attempted because Slack token or channel is missing")
+            return False, "\n".join(lines)
+        ts = self.slack.post_message(channel, payload)
+        if ts:
+            lines.append(f"- Slack send: sent (ts={ts})")
+            return True, "\n".join(lines)
+        lines.append("- Slack send: failed. Check bot token, channel ID, and whether the bot is invited to the channel.")
+        return False, "\n".join(lines)
 
     def validate_notion(self) -> ValidationReport:
         return self.notion.validate_databases()
@@ -241,11 +366,7 @@ class AgentApp:
         return "\n".join(lines)
 
     def send_test_email(self, recipients: list[str] | None = None) -> tuple[bool, list[str]]:
-        target_recipients = recipients or [self.settings.tim_email, self.settings.vadim_email]
-        cleaned_recipients: list[str] = []
-        for item in target_recipients:
-            cleaned_recipients.extend(part.strip() for part in item.split(",") if part.strip())
-        cleaned_recipients = list(dict.fromkeys(cleaned_recipients))
+        cleaned_recipients = self._clean_email_recipients(recipients)
         if not cleaned_recipients:
             logger.warning("email_test_recipient_missing")
             return False, []
@@ -265,6 +386,13 @@ class AgentApp:
         sent = self.email.send_email("[Test] Friday Marketing Roundup Preview", body, cleaned_recipients, html_body=html_body)
         logger.info("email_test_completed", extra={"sent": sent, "recipients": cleaned_recipients})
         return sent, cleaned_recipients
+
+    def _clean_email_recipients(self, recipients: list[str] | None = None) -> list[str]:
+        target_recipients = recipients or [self.settings.tim_email, self.settings.vadim_email]
+        cleaned_recipients: list[str] = []
+        for item in target_recipients:
+            cleaned_recipients.extend(part.strip() for part in item.split(",") if part.strip())
+        return list(dict.fromkeys(cleaned_recipients))
 
     def health_payload(self) -> dict[str, object]:
         return {"ok": True, "service": "marketing-os-agent"}

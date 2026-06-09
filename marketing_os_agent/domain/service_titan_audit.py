@@ -26,13 +26,19 @@ class ServiceTitanAuditSummary:
     appointments_scanned: int = 0
     invoices_scanned: int = 0
     invoice_items_scanned: int = 0
+    estimates_scanned: int = 0
     notes_scanned: int = 0
     photos_scanned: int = 0
+    forms_scanned: int = 0
+    equipment_records_scanned: int = 0
+    purchase_orders_scanned: int = 0
     technician_time_records_scanned: int = 0
     rules_evaluated: int = 0
     violations_detected: int = 0
+    result_counts: dict[str, int] = field(default_factory=dict)
     insufficient_data_by_rule: dict[str, int] = field(default_factory=dict)
     missing_data_category_counts: dict[str, int] = field(default_factory=dict)
+    alert_destination_counts: dict[str, int] = field(default_factory=dict)
     alerts_sent: int = 0
     alerts_would_send: int = 0
     alerts_skipped_dedupe: int = 0
@@ -47,8 +53,12 @@ class ServiceTitanAuditSummary:
             f"- appointments scanned: {self.appointments_scanned}",
             f"- invoices scanned: {self.invoices_scanned}",
             f"- invoice items scanned: {self.invoice_items_scanned}",
+            f"- estimates scanned: {self.estimates_scanned}",
             f"- notes scanned: {self.notes_scanned}",
             f"- photos scanned: {self.photos_scanned}",
+            f"- forms scanned: {self.forms_scanned}",
+            f"- equipment records scanned: {self.equipment_records_scanned}",
+            f"- purchase orders scanned: {self.purchase_orders_scanned}",
             f"- technician time records scanned: {self.technician_time_records_scanned}",
             f"- rules evaluated: {self.rules_evaluated}",
             f"- violations detected: {self.violations_detected}",
@@ -57,6 +67,10 @@ class ServiceTitanAuditSummary:
             f"- alerts skipped due to dedupe: {self.alerts_skipped_dedupe}",
             f"- errors: {self.errors}",
         ]
+        if self.result_counts:
+            lines.append("- rule result counts:")
+            for status, count in sorted(self.result_counts.items()):
+                lines.append(f"  - {status}: {count}")
         if self.insufficient_data_by_rule:
             lines.append("- insufficient_data by rule:")
             for rule_id, count in sorted(self.insufficient_data_by_rule.items()):
@@ -65,6 +79,10 @@ class ServiceTitanAuditSummary:
             lines.append("- missing data category counts:")
             for category, count in sorted(self.missing_data_category_counts.items()):
                 lines.append(f"  - {category}: {count}")
+        if self.alert_destination_counts:
+            lines.append("- alert destinations:")
+            for destination, count in sorted(self.alert_destination_counts.items()):
+                lines.append(f"  - {destination}: {count}")
         if self.config_errors:
             lines.append("- config errors:")
             lines.extend(f"  - {item}" for item in self.config_errors)
@@ -114,8 +132,12 @@ class ServiceTitanAuditService:
         summary.appointments_scanned = sum(job.related_counts.get("appointments", 0) for job in jobs)
         summary.invoices_scanned = sum(job.related_counts.get("invoices", 0) for job in jobs)
         summary.invoice_items_scanned = sum(job.related_counts.get("invoice_items", 0) for job in jobs)
+        summary.estimates_scanned = sum(job.related_counts.get("estimates", 0) + job.related_counts.get("opportunities", 0) for job in jobs)
         summary.notes_scanned = sum(job.related_counts.get("notes", 0) for job in jobs)
         summary.photos_scanned = sum(job.related_counts.get("photos", 0) for job in jobs)
+        summary.forms_scanned = sum(job.related_counts.get("forms", 0) for job in jobs)
+        summary.equipment_records_scanned = sum(job.related_counts.get("equipment", 0) for job in jobs)
+        summary.purchase_orders_scanned = sum(job.related_counts.get("purchase_orders", 0) for job in jobs)
         summary.technician_time_records_scanned = sum(job.related_counts.get("technician_time_records", 0) for job in jobs)
         for job in jobs:
             for category in job.missing_data:
@@ -125,8 +147,11 @@ class ServiceTitanAuditService:
                 for result in self._evaluate_job(job):
                     summary.rules_evaluated += 1
                     counts[result.status] = counts.get(result.status, 0) + 1
+                    summary.result_counts[result.status] = summary.result_counts.get(result.status, 0) + 1
                     if result.status == RESULT_FAIL:
                         summary.violations_detected += 1
+                        destination = result.recommended_alert_recipient or "slack audit channel"
+                        summary.alert_destination_counts[destination] = summary.alert_destination_counts.get(destination, 0) + 1
                         alert_status = self._record_and_alert(job, result)
                         if alert_status == "sent":
                             summary.alerts_sent += 1
@@ -164,8 +189,12 @@ class ServiceTitanAuditService:
                 "appointments_seen": summary.appointments_scanned,
                 "invoices_seen": summary.invoices_scanned,
                 "invoice_items_seen": summary.invoice_items_scanned,
+                "estimates_seen": summary.estimates_scanned,
                 "notes_seen": summary.notes_scanned,
                 "photos_seen": summary.photos_scanned,
+                "forms_seen": summary.forms_scanned,
+                "equipment_records_seen": summary.equipment_records_scanned,
+                "purchase_orders_seen": summary.purchase_orders_scanned,
                 "technician_time_records_seen": summary.technician_time_records_scanned,
                 "rules_evaluated": summary.rules_evaluated,
                 "violations_detected": summary.violations_detected,
@@ -173,6 +202,7 @@ class ServiceTitanAuditService:
                 "alerts_would_send": summary.alerts_would_send,
                 "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
                 "counts": counts,
+                "alert_destination_counts": summary.alert_destination_counts,
                 "insufficient_data_by_rule": summary.insufficient_data_by_rule,
                 "missing_data_category_counts": summary.missing_data_category_counts,
                 "since": since.isoformat(),
@@ -186,8 +216,12 @@ class ServiceTitanAuditService:
                 "appointments_seen": summary.appointments_scanned,
                 "invoices_seen": summary.invoices_scanned,
                 "invoice_items_seen": summary.invoice_items_scanned,
+                "estimates_seen": summary.estimates_scanned,
                 "notes_seen": summary.notes_scanned,
                 "photos_seen": summary.photos_scanned,
+                "forms_seen": summary.forms_scanned,
+                "equipment_records_seen": summary.equipment_records_scanned,
+                "purchase_orders_seen": summary.purchase_orders_scanned,
                 "technician_time_records_seen": summary.technician_time_records_scanned,
                 "rules_evaluated": summary.rules_evaluated,
                 "violations_detected": summary.violations_detected,
@@ -214,6 +248,9 @@ class ServiceTitanAuditService:
             "appointment_id": job.appointment_id,
             "technician_name": job.technician_name,
             "dispatcher_name": job.dispatcher_name,
+            "alert_recipient": result.recommended_alert_recipient,
+            "delivery": result.delivery,
+            "handbook_source": result.handbook_source,
             "rule_metadata": result.metadata,
         }
         if self.settings.service_titan_audit_dry_run:
@@ -261,6 +298,8 @@ class ServiceTitanAuditService:
             f"*Ruleset:* {result.ruleset}",
             f"*Rule:* {result.title}",
             f"*Job:* {job.job_number or job.job_id}",
+            f"*Destination:* {result.recommended_alert_recipient}",
+            f"*Delivery:* {result.delivery}",
         ]
         if self.settings.service_titan_alert_include_customer_name and job.customer_name:
             lines.append(f"*Customer:* {job.customer_name}")

@@ -44,14 +44,52 @@ class ServiceTitanJob:
     clock_out_at: datetime | None = None
     lunch_break_minutes: int | None = None
     invoice_line_items: list[str] = field(default_factory=list)
+    invoice_items: list[dict[str, Any]] = field(default_factory=list)
+    invoice_status: str = ""
     invoice_total: float | None = None
+    invoice_balance: float | None = None
+    payment_total: float | None = None
+    payments_count: int | None = None
+    diagnostic_fee_present: bool | None = None
+    diagnostic_fee_charged: bool | None = None
+    diagnostic_fee_waived: bool | None = None
+    repair_sold: bool | None = None
     completed_phases: list[str] = field(default_factory=list)
     operational_data: dict[str, str] = field(default_factory=dict)
     operational_data_complete: bool | None = None
     options_presented: bool | None = None
+    estimate_count: int | None = None
+    same_day_estimate_present: bool | None = None
+    home_comfort_plan_option_present: bool | None = None
     notes: str | None = None
     photo_count: int | None = None
     supporting_evidence_count: int | None = None
+    forms_count: int | None = None
+    hhr_completed: bool | None = None
+    equipment_count: int | None = None
+    equipment_complete: bool | None = None
+    authorization_count: int | None = None
+    follow_up_needed: bool | None = None
+    follow_up_task_present: bool | None = None
+    special_order_detected: bool | None = None
+    special_order_missing_fields: list[str] = field(default_factory=list)
+    special_order_reminder_present: bool | None = None
+    downpayment_recorded: bool | None = None
+    lead_turnover_required: bool | None = None
+    lead_turnover_documented: bool | None = None
+    purchase_orders: list[dict[str, Any]] = field(default_factory=list)
+    purchase_orders_count: int | None = None
+    po_received_not_reconciled_count: int | None = None
+    po_missing_vendor_document_count: int | None = None
+    po_missing_attachment_count: int | None = None
+    po_not_synced_count: int | None = None
+    ply_data_available: bool = False
+    scope_change_detected: bool | None = None
+    scope_change_escalated: bool | None = None
+    cancellation_after_materials_detected: bool | None = None
+    cancellation_escalated: bool | None = None
+    defective_part_detected: bool | None = None
+    warranty_claim_documented: bool | None = None
     url: str = ""
     present_fields: set[str] = field(default_factory=set)
     related_counts: dict[str, int] = field(default_factory=dict)
@@ -116,10 +154,47 @@ class ServiceTitanClient:
         clock_out_at = job.clock_out_at
         lunch_break_minutes = job.lunch_break_minutes
         invoice_line_items = list(job.invoice_line_items)
+        invoice_items = list(job.invoice_items)
+        invoice_status = job.invoice_status
         invoice_total = job.invoice_total
+        invoice_balance = job.invoice_balance
+        payment_total = job.payment_total
+        payments_count = job.payments_count
+        diagnostic_fee_present = job.diagnostic_fee_present
+        diagnostic_fee_charged = job.diagnostic_fee_charged
+        diagnostic_fee_waived = job.diagnostic_fee_waived
+        repair_sold = job.repair_sold
         notes = job.notes
         photo_count = job.photo_count
         supporting_evidence_count = job.supporting_evidence_count
+        forms_count = job.forms_count
+        hhr_completed = job.hhr_completed
+        equipment_count = job.equipment_count
+        equipment_complete = job.equipment_complete
+        authorization_count = job.authorization_count
+        estimate_count = job.estimate_count
+        same_day_estimate_present = job.same_day_estimate_present
+        home_comfort_plan_option_present = job.home_comfort_plan_option_present
+        purchase_orders = list(job.purchase_orders)
+        purchase_orders_count = job.purchase_orders_count
+        po_received_not_reconciled_count = job.po_received_not_reconciled_count
+        po_missing_vendor_document_count = job.po_missing_vendor_document_count
+        po_missing_attachment_count = job.po_missing_attachment_count
+        po_not_synced_count = job.po_not_synced_count
+        follow_up_needed = job.follow_up_needed
+        follow_up_task_present = job.follow_up_task_present
+        special_order_detected = job.special_order_detected
+        special_order_missing_fields = list(job.special_order_missing_fields)
+        special_order_reminder_present = job.special_order_reminder_present
+        downpayment_recorded = job.downpayment_recorded
+        lead_turnover_required = job.lead_turnover_required
+        lead_turnover_documented = job.lead_turnover_documented
+        scope_change_detected = job.scope_change_detected
+        scope_change_escalated = job.scope_change_escalated
+        cancellation_after_materials_detected = job.cancellation_after_materials_detected
+        cancellation_escalated = job.cancellation_escalated
+        defective_part_detected = job.defective_part_detected
+        warranty_claim_documented = job.warranty_claim_documented
         completed_phases = list(job.completed_phases)
         options_presented = job.options_presented
 
@@ -185,27 +260,41 @@ class ServiceTitanClient:
         available_keys["invoices"] = _records_keys(invoices)
         if invoices_error:
             missing_data.setdefault("invoice_line_items", invoices_error)
+            missing_data.setdefault("invoice_status", invoices_error)
+            missing_data.setdefault("payments", invoices_error)
         else:
             invoice_ids = [value for value in [invoice_id, *[str(_raw_value(record, ("id", "invoiceId")) or "") for record in invoices]] if value]
+            invoice_item_records: list[dict[str, Any]] = []
             if invoices:
                 invoice_id = invoice_ids[0] if invoice_ids else invoice_id
+                invoice_status = invoice_status or _display_value(_raw_value(invoices[0], ("status", "invoiceStatus", "status.name")))
                 invoice_total = invoice_total if invoice_total is not None else _first_float(invoices, ("total", "subtotal", "balance", "amount"))
+                invoice_balance = invoice_balance if invoice_balance is not None else _first_float(invoices, ("balance", "remainingBalance", "amountDue"))
+                payment_summary = _payment_summary(invoices)
+                if payment_total is None:
+                    payment_total = payment_summary["payment_total"]
+                if payments_count is None:
+                    payments_count = payment_summary["payments_count"]
                 invoice_line_items.extend(_line_item_names_from_records(invoices))
-            invoice_item_records: list[dict[str, Any]] = []
-            if not invoice_line_items:
-                invoice_item_records, invoice_items_error = self._related_records(
-                    "invoice_items",
-                    self._tenant_path("accounting", "export/invoice-items"),
-                    {"invoiceIds": ",".join(invoice_ids)} if invoice_ids else {"jobId": job.job_id},
-                )
-                available_keys["invoice_items"] = _records_keys(invoice_item_records)
-                if invoice_items_error:
-                    missing_data.setdefault("invoice_line_items", invoice_items_error)
-                else:
-                    invoice_line_items.extend(_invoice_item_names(invoice_item_records))
-            related_counts["invoice_items"] = len(invoice_item_records) if invoice_item_records else len(invoice_line_items)
-            if invoices or invoice_item_records:
+                invoice_items.extend(_invoice_items_from_records(invoices))
+            invoice_item_records, invoice_items_error = self._related_records(
+                "invoice_items",
+                self._tenant_path("accounting", "export/invoice-items"),
+                {"invoiceIds": ",".join(invoice_ids)} if invoice_ids else {"jobId": job.job_id},
+            )
+            available_keys["invoice_items"] = _records_keys(invoice_item_records)
+            if invoice_items_error:
+                missing_data.setdefault("invoice_line_items", invoice_items_error)
+            else:
+                invoice_line_items.extend(_invoice_item_names(invoice_item_records))
+                invoice_items.extend(_invoice_items_from_records(invoice_item_records))
+            related_counts["invoice_items"] = len(invoice_items) if invoice_items else len(invoice_line_items)
+            if invoices or invoice_item_records or "invoice_line_items" in present_fields:
                 present_fields.add("invoice_line_items")
+                if invoice_status:
+                    present_fields.add("invoice_status")
+                if payment_total is not None or payments_count is not None or invoice_balance is not None:
+                    present_fields.add("payments")
             elif not invoices_error:
                 present_fields.add("invoice_line_items")
 
@@ -282,6 +371,64 @@ class ServiceTitanClient:
             related_counts["photos"] = photo_count or 0
             present_fields.update({"photos", "supporting_evidence"})
 
+        form_records, forms_error = self._related_records(
+            "forms",
+            self._tenant_path("forms", "submissions"),
+            {"jobId": job.job_id},
+        )
+        related_counts["forms"] = len(form_records)
+        available_keys["forms"] = _records_keys(form_records)
+        if forms_error:
+            missing_data.setdefault("forms", forms_error)
+            missing_data.setdefault("hhr", forms_error)
+            missing_data.setdefault("authorization", forms_error)
+        else:
+            forms_count = len(form_records)
+            hhr_completed = _records_contain_keywords(form_records, self.settings.service_titan_hhr_keywords)
+            authorization_count = _authorization_count(form_records, attachments)
+            present_fields.update({"forms", "hhr", "authorization"})
+
+        equipment_records, equipment_error = self._related_records(
+            "equipment",
+            self._tenant_path("equipments", "installed-equipment"),
+            {"jobId": job.job_id},
+        )
+        related_counts["equipment"] = len(equipment_records)
+        available_keys["equipment"] = _records_keys(equipment_records)
+        if equipment_error:
+            missing_data.setdefault("equipment", equipment_error)
+        else:
+            equipment_count = len(equipment_records)
+            equipment_complete = _equipment_complete(equipment_records)
+            present_fields.add("equipment")
+
+        purchase_order_records, purchase_orders_error = self._related_records(
+            "purchase_orders",
+            self._tenant_path("inventory", "purchase-orders"),
+            {"jobId": job.job_id},
+        )
+        related_counts["purchase_orders"] = len(purchase_order_records)
+        available_keys["purchase_orders"] = _records_keys(purchase_order_records)
+        if purchase_orders_error:
+            missing_data.setdefault("purchase_orders", purchase_orders_error)
+            missing_data.setdefault("po_vendor_document", purchase_orders_error)
+            missing_data.setdefault("po_attachments", purchase_orders_error)
+            missing_data.setdefault("po_reconciliation", purchase_orders_error)
+        else:
+            purchase_orders = _purchase_order_summaries(purchase_order_records)
+            purchase_orders_count = len(purchase_orders)
+            po_received_not_reconciled_count = sum(
+                1 for record in purchase_orders if record.get("received") and not record.get("reconciled")
+            )
+            po_missing_vendor_document_count = sum(
+                1 for record in purchase_orders if record.get("received") and not record.get("vendor_document_present")
+            )
+            po_missing_attachment_count = sum(
+                1 for record in purchase_orders if record.get("received") and not record.get("attachments_count")
+            )
+            po_not_synced_count = None
+            present_fields.update({"purchase_orders", "po_vendor_document", "po_attachments", "po_reconciliation"})
+
         job_history, history_error = self._related_records(
             "job_history",
             self._tenant_path("jpm", f"jobs/{job.job_id}/history"),
@@ -304,10 +451,18 @@ class ServiceTitanClient:
         related_counts["estimates"] = len(estimate_records)
         available_keys["estimates"] = _records_keys(estimate_records)
         if not estimate_error:
+            estimate_count = len(estimate_records)
+            same_day_estimate_present = _same_day_estimate_present(estimate_records, job.completed_on or job.modified_on or job.arrival_window_start)
+            home_comfort_plan_option_present = _records_contain_keywords(estimate_records, self.settings.service_titan_home_comfort_plan_keywords)
+            present_fields.update({"estimates", "same_day_estimate", "home_comfort_plan_option"})
             explicit_options = _explicit_options_presented(estimate_records)
             if explicit_options is not None:
                 options_presented = explicit_options
                 present_fields.add("options_presented")
+        else:
+            missing_data.setdefault("estimates", estimate_error)
+            missing_data.setdefault("same_day_estimate", estimate_error)
+            missing_data.setdefault("home_comfort_plan_option", estimate_error)
 
         opportunity_records, opportunity_error = self._related_records(
             "opportunities",
@@ -316,13 +471,71 @@ class ServiceTitanClient:
         )
         related_counts["opportunities"] = len(opportunity_records)
         available_keys["opportunities"] = _records_keys(opportunity_records)
-        if not opportunity_error and "options_presented" not in present_fields:
-            explicit_options = _explicit_options_presented(opportunity_records)
-            if explicit_options is not None:
-                options_presented = explicit_options
-                present_fields.add("options_presented")
+        if not opportunity_error:
+            if estimate_count is None:
+                estimate_count = len(opportunity_records)
+            elif not estimate_count:
+                estimate_count = len(opportunity_records)
+            if home_comfort_plan_option_present is not True:
+                home_comfort_plan_option_present = _records_contain_keywords(
+                    opportunity_records,
+                    self.settings.service_titan_home_comfort_plan_keywords,
+                )
+            if "options_presented" not in present_fields:
+                explicit_options = _explicit_options_presented(opportunity_records)
+                if explicit_options is not None:
+                    options_presented = explicit_options
+                    present_fields.add("options_presented")
         if "options_presented" not in present_fields:
             missing_data.setdefault("options_presented", "sales estimates/opportunities did not expose an explicit options-presented field")
+
+        diagnostic_summary = _diagnostic_fee_summary(invoice_items, invoice_line_items, self.settings.service_titan_diagnostic_fee_keywords)
+        if diagnostic_fee_present is None:
+            diagnostic_fee_present = diagnostic_summary["present"]
+        if diagnostic_fee_charged is None:
+            diagnostic_fee_charged = diagnostic_summary["charged"]
+        if diagnostic_fee_waived is None:
+            diagnostic_fee_waived = diagnostic_summary["waived"]
+        if repair_sold is None:
+            repair_sold = _repair_sold(invoice_items, invoice_line_items, self.settings.service_titan_diagnostic_fee_keywords)
+        if downpayment_recorded is None:
+            downpayment_recorded = _has_keywords(
+                " ".join(invoice_line_items),
+                ("deposit", "down payment", "downpayment", "prepayment"),
+            ) or bool((payment_total or 0) > 0 and _has_keywords(_records_text(purchase_orders), ("special", "order")))
+
+        audit_text = " ".join(
+            part
+            for part in (
+                notes or "",
+                " ".join(invoice_line_items),
+                _records_text(form_records),
+                _records_text(estimate_records),
+                _records_text(opportunity_records),
+                _records_text(purchase_order_records),
+            )
+            if part
+        )
+        if "notes" in present_fields:
+            follow_up_needed = _has_keywords(audit_text, ("follow up", "follow-up", "call back", "return visit", "needs follow"))
+            follow_up_task_present = _has_keywords(audit_text, ("follow up task", "follow-up task", "reminder", "recall", "return scheduled"))
+            special_order_detected = _has_keywords(audit_text, ("special order", "special-order", "ordered part", "parts ordered", "order part"))
+            special_order_missing_fields = _missing_special_order_note_fields(
+                audit_text,
+                self.settings.service_titan_special_order_required_note_fields,
+            ) if special_order_detected else []
+            special_order_reminder_present = _has_keywords(audit_text, ("reminder", "expected part arrival", "eta reminder")) if special_order_detected else False
+            lead_turnover_required = _has_keywords(audit_text, ("lead turnover", "turn over lead", "sales lead", "lead set"))
+            lead_turnover_documented = _has_keywords(audit_text, ("lead turnover note", "lead notes", "turned over", "sales notified")) if lead_turnover_required else False
+            scope_change_detected = _has_keywords(audit_text, ("scope change", "changed scope", "additional scope", "change order"))
+            scope_change_escalated = _has_keywords(audit_text, ("dastan", "manager notified", "ops notified", "escalated")) if scope_change_detected else False
+            cancellation_after_materials_detected = _has_keywords(
+                audit_text,
+                ("cancelled after materials", "canceled after materials", "cancellation after materials", "cancelled after parts", "canceled after parts"),
+            )
+            cancellation_escalated = _has_keywords(audit_text, ("manager notified", "ops notified", "warehouse notified", "escalated")) if cancellation_after_materials_detected else False
+            defective_part_detected = _has_keywords(audit_text, ("defective part", "bad part", "failed part", "vendor warranty"))
+            warranty_claim_documented = _has_keywords(audit_text, ("warranty claim", "vendor claim", "rma", "defective claim")) if defective_part_detected else False
 
         if self.settings.service_titan_audit_debug_fields:
             logger.info(
@@ -349,12 +562,49 @@ class ServiceTitanClient:
             clock_out_at=clock_out_at,
             lunch_break_minutes=lunch_break_minutes,
             invoice_line_items=_dedupe_strings(invoice_line_items),
+            invoice_items=invoice_items,
+            invoice_status=invoice_status,
             invoice_total=invoice_total,
+            invoice_balance=invoice_balance,
+            payment_total=payment_total,
+            payments_count=payments_count,
+            diagnostic_fee_present=diagnostic_fee_present,
+            diagnostic_fee_charged=diagnostic_fee_charged,
+            diagnostic_fee_waived=diagnostic_fee_waived,
+            repair_sold=repair_sold,
             completed_phases=_dedupe_strings(completed_phases),
             options_presented=options_presented,
+            estimate_count=estimate_count,
+            same_day_estimate_present=same_day_estimate_present,
+            home_comfort_plan_option_present=home_comfort_plan_option_present,
             notes=notes,
             photo_count=photo_count,
             supporting_evidence_count=supporting_evidence_count,
+            forms_count=forms_count,
+            hhr_completed=hhr_completed,
+            equipment_count=equipment_count,
+            equipment_complete=equipment_complete,
+            authorization_count=authorization_count,
+            follow_up_needed=follow_up_needed,
+            follow_up_task_present=follow_up_task_present,
+            special_order_detected=special_order_detected,
+            special_order_missing_fields=special_order_missing_fields,
+            special_order_reminder_present=special_order_reminder_present,
+            downpayment_recorded=downpayment_recorded,
+            lead_turnover_required=lead_turnover_required,
+            lead_turnover_documented=lead_turnover_documented,
+            purchase_orders=purchase_orders,
+            purchase_orders_count=purchase_orders_count,
+            po_received_not_reconciled_count=po_received_not_reconciled_count,
+            po_missing_vendor_document_count=po_missing_vendor_document_count,
+            po_missing_attachment_count=po_missing_attachment_count,
+            po_not_synced_count=po_not_synced_count,
+            scope_change_detected=scope_change_detected,
+            scope_change_escalated=scope_change_escalated,
+            cancellation_after_materials_detected=cancellation_after_materials_detected,
+            cancellation_escalated=cancellation_escalated,
+            defective_part_detected=defective_part_detected,
+            warranty_claim_documented=warranty_claim_documented,
             present_fields=present_fields,
             related_counts=related_counts,
             available_keys=available_keys,
@@ -496,6 +746,14 @@ def parse_service_titan_job(payload: dict[str, Any], settings: Settings) -> Serv
     if "customFields" in payload:
         present.add("operational_data_fields")
     line_items = _line_item_names(invoice or payload, present)
+    parsed_invoice_items = _invoice_items_from_records([invoice or payload])
+    invoice_status = _display_value(_raw_value(invoice, ("status", "invoiceStatus", "status.name")))
+    if invoice_status:
+        present.add("invoice_status")
+    invoice_balance = _float_or_none(_raw_value(invoice, ("balance", "remainingBalance", "amountDue")))
+    payment_summary = _payment_summary([invoice])
+    if payment_summary["payment_total"] is not None or payment_summary["payments_count"] is not None or invoice_balance is not None:
+        present.add("payments")
 
     completed_phases = _string_list(
         _value(payload, ("completedPhases", "phasesCompleted", "phases"), present, "completed_phases")
@@ -541,7 +799,12 @@ def parse_service_titan_job(payload: dict[str, Any], settings: Settings) -> Serv
         clock_out_at=_parse_datetime(_value(payload, ("clockOutOn", "clockOutTime", "jobClockOutOn"), present, "clock_out")),
         lunch_break_minutes=_int_or_none(_value(payload, ("lunchBreakMinutes", "breakMinutes"), present, "lunch_break")),
         invoice_line_items=line_items,
+        invoice_items=parsed_invoice_items,
+        invoice_status=invoice_status,
         invoice_total=_float_or_none(_value(invoice, ("total", "invoiceTotal", "amount"), present, "invoice")),
+        invoice_balance=invoice_balance,
+        payment_total=payment_summary["payment_total"],
+        payments_count=payment_summary["payments_count"],
         completed_phases=completed_phases,
         operational_data=operational_data,
         operational_data_complete=_bool_or_none(_value(payload, ("operationalDataComplete", "requiredDataComplete"), present, "operational_data")),
@@ -785,6 +1048,50 @@ def _invoice_item_names(records: list[dict[str, Any]]) -> list[str]:
     return names
 
 
+def _invoice_items_from_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for record in records:
+        nested = _raw_value(record, ("lineItems", "items", "invoiceItems"))
+        if isinstance(nested, list):
+            items.extend(_invoice_items_from_records([item for item in nested if isinstance(item, dict)]))
+            continue
+        name = (
+            _raw_value(record, ("name", "description", "skuName", "itemName", "displayName", "code", "sku"))
+            or _raw_value(record, ("service.name", "material.name", "equipment.name"))
+        )
+        if not name:
+            continue
+        amount = _float_or_none(_raw_value(record, ("amount", "total", "totalAmount", "price", "unitPrice", "cost", "subtotal")))
+        quantity = _float_or_none(_raw_value(record, ("quantity", "qty")))
+        items.append(
+            {
+                "name": str(name),
+                "amount": amount,
+                "quantity": quantity,
+            }
+        )
+    return items
+
+
+def _payment_summary(records: list[dict[str, Any]]) -> dict[str, int | float | None]:
+    payments_count: int | None = None
+    payment_total: float | None = None
+    explicit_total = _first_float(records, ("paymentTotal", "paymentsTotal", "paidAmount", "amountPaid"))
+    if explicit_total is not None:
+        payment_total = explicit_total
+    for record in records:
+        payments = _raw_value(record, ("payments", "paymentRecords", "transactions"))
+        if not isinstance(payments, list):
+            continue
+        valid_payments = [payment for payment in payments if isinstance(payment, dict)]
+        payments_count = (payments_count or 0) + len(valid_payments)
+        amounts = [_float_or_none(_raw_value(payment, ("amount", "total", "paymentAmount"))) for payment in valid_payments]
+        numeric_amounts = [amount for amount in amounts if amount is not None]
+        if numeric_amounts:
+            payment_total = (payment_total or 0.0) + sum(numeric_amounts)
+    return {"payments_count": payments_count, "payment_total": payment_total}
+
+
 def _first_float(records: list[dict[str, Any]], names: tuple[str, ...]) -> float | None:
     for record in records:
         value = _float_or_none(_raw_value(record, names))
@@ -885,3 +1192,142 @@ def _explicit_options_presented(records: list[dict[str, Any]]) -> bool | None:
     if explicit_values:
         return any(explicit_values)
     return None
+
+
+def _records_text(records: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if any(sensitive in str(key).lower() for sensitive in ("phone", "email", "address", "token", "secret")):
+                    continue
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+        elif isinstance(value, (str, int, float, bool)) and value is not None:
+            parts.append(str(value))
+
+    for record in records:
+        visit(record)
+    return " ".join(parts)
+
+
+def _has_keywords(text: str, keywords: tuple[str, ...] | list[str]) -> bool:
+    normalized = text.lower()
+    return any(keyword.lower() in normalized for keyword in keywords if keyword)
+
+
+def _records_contain_keywords(records: list[dict[str, Any]], keywords: list[str]) -> bool:
+    if not records:
+        return False
+    return _has_keywords(_records_text(records), keywords)
+
+
+def _authorization_count(forms: list[dict[str, Any]], attachments: list[dict[str, Any]]) -> int:
+    count = 0
+    for record in [*forms, *attachments]:
+        if _has_keywords(_records_text([record]), ("authorization", "authorized", "signature", "signed", "approval", "approved")):
+            count += 1
+    return count
+
+
+def _equipment_complete(records: list[dict[str, Any]]) -> bool:
+    if not records:
+        return False
+    for record in records:
+        manufacturer = _raw_value(record, ("manufacturer", "manufacturerName", "make"))
+        model = _raw_value(record, ("model", "modelNumber"))
+        serial = _raw_value(record, ("serialNumber", "serial"))
+        location = _raw_value(record, ("location", "locationName", "installedLocation"))
+        installed = _raw_value(record, ("installedOn", "installedDate", "installDate"))
+        if not (manufacturer and model and serial and location and installed):
+            return False
+    return True
+
+
+def _purchase_order_summaries(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for record in records:
+        status = _display_value(_raw_value(record, ("status", "poStatus", "status.name"))).lower()
+        attachments = _raw_value(record, ("attachments", "documents", "files"))
+        attachments_count = len(attachments) if isinstance(attachments, list) else _int_or_none(_raw_value(record, ("attachmentsCount", "documentsCount"))) or 0
+        vendor_document = _raw_value(record, ("vendorDocumentNumber", "vendorInvoiceNumber", "documentNumber", "invoiceNumber", "packingSlipNumber"))
+        reconciled_value = _bool_or_none(_raw_value(record, ("reconciled", "isReconciled")))
+        summaries.append(
+            {
+                "id": str(_raw_value(record, ("id", "purchaseOrderId", "number", "poNumber")) or ""),
+                "status": status,
+                "received": "received" in status or bool(_raw_value(record, ("receivedOn", "receivedDate"))),
+                "reconciled": bool(reconciled_value) or bool(_raw_value(record, ("reconciledOn", "reconciledDate"))),
+                "vendor_document_present": bool(vendor_document),
+                "attachments_count": attachments_count,
+            }
+        )
+    return summaries
+
+
+def _same_day_estimate_present(records: list[dict[str, Any]], anchor: datetime | None) -> bool | None:
+    if not records:
+        return False
+    if anchor is None:
+        return None
+    saw_date = False
+    anchor_date = anchor.astimezone(timezone.utc).date()
+    for record in records:
+        created = _parse_datetime(_raw_value(record, ("createdOn", "createdAt", "date", "estimateDate", "soldOn")))
+        if not created:
+            continue
+        saw_date = True
+        if created.astimezone(timezone.utc).date() == anchor_date:
+            return True
+    return False if saw_date else None
+
+
+def _diagnostic_fee_summary(invoice_items: list[dict[str, Any]], line_items: list[str], keywords: list[str]) -> dict[str, bool | None]:
+    present = False
+    charged: bool | None = None
+    waived = False
+    for item in invoice_items:
+        name = str(item.get("name") or "")
+        if not _has_keywords(name, keywords):
+            continue
+        present = True
+        amount = item.get("amount")
+        if isinstance(amount, (int, float)):
+            if amount > 0:
+                charged = True
+            elif amount == 0:
+                waived = True
+        if _has_keywords(name, ("waived", "waiver", "no charge", "included")):
+            waived = True
+    if not present:
+        present = _has_keywords(" ".join(line_items), keywords)
+    return {"present": present, "charged": charged, "waived": waived}
+
+
+def _repair_sold(invoice_items: list[dict[str, Any]], line_items: list[str], diagnostic_keywords: list[str]) -> bool | None:
+    names = [str(item.get("name") or "") for item in invoice_items] or line_items
+    if not names:
+        return None
+    excluded = [*diagnostic_keywords, "dispatch", "trip charge", "tune up", "maintenance", "membership"]
+    repair_items = [name for name in names if not _has_keywords(name, excluded)]
+    return bool(repair_items)
+
+
+def _missing_special_order_note_fields(text: str, required_fields: list[str]) -> list[str]:
+    synonyms = {
+        "purchase order number": ("purchase order", "po #", "po number", "po#"),
+        "ordering date": ("ordering date", "ordered on", "date ordered"),
+        "employee ordered": ("employee ordered", "ordered by", "who ordered"),
+        "eta": ("eta", "arrival date", "expected arrival"),
+        "supply house": ("supply house", "supplier", "vendor"),
+        "supply house employee": ("supply house employee", "supplier rep", "vendor rep"),
+    }
+    missing: list[str] = []
+    for field_name in required_fields:
+        candidates = synonyms.get(field_name.lower(), (field_name,))
+        if not _has_keywords(text, candidates):
+            missing.append(field_name)
+    return missing

@@ -23,6 +23,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("process-pending-transitions", help="Scan all Notion tasks once and post any status transitions vs local baseline")
     sub.add_parser("repost-missing-slack-updates", help="Retry transition Slack posts that previously failed before a Slack timestamp was stored")
     sub.add_parser("servicetitan-audit-once", help="Run one ServiceTitan operations audit cycle")
+    sub.add_parser("notifications-test", help="Validate notification configuration and optionally send a Slack test message")
+    sub.add_parser("servicetitan-alert-test", help="Build a synthetic ServiceTitan alert and optionally send it to Slack")
+    email_test = sub.add_parser("email-test", help="Validate SMTP configuration and optionally send a safe test email")
+    email_test.add_argument("--to", action="append", default=[], help="Recipient email. May be repeated or comma-separated. Defaults to TIM_EMAIL and VADIM_EMAIL.")
     sub.add_parser("health-check", help="Run local integration health checks")
     sub.add_parser("monday-push", help="Run Monday push immediately")
     sub.add_parser("friday-roundup", help="Run Friday roundup immediately")
@@ -94,6 +98,21 @@ def main(argv: list[str] | None = None) -> int:
         summary = app.run_service_titan_audit_once(force=True)
         print("\n".join(summary.to_lines()))
         return 1 if summary.status in {"config_error", "api_error"} else 0
+
+    if command == "notifications-test":
+        ok, text = app.notifications_test_text()
+        print(text)
+        return 0 if ok else 1
+
+    if command == "servicetitan-alert-test":
+        ok, text = app.service_titan_alert_test_text()
+        print(text)
+        return 0 if ok else 1
+
+    if command == "email-test":
+        ok, text = app.email_test_text(args.to)
+        print(text)
+        return 0 if ok else 1
 
     if command == "health-check":
         app.initialize_storage()

@@ -112,6 +112,7 @@ class Settings:
     service_titan_audit_timezone: str
     service_titan_audit_dry_run: bool
     service_titan_audit_debug_fields: bool
+    notifications_test_send: bool
 
     anthropic_api_key: str
     claude_model: str
@@ -188,9 +189,15 @@ class Settings:
     campaign_risk_window_percent: float
     campaign_risk_task_completion_percent: float
     service_titan_arrival_grace_minutes: int
+    service_titan_first_call_grace_minutes: int
     service_titan_min_lunch_break_minutes: int
     service_titan_lunch_required_after_hours: float
     service_titan_min_note_length: int
+    service_titan_require_hhr: bool
+    service_titan_require_equipment_registration: bool
+    service_titan_min_repair_options: int
+    service_titan_require_home_comfort_plan_option: bool
+    service_titan_po_reconcile_within_hours: int
     service_titan_alert_include_customer_name: bool
     technician_compliance_enabled: bool
     dispatcher_audit_enabled: bool
@@ -200,6 +207,10 @@ class Settings:
     task_status_map: dict[str, str] = field(default_factory=dict)
     task_priority_map: dict[str, str] = field(default_factory=dict)
     service_titan_diagnostic_fee_keywords: list[str] = field(default_factory=list)
+    service_titan_home_comfort_plan_keywords: list[str] = field(default_factory=list)
+    service_titan_hhr_keywords: list[str] = field(default_factory=list)
+    service_titan_special_order_required_note_fields: list[str] = field(default_factory=list)
+    service_titan_disabled_rule_ids: list[str] = field(default_factory=list)
     service_titan_required_phases: list[str] = field(default_factory=list)
     service_titan_required_operational_fields: list[str] = field(default_factory=list)
 
@@ -235,6 +246,7 @@ class Settings:
             service_titan_audit_timezone=_env("SERVICE_TITAN_AUDIT_TIMEZONE", timezone),
             service_titan_audit_dry_run=_bool_env("SERVICE_TITAN_AUDIT_DRY_RUN", False),
             service_titan_audit_debug_fields=_bool_env("SERVICE_TITAN_AUDIT_DEBUG_FIELDS", False),
+            notifications_test_send=_bool_env("NOTIFICATIONS_TEST_SEND", False),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
             claude_model=_env("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
             notion_api_key=_env("NOTION_API_KEY"),
@@ -305,9 +317,15 @@ class Settings:
             campaign_risk_window_percent=_float_env("CAMPAIGN_RISK_WINDOW_PERCENT", 80.0),
             campaign_risk_task_completion_percent=_float_env("CAMPAIGN_RISK_TASK_COMPLETION_PERCENT", 20.0),
             service_titan_arrival_grace_minutes=_int_env("SERVICE_TITAN_ARRIVAL_GRACE_MINUTES", 30),
+            service_titan_first_call_grace_minutes=_int_env("SERVICE_TITAN_FIRST_CALL_GRACE_MINUTES", 0),
             service_titan_min_lunch_break_minutes=_int_env("SERVICE_TITAN_MIN_LUNCH_BREAK_MINUTES", 30),
             service_titan_lunch_required_after_hours=_float_env("SERVICE_TITAN_LUNCH_REQUIRED_AFTER_HOURS", 5.0),
-            service_titan_min_note_length=_int_env("SERVICE_TITAN_MIN_NOTE_LENGTH", 15),
+            service_titan_min_note_length=_int_env("SERVICE_TITAN_MIN_NOTE_LENGTH", 30),
+            service_titan_require_hhr=_bool_env("SERVICE_TITAN_REQUIRE_HHR", True),
+            service_titan_require_equipment_registration=_bool_env("SERVICE_TITAN_REQUIRE_EQUIPMENT_REGISTRATION", True),
+            service_titan_min_repair_options=_int_env("SERVICE_TITAN_MIN_REPAIR_OPTIONS", 3),
+            service_titan_require_home_comfort_plan_option=_bool_env("SERVICE_TITAN_REQUIRE_HOME_COMFORT_PLAN_OPTION", True),
+            service_titan_po_reconcile_within_hours=_int_env("SERVICE_TITAN_PO_RECONCILE_WITHIN_HOURS", 24),
             service_titan_alert_include_customer_name=_bool_env("SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME", False),
             technician_compliance_enabled=_bool_env("TECHNICIAN_COMPLIANCE_ENABLED", True),
             dispatcher_audit_enabled=_bool_env("DISPATCHER_AUDIT_ENABLED", True),
@@ -341,6 +359,19 @@ class Settings:
                 "SERVICE_TITAN_DIAGNOSTIC_FEE_KEYWORDS_JSON",
                 ["diagnostic"],
             ),
+            service_titan_home_comfort_plan_keywords=_json_list_env(
+                "SERVICE_TITAN_HOME_COMFORT_PLAN_KEYWORDS_JSON",
+                ["home comfort plan", "comfort plan", "membership", "maintenance plan"],
+            ),
+            service_titan_hhr_keywords=_json_list_env(
+                "SERVICE_TITAN_HHR_KEYWORDS_JSON",
+                ["home health report", "hhr", "report card"],
+            ),
+            service_titan_special_order_required_note_fields=_json_list_env(
+                "SERVICE_TITAN_SPECIAL_ORDER_REQUIRED_NOTE_FIELDS_JSON",
+                ["purchase order number", "ordering date", "employee ordered", "eta", "supply house"],
+            ),
+            service_titan_disabled_rule_ids=_json_list_env("SERVICE_TITAN_DISABLED_RULE_IDS_JSON"),
             service_titan_required_phases=_json_list_env("SERVICE_TITAN_REQUIRED_PHASES_JSON"),
             service_titan_required_operational_fields=_json_list_env("SERVICE_TITAN_REQUIRED_OPERATIONAL_FIELDS_JSON"),
         )
@@ -382,6 +413,7 @@ class Settings:
             "SERVICETITAN_APP_KEY": self.servicetitan_app_key,
         }
         if not self.service_titan_audit_dry_run:
+            required["SLACK_BOT_TOKEN"] = self.slack_bot_token
             required["SLACK_ALERT_CHANNEL_ID or SLACK_MARKETING_OPS_CHANNEL_ID"] = self.slack_alert_channel_id or self.slack_marketing_ops_channel_id
         return [key for key, value in required.items() if not value]
 

@@ -60,9 +60,12 @@ class SlackClient:
             return None
         return response.data
 
+    def auth_test(self) -> dict[str, Any] | None:
+        return self._api("auth.test", {})
+
     def post_message(self, channel: str, text: str, blocks: list[dict[str, Any]] | None = None, thread_ts: str | None = None) -> str | None:
         if not channel:
-            logger.warning("slack_channel_missing", extra={"text": text[:120]})
+            logger.warning("slack_channel_missing")
             return None
         payload: dict[str, Any] = {"channel": channel, "text": text}
         if blocks:

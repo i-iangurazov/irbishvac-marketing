@@ -5,6 +5,7 @@ import unittest
 import logging
 import os
 import re
+import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
 from logging import LogRecord
@@ -16,10 +17,12 @@ from marketing_os_agent.clients.notion import NotionApiError, NotionClient
 from marketing_os_agent.clients.servicetitan import ServiceTitanApiError, ServiceTitanClient, ServiceTitanJob
 from marketing_os_agent.clients.slack import SlackClient
 from marketing_os_agent.config import Settings, load_dotenv
+from marketing_os_agent.app import AgentApp
 from marketing_os_agent.domain.campaign_health import CampaignHealthService
 from marketing_os_agent.domain.owner_mapping import OwnerResolver
 from marketing_os_agent.domain.reports import ReportService, month_bounds, select_campaigns_starting_between, week_bounds
-from marketing_os_agent.domain.service_titan_audit import ServiceTitanAuditService, ServiceTitanAuditSummary
+from marketing_os_agent.domain.service_titan_audit import ServiceTitanAuditLoop, ServiceTitanAuditService, ServiceTitanAuditSummary
+from marketing_os_agent.domain.service_titan_handbook import handbook_rule_matrix
 from marketing_os_agent.domain.service_titan_rules import RESULT_FAIL, RESULT_INSUFFICIENT, RESULT_PASS, active_service_titan_rules
 from marketing_os_agent.domain.task_processor import TaskProcessor
 from marketing_os_agent.models import Campaign, Owner, Task
@@ -49,6 +52,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         service_titan_audit_timezone="UTC",
         service_titan_audit_dry_run=False,
         service_titan_audit_debug_fields=False,
+        notifications_test_send=False,
         anthropic_api_key="",
         claude_model="claude-test",
         notion_api_key="notion",
@@ -119,9 +123,15 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         campaign_risk_window_percent=80.0,
         campaign_risk_task_completion_percent=20.0,
         service_titan_arrival_grace_minutes=30,
+        service_titan_first_call_grace_minutes=0,
         service_titan_min_lunch_break_minutes=30,
         service_titan_lunch_required_after_hours=5.0,
-        service_titan_min_note_length=15,
+        service_titan_min_note_length=30,
+        service_titan_require_hhr=True,
+        service_titan_require_equipment_registration=True,
+        service_titan_min_repair_options=3,
+        service_titan_require_home_comfort_plan_option=True,
+        service_titan_po_reconcile_within_hours=24,
         service_titan_alert_include_customer_name=False,
         technician_compliance_enabled=True,
         dispatcher_audit_enabled=True,
@@ -137,6 +147,10 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         },
         task_priority_map={"urgent": "Critical", "critical": "Critical"},
         service_titan_diagnostic_fee_keywords=["diagnostic"],
+        service_titan_home_comfort_plan_keywords=["home comfort plan", "comfort plan", "membership", "maintenance plan"],
+        service_titan_hhr_keywords=["home health report", "hhr", "report card"],
+        service_titan_special_order_required_note_fields=["purchase order number", "ordering date", "employee ordered", "eta", "supply house"],
+        service_titan_disabled_rule_ids=[],
         service_titan_required_phases=["diagnosis", "estimate"],
         service_titan_required_operational_fields=["System Type"],
     )
@@ -227,16 +241,55 @@ def st_job(
     clock_out_at: datetime | None = datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
     lunch_break_minutes: int | None = 30,
     line_items: list[str] | None = None,
+    invoice_items: list[dict[str, object]] | None = None,
+    invoice_status: str = "Paid",
+    invoice_total: float | None = 300.0,
+    invoice_balance: float | None = 0.0,
+    payment_total: float | None = 300.0,
+    payments_count: int | None = 1,
+    diagnostic_fee_present: bool | None = True,
+    diagnostic_fee_charged: bool | None = True,
+    diagnostic_fee_waived: bool | None = False,
+    repair_sold: bool | None = False,
     completed_phases: list[str] | None = None,
     operational_data: dict[str, str] | None = None,
     operational_data_complete: bool | None = True,
     options_presented: bool | None = True,
+    estimate_count: int | None = 3,
+    same_day_estimate_present: bool | None = True,
+    home_comfort_plan_option_present: bool | None = True,
     notes: str | None = "Completed diagnostic and presented options.",
     photo_count: int | None = 2,
     supporting_evidence_count: int | None = 1,
+    forms_count: int | None = 1,
+    hhr_completed: bool | None = True,
+    equipment_count: int | None = 1,
+    equipment_complete: bool | None = True,
+    authorization_count: int | None = 1,
+    follow_up_needed: bool | None = False,
+    follow_up_task_present: bool | None = False,
+    special_order_detected: bool | None = False,
+    special_order_missing_fields: list[str] | None = None,
+    special_order_reminder_present: bool | None = False,
+    downpayment_recorded: bool | None = False,
+    lead_turnover_required: bool | None = False,
+    lead_turnover_documented: bool | None = False,
+    purchase_orders: list[dict[str, object]] | None = None,
+    purchase_orders_count: int | None = 1,
+    po_received_not_reconciled_count: int | None = 0,
+    po_missing_vendor_document_count: int | None = 0,
+    po_missing_attachment_count: int | None = 0,
+    po_not_synced_count: int | None = None,
+    ply_data_available: bool = False,
+    scope_change_detected: bool | None = False,
+    scope_change_escalated: bool | None = False,
+    cancellation_after_materials_detected: bool | None = False,
+    cancellation_escalated: bool | None = False,
+    defective_part_detected: bool | None = False,
+    warranty_claim_documented: bool | None = False,
     arrival_window_start: datetime | None = datetime(2026, 5, 15, 9, tzinfo=timezone.utc),
     arrival_window_end: datetime | None = datetime(2026, 5, 15, 11, tzinfo=timezone.utc),
-    arrived_at: datetime | None = datetime(2026, 5, 15, 9, 10, tzinfo=timezone.utc),
+    arrived_at: datetime | None = datetime(2026, 5, 15, 9, 0, tzinfo=timezone.utc),
     present_fields: set[str] | None = None,
 ) -> ServiceTitanJob:
     fields = present_fields or {
@@ -251,9 +304,21 @@ def st_job(
         "operational_data",
         "operational_data_fields",
         "options_presented",
+        "estimates",
+        "same_day_estimate",
+        "home_comfort_plan_option",
         "notes",
         "photos",
         "supporting_evidence",
+        "forms",
+        "hhr",
+        "equipment",
+        "authorization",
+        "payments",
+        "purchase_orders",
+        "po_vendor_document",
+        "po_attachments",
+        "po_reconciliation",
         "arrival_window",
         "arrived_at",
     }
@@ -275,13 +340,52 @@ def st_job(
         clock_out_at=clock_out_at,
         lunch_break_minutes=lunch_break_minutes,
         invoice_line_items=line_items if line_items is not None else ["Diagnostic Fee", "Capacitor"],
+        invoice_items=invoice_items if invoice_items is not None else [{"name": "Diagnostic Fee", "amount": 89.0}],
+        invoice_status=invoice_status,
+        invoice_total=invoice_total,
+        invoice_balance=invoice_balance,
+        payment_total=payment_total,
+        payments_count=payments_count,
+        diagnostic_fee_present=diagnostic_fee_present,
+        diagnostic_fee_charged=diagnostic_fee_charged,
+        diagnostic_fee_waived=diagnostic_fee_waived,
+        repair_sold=repair_sold,
         completed_phases=completed_phases if completed_phases is not None else ["diagnosis", "estimate"],
         operational_data=operational_data if operational_data is not None else {"System Type": "Split"},
         operational_data_complete=operational_data_complete,
         options_presented=options_presented,
+        estimate_count=estimate_count,
+        same_day_estimate_present=same_day_estimate_present,
+        home_comfort_plan_option_present=home_comfort_plan_option_present,
         notes=notes,
         photo_count=photo_count,
         supporting_evidence_count=supporting_evidence_count,
+        forms_count=forms_count,
+        hhr_completed=hhr_completed,
+        equipment_count=equipment_count,
+        equipment_complete=equipment_complete,
+        authorization_count=authorization_count,
+        follow_up_needed=follow_up_needed,
+        follow_up_task_present=follow_up_task_present,
+        special_order_detected=special_order_detected,
+        special_order_missing_fields=special_order_missing_fields or [],
+        special_order_reminder_present=special_order_reminder_present,
+        downpayment_recorded=downpayment_recorded,
+        lead_turnover_required=lead_turnover_required,
+        lead_turnover_documented=lead_turnover_documented,
+        purchase_orders=purchase_orders or [{"id": "po-1", "status": "received", "received": True, "reconciled": True}],
+        purchase_orders_count=purchase_orders_count,
+        po_received_not_reconciled_count=po_received_not_reconciled_count,
+        po_missing_vendor_document_count=po_missing_vendor_document_count,
+        po_missing_attachment_count=po_missing_attachment_count,
+        po_not_synced_count=po_not_synced_count,
+        ply_data_available=ply_data_available,
+        scope_change_detected=scope_change_detected,
+        scope_change_escalated=scope_change_escalated,
+        cancellation_after_materials_detected=cancellation_after_materials_detected,
+        cancellation_escalated=cancellation_escalated,
+        defective_part_detected=defective_part_detected,
+        warranty_claim_documented=warranty_claim_documented,
         url=f"https://go.servicetitan.com/#/Job/Index/{job_id}",
         present_fields=fields,
         raw={"id": job_id},
@@ -362,6 +466,12 @@ class FakeSlack:
         self.email_lookup: dict[str, str] = {}
         self.email_lookup_calls: list[str] = []
         self.counter = 0
+        self.auth_ok = True
+
+    def auth_test(self) -> dict[str, object] | None:
+        if not self.auth_ok:
+            return None
+        return {"ok": True, "team": "Test Team", "user": "test-bot"}
 
     def post_message(self, channel: str, text: str, blocks: object | None = None, thread_ts: str | None = None) -> str:
         self.counter += 1
@@ -416,6 +526,9 @@ def st_enrichment_http(
     non_job_timesheets: list[dict[str, object]] | None = None,
     notes: list[dict[str, object]] | None = None,
     attachments: list[dict[str, object]] | None = None,
+    forms: list[dict[str, object]] | None = None,
+    equipment: list[dict[str, object]] | None = None,
+    purchase_orders: list[dict[str, object]] | None = None,
     history: list[dict[str, object]] | None = None,
     estimates: list[dict[str, object]] | None = None,
     opportunities: list[dict[str, object]] | None = None,
@@ -455,6 +568,9 @@ def st_enrichment_http(
         [
             HttpResponse(200, {"data": notes or [], "hasMore": False}, {}),
             HttpResponse(200, {"data": attachments or [], "hasMore": False}, {}),
+            HttpResponse(200, {"data": forms or [], "hasMore": False}, {}),
+            HttpResponse(200, {"data": equipment or [], "hasMore": False}, {}),
+            HttpResponse(200, {"data": purchase_orders or [], "hasMore": False}, {}),
             HttpResponse(200, {"data": history or [], "hasMore": False}, {}),
             HttpResponse(200, {"data": estimates or [], "hasMore": False}, {}),
             HttpResponse(200, {"data": opportunities or [], "hasMore": False}, {}),
@@ -794,6 +910,34 @@ class MarketingOsAgentTests(unittest.TestCase):
         alerts = [message for message in self.h.slack.messages if "ServiceTitan Operations Audit" in message[1]]
         self.assertEqual(len(alerts), 1)
 
+    def test_service_titan_fail_alert_sends_on_non_friday_one_time_run(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = FakeServiceTitan([st_job("tuesday-st", clock_out_at=None)])
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, client, self.h.slack)
+        summary = audit.audit_once(datetime(2026, 6, 9, 16, tzinfo=timezone.utc))
+        self.assertEqual(datetime(2026, 6, 9).weekday(), 1)
+        self.assertEqual(summary.alerts_sent, 1)
+        self.assertEqual(len(self.h.slack.messages), 1)
+
+    def test_service_titan_continuous_loop_runs_on_interval_not_friday_schedule(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True, service_titan_audit_poll_interval_seconds=999)
+        stop_event = threading.Event()
+        calls: list[str] = []
+
+        def audit_once() -> None:
+            calls.append("called")
+            stop_event.set()
+
+        ServiceTitanAuditLoop(audit_settings, audit_once).run_loop(stop_event)
+        self.assertEqual(calls, ["called"])
+
+    def test_service_titan_continuous_loop_disabled_when_feature_flag_false(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=False)
+        stop_event = threading.Event()
+        calls: list[str] = []
+        ServiceTitanAuditLoop(audit_settings, lambda: calls.append("called")).run_loop(stop_event)
+        self.assertEqual(calls, [])
+
     def test_service_titan_polling_continues_if_one_job_fails_evaluation(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
         client = FakeServiceTitan([st_job("bad"), st_job("good", clock_out_at=None)])
@@ -817,6 +961,22 @@ class MarketingOsAgentTests(unittest.TestCase):
         summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
         self.assertEqual(summary.status, "api_error")
         self.assertEqual(summary.errors, 1)
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_service_titan_pass_and_insufficient_results_do_not_alert(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        pass_audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([st_job("pass-job")]), self.h.slack)
+        pass_summary = pass_audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(pass_summary.alerts_sent, 0)
+        self.assertEqual(pass_summary.alerts_would_send, 0)
+        self.assertEqual(self.h.slack.messages, [])
+
+        insufficient_job = st_job("insufficient-job", present_fields={"status"})
+        insufficient_audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([insufficient_job]), self.h.slack)
+        insufficient_summary = insufficient_audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertGreater(sum(insufficient_summary.insufficient_data_by_rule.values()), 0)
+        self.assertEqual(insufficient_summary.alerts_sent, 0)
+        self.assertEqual(insufficient_summary.alerts_would_send, 0)
         self.assertEqual(self.h.slack.messages, [])
 
     def test_service_titan_auth_403_returns_api_error_without_logging_crash(self) -> None:
@@ -897,6 +1057,19 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.status, "config_error")
         self.assertIn("SERVICETITAN_CLIENT_SECRET", summary.config_errors)
 
+    def test_service_titan_live_alert_requires_slack_token_and_channel(self) -> None:
+        missing_token = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True, slack_bot_token="")
+        token_audit = ServiceTitanAuditService(missing_token, self.h.db, FakeServiceTitan([st_job(clock_out_at=None)]), self.h.slack)
+        token_summary = token_audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(token_summary.status, "config_error")
+        self.assertIn("SLACK_BOT_TOKEN", token_summary.config_errors)
+
+        missing_channel = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True, slack_alert_channel_id="", slack_marketing_ops_channel_id="")
+        channel_audit = ServiceTitanAuditService(missing_channel, self.h.db, FakeServiceTitan([st_job(clock_out_at=None)]), self.h.slack)
+        channel_summary = channel_audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(channel_summary.status, "config_error")
+        self.assertIn("SLACK_ALERT_CHANNEL_ID or SLACK_MARKETING_OPS_CHANNEL_ID", channel_summary.config_errors)
+
     def test_service_titan_cli_force_can_validate_when_continuous_polling_disabled(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=False, service_titan_audit_dry_run=True)
         audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([st_job("forced", clock_out_at=None)]), self.h.slack)
@@ -916,6 +1089,100 @@ class MarketingOsAgentTests(unittest.TestCase):
         rule_ids = {rule.rule_id for rule in active_service_titan_rules(audit_settings)}
         self.assertNotIn("tech_clock_out_missing", rule_ids)
         self.assertIn("dispatch_notes_missing", rule_ids)
+
+    def test_handbook_rule_matrix_loads_required_metadata(self) -> None:
+        matrix = handbook_rule_matrix()
+        rule_ids = {rule.rule_id for rule in matrix}
+        self.assertIn("missing_hhr_or_service_form", rule_ids)
+        self.assertIn("po_not_synced_to_service_titan", rule_ids)
+        self.assertIn("defective_part_missing_warranty_claim_data", rule_ids)
+        for rule in matrix:
+            self.assertTrue(rule.handbook_source)
+            self.assertTrue(rule.required_data_fields)
+            self.assertTrue(rule.data_sources)
+            self.assertIn(rule.current_availability, {"available", "partially_available", "unavailable", "unknown"})
+            self.assertTrue(rule.recommended_alert_recipient)
+            self.assertEqual(rule.delivery, "immediate")
+
+    def test_handbook_arrival_rule_passes_and_fails_with_mapped_appointment_fields(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        rule = _st_rule(audit_settings, "first_call_on_time_arrival")
+        self.assertEqual(rule.run(st_job(arrived_at=datetime(2026, 5, 15, 9, tzinfo=timezone.utc)), audit_settings).status, RESULT_PASS)
+        result = rule.run(st_job(arrived_at=datetime(2026, 5, 15, 9, 1, tzinfo=timezone.utc)), audit_settings)
+        self.assertEqual(result.status, RESULT_FAIL)
+
+    def test_handbook_equipment_hhr_and_options_rules_pass_fail_and_insufficient(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        self.assertEqual(_st_rule(audit_settings, "missing_equipment_registration").run(st_job(equipment_count=0, equipment_complete=False), audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "missing_hhr_or_service_form").run(st_job(hhr_completed=False), audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "missing_three_repair_options").run(st_job(estimate_count=2), audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "missing_home_comfort_plan_option").run(st_job(home_comfort_plan_option_present=False), audit_settings).status, RESULT_FAIL)
+        insufficient = st_job(present_fields={"status", "notes"})
+        self.assertEqual(_st_rule(audit_settings, "missing_equipment_registration").run(insufficient, audit_settings).status, RESULT_INSUFFICIENT)
+
+    def test_handbook_price_authorization_payment_and_same_day_estimate_rules(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        self.assertEqual(_st_rule(audit_settings, "missing_price_authorization").run(st_job(authorization_count=0), audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "missing_payment_on_completed_job").run(st_job(payment_total=0, invoice_balance=300, invoice_status="Open"), audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "missing_same_day_estimate").run(st_job(same_day_estimate_present=False), audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "missing_payment_on_completed_job").run(st_job(payment_total=None, invoice_balance=None, present_fields={"status", "invoice_line_items"}), audit_settings).status, RESULT_INSUFFICIENT)
+
+    def test_handbook_diagnostic_fee_logic_handles_no_repair_repair_and_unknown_amounts(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        no_repair_missing_fee = st_job(line_items=["Dispatch"], diagnostic_fee_present=False, repair_sold=False)
+        self.assertEqual(_st_rule(audit_settings, "missing_diagnostic_fee_when_repair_not_sold").run(no_repair_missing_fee, audit_settings).status, RESULT_FAIL)
+
+        waiver = st_job(line_items=["Dispatch"], diagnostic_fee_present=False, repair_sold=False, notes="Manager approved waiver for diagnostic fee.")
+        self.assertEqual(_st_rule(audit_settings, "missing_diagnostic_fee_when_repair_not_sold").run(waiver, audit_settings).status, RESULT_PASS)
+
+        sold_with_charge = st_job(repair_sold=True, diagnostic_fee_present=True, diagnostic_fee_charged=True, diagnostic_fee_waived=False)
+        self.assertEqual(_st_rule(audit_settings, "diagnostic_fee_not_waived_when_repair_sold").run(sold_with_charge, audit_settings).status, RESULT_FAIL)
+
+        sold_unknown_amount = st_job(repair_sold=True, diagnostic_fee_present=True, diagnostic_fee_charged=None, diagnostic_fee_waived=False)
+        self.assertEqual(_st_rule(audit_settings, "diagnostic_fee_not_waived_when_repair_sold").run(sold_unknown_amount, audit_settings).status, RESULT_INSUFFICIENT)
+
+    def test_handbook_special_order_follow_up_and_lead_turnover_rules(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        special_order = st_job(
+            special_order_detected=True,
+            special_order_missing_fields=["eta", "supply house"],
+            downpayment_recorded=False,
+            notes="Special order part needed.",
+        )
+        self.assertEqual(_st_rule(audit_settings, "special_order_missing_required_notes").run(special_order, audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "missing_downpayment_for_special_order").run(special_order, audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "special_order_missing_service_titan_reminder").run(special_order, audit_settings).status, RESULT_INSUFFICIENT)
+
+        follow_up = st_job(follow_up_needed=True, follow_up_task_present=False, notes="Follow up needed for estimate decision.")
+        self.assertEqual(_st_rule(audit_settings, "missing_follow_up_task_when_follow_up_needed").run(follow_up, audit_settings).status, RESULT_FAIL)
+
+        lead = st_job(lead_turnover_required=True, lead_turnover_documented=False, hhr_completed=False)
+        self.assertEqual(_st_rule(audit_settings, "lead_turnover_missing_required_documentation").run(lead, audit_settings).status, RESULT_FAIL)
+
+    def test_handbook_po_and_ply_rules_do_not_fake_unavailable_ply_data(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        po_issue = st_job(po_received_not_reconciled_count=1, po_missing_vendor_document_count=1, po_missing_attachment_count=1)
+        self.assertEqual(_st_rule(audit_settings, "po_received_not_reconciled").run(po_issue, audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "po_missing_vendor_document").run(po_issue, audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "po_missing_attachments").run(po_issue, audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "po_not_synced_to_service_titan").run(st_job(ply_data_available=False), audit_settings).status, RESULT_INSUFFICIENT)
+        self.assertEqual(_st_rule(audit_settings, "ply_st_material_sync_blocked").run(st_job(ply_data_available=False), audit_settings).status, RESULT_INSUFFICIENT)
+
+    def test_handbook_escalation_rules_fail_only_when_issue_is_detected(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        self.assertEqual(_st_rule(audit_settings, "scope_change_missing_escalation_note").run(st_job(scope_change_detected=True, scope_change_escalated=False), audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "cancellation_after_materials_missing_escalation").run(st_job(cancellation_after_materials_detected=True, cancellation_escalated=False), audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "defective_part_missing_warranty_claim_data").run(st_job(defective_part_detected=True, warranty_claim_documented=False), audit_settings).status, RESULT_FAIL)
+        self.assertEqual(_st_rule(audit_settings, "defective_part_missing_warranty_claim_data").run(st_job(defective_part_detected=False), audit_settings).status, RESULT_PASS)
+
+    def test_service_titan_disabled_rule_ids_remove_handbook_rules(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_disabled_rule_ids=["missing_hhr_or_service_form"],
+        )
+        rule_ids = {rule.rule_id for rule in active_service_titan_rules(audit_settings)}
+        self.assertNotIn("missing_hhr_or_service_form", rule_ids)
 
     def test_service_titan_polling_uses_last_processed_overlap(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
@@ -1035,6 +1302,9 @@ class MarketingOsAgentTests(unittest.TestCase):
                 HttpResponse(200, {"data": [], "hasMore": False}, {}),
                 HttpResponse(200, {"data": [], "hasMore": False}, {}),
                 HttpResponse(200, {"data": [], "hasMore": False}, {}),
+                HttpResponse(200, {"data": [], "hasMore": False}, {}),
+                HttpResponse(200, {"data": [], "hasMore": False}, {}),
+                HttpResponse(200, {"data": [], "hasMore": False}, {}),
             ]
         )
         job = ServiceTitanClient(audit_settings, http).query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
@@ -1100,6 +1370,62 @@ class MarketingOsAgentTests(unittest.TestCase):
     def test_service_titan_dry_run_summary_lines_show_true_when_enabled(self) -> None:
         lines = ServiceTitanAuditSummary(dry_run=True).to_lines()
         self.assertIn("- dry_run: True", lines)
+
+    def test_notifications_test_validates_without_sending_by_default(self) -> None:
+        app_settings = settings(str(Path(self.h.tmp.name) / "notify.sqlite3"), notifications_test_send=False)
+        app = AgentApp(app_settings)
+        fake_slack = FakeSlack()
+        app.slack = fake_slack
+        ok, text = app.notifications_test_text()
+        self.assertTrue(ok)
+        self.assertIn("Slack auth.test: ok", text)
+        self.assertIn("Slack test message: skipped", text)
+        self.assertEqual(fake_slack.messages, [])
+
+    def test_notifications_test_sends_only_when_explicitly_enabled(self) -> None:
+        app_settings = settings(str(Path(self.h.tmp.name) / "notify-send.sqlite3"), notifications_test_send=True)
+        app = AgentApp(app_settings)
+        fake_slack = FakeSlack()
+        app.slack = fake_slack
+        ok, text = app.notifications_test_text()
+        self.assertTrue(ok)
+        self.assertIn("Slack test message: sent", text)
+        self.assertEqual(len(fake_slack.messages), 1)
+        self.assertIn("[TEST] Marketing OS Agent notification test", fake_slack.messages[0][1])
+
+    def test_synthetic_servicetitan_alert_uses_formatter_and_does_not_write_or_send_by_default(self) -> None:
+        app_settings = settings(str(Path(self.h.tmp.name) / "synthetic.sqlite3"), notifications_test_send=False)
+        app = AgentApp(app_settings)
+        fake_slack = FakeSlack()
+        app.slack = fake_slack
+        ok, text = app.service_titan_alert_test_text()
+        self.assertTrue(ok)
+        self.assertIn("*ServiceTitan Operations Audit* - TEST", text)
+        self.assertIn("[TEST] Synthetic ServiceTitan audit alert", text)
+        self.assertIn("writes violation/dedupe records: false", text)
+        self.assertIn("would_send: True", text)
+        self.assertIn("Slack send: skipped", text)
+        self.assertEqual(fake_slack.messages, [])
+
+    def test_synthetic_servicetitan_alert_can_send_when_explicitly_enabled(self) -> None:
+        app_settings = settings(str(Path(self.h.tmp.name) / "synthetic-send.sqlite3"), notifications_test_send=True)
+        app = AgentApp(app_settings)
+        fake_slack = FakeSlack()
+        app.slack = fake_slack
+        ok, text = app.service_titan_alert_test_text()
+        self.assertTrue(ok)
+        self.assertIn("Slack send: sent", text)
+        self.assertEqual(len(fake_slack.messages), 1)
+        self.assertIn("[TEST] Synthetic ServiceTitan audit alert", fake_slack.messages[0][1])
+
+    def test_email_test_documents_smtp_and_no_servicetitan_email_alerting(self) -> None:
+        app_settings = settings(str(Path(self.h.tmp.name) / "email.sqlite3"), notifications_test_send=False)
+        app = AgentApp(app_settings)
+        ok, text = app.email_test_text(["ops@example.com"])
+        self.assertFalse(ok)
+        self.assertIn("Email subsystem: implemented via SMTP EmailClient", text)
+        self.assertIn("ServiceTitan audit email alerts: not implemented", text)
+        self.assertIn("Email test message: skipped", text)
 
     def test_missing_external_credentials_fail_safely(self) -> None:
         missing = settings(
