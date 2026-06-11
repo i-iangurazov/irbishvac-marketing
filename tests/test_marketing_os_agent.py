@@ -1091,6 +1091,45 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertIsNone(self.h.db.get_service_titan_violation("servicetitan:dry-run-st:2001:tech_clock_out_missing:tech-1"))
         self.assertIsNone(self.h.db.get_kv("servicetitan_audit_last_processed"))
 
+    def test_service_titan_dry_run_does_not_resolve_existing_violations(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_dry_run=True,
+        )
+        pass_job = st_job("dry-pass")
+        pass_result = _st_rule(audit_settings, "tech_clock_out_missing").run(pass_job, audit_settings)
+        not_applicable_job = st_job("dry-not-applicable", status="Canceled", clock_out_at=None, photo_count=0)
+        not_applicable_result = _st_rule(audit_settings, "dispatch_photos_missing").run(not_applicable_job, audit_settings)
+        self.assertEqual(pass_result.status, RESULT_PASS)
+        self.assertEqual(not_applicable_result.status, RESULT_NOT_APPLICABLE)
+        for job, result in ((pass_job, pass_result), (not_applicable_job, not_applicable_result)):
+            self.h.db.upsert_service_titan_violation(
+                violation_key=result.violation_key,
+                service_titan_job_id=job.job_id,
+                appointment_id=job.appointment_id,
+                technician_id=job.technician_id,
+                technician_name=job.technician_name,
+                dispatcher_id=job.dispatcher_id,
+                dispatcher_name=job.dispatcher_name,
+                rule_id=result.rule_id,
+                ruleset=result.ruleset,
+                severity=result.severity,
+                title=result.title,
+                description=result.explanation,
+                recommended_action=result.recommended_action,
+                metadata={},
+            )
+
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([pass_job, not_applicable_job]), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertTrue(summary.dry_run)
+        for key in (pass_result.violation_key, not_applicable_result.violation_key):
+            violation = self.h.db.get_service_titan_violation(key)
+            self.assertIsNotNone(violation)
+            self.assertEqual(violation["status"], "open")
+            self.assertIsNone(violation["resolved_at"])
+
     def test_service_titan_missing_credentials_return_config_error(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True, servicetitan_client_secret="")
         audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([]), self.h.slack)

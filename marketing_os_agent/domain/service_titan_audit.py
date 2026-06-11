@@ -170,11 +170,11 @@ class ServiceTitanAuditService:
                         elif alert_status == "deduped":
                             summary.alerts_skipped_dedupe += 1
                     elif result.status == RESULT_PASS:
-                        if self.db.resolve_service_titan_violation(result.violation_key):
+                        if not summary.dry_run and self.db.resolve_service_titan_violation(result.violation_key):
                             logger.info("servicetitan_violation_resolved", extra={"violation_key": result.violation_key, "rule_id": result.rule_id})
                     elif result.status == RESULT_NOT_APPLICABLE:
                         summary.not_applicable_by_rule[result.rule_id] = summary.not_applicable_by_rule.get(result.rule_id, 0) + 1
-                        if self.db.resolve_service_titan_violation(result.violation_key):
+                        if not summary.dry_run and self.db.resolve_service_titan_violation(result.violation_key):
                             logger.info("servicetitan_violation_resolved_not_applicable", extra={"violation_key": result.violation_key, "rule_id": result.rule_id})
                         logger.info(
                             "servicetitan_rule_not_applicable",
