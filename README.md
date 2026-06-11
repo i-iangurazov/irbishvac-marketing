@@ -65,6 +65,7 @@ Defaults:
 - `SERVICE_TITAN_AUDIT_OVERLAP_SECONDS=300`
 - `TECHNICIAN_COMPLIANCE_ENABLED=true`
 - `DISPATCHER_AUDIT_ENABLED=true`
+- `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}`
 - `BUDGET_OVERRUN_THRESHOLD_PERCENT=0`, which flags any actual spend at or over plan.
 - `CAMPAIGN_RISK_WINDOW_PERCENT=80`
 - `CAMPAIGN_RISK_TASK_COMPLETION_PERCENT=20`
@@ -106,6 +107,7 @@ python3 -m marketing_os_agent rebuild-task-baseline
 python3 -m marketing_os_agent process-pending-transitions
 python3 -m marketing_os_agent repost-missing-slack-updates
 python3 -m marketing_os_agent servicetitan-audit-once
+python3 -m marketing_os_agent servicetitan-discover-scopes
 python3 -m marketing_os_agent seed-workbooks
 python3 -m marketing_os_agent poll-once
 python3 -m marketing_os_agent monday-push
@@ -126,6 +128,7 @@ Use `rebuild-task-baseline` after changing database IDs, data source IDs, or fie
 Use `process-pending-transitions` when `debug-tasks` shows `notion_status` differs from `local_status`; it scans all tasks once and posts pending transitions.
 Use `repost-missing-slack-updates` after fixing Slack channel membership if an earlier transition was recorded before a Slack timestamp was stored.
 Use `servicetitan-audit-once` after configuring ServiceTitan credentials to run one operations audit cycle without waiting for the background interval.
+Use `servicetitan-discover-scopes` to print sanitized ServiceTitan business units, job types, statuses, tags, material context, related-record counts, and payload key availability before narrowing production rule scopes.
 Use `debug-tasks` when a Notion edit is being read but no transition posts. It prints current Notion status next to the saved local baseline status.
 Use `transition-counts` to inspect observed status transitions, including repeated completions that the service actually saw.
 Use `list-claude-models` when Anthropic returns a model 404. It prints model IDs available to the configured `ANTHROPIC_API_KEY`.
@@ -161,7 +164,7 @@ The ServiceTitan Operations Audit Agent is disabled by default and runs in the s
 - Technician Compliance: clock-in, clock-out, lunch break, diagnostic fee, required phases, and required operational data.
 - Dispatcher / Job Quality Audit: arrival inside the first 30 minutes of the arrival window, diagnostic fee reflected, options presented, notes, photos, and supporting evidence.
 
-Rules return `pass`, `fail`, `insufficient_data`, or `error`. `insufficient_data` is logged and not alerted, so unavailable ServiceTitan fields do not create false positives.
+Rules return `pass`, `fail`, `insufficient_data`, `not_applicable`, or `error`. `insufficient_data` and `not_applicable` are logged and not alerted, so unavailable ServiceTitan fields and out-of-scope jobs do not create false positives.
 
 Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` for first production validation. Dry-run fetches real ServiceTitan jobs, evaluates rules, prints the one-time run summary, and skips Slack alerts and audit dedupe writes. The `servicetitan-audit-once` command runs one cycle and exits, even when continuous polling is still disabled. Set `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true` only when you need sanitized field availability logs for ServiceTitan payloads.
 

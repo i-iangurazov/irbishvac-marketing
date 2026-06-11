@@ -92,6 +92,19 @@ def _json_list_env(name: str, default: list[str] | None = None) -> list[str]:
     return parsed
 
 
+def _json_object_env(name: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = _env(name, "").strip()
+    if not raw:
+        return dict(default or {})
+    try:
+        parsed: Any = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return parsed
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str
@@ -213,6 +226,7 @@ class Settings:
     service_titan_disabled_rule_ids: list[str] = field(default_factory=list)
     service_titan_required_phases: list[str] = field(default_factory=list)
     service_titan_required_operational_fields: list[str] = field(default_factory=list)
+    service_titan_rule_scope_config: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -374,6 +388,7 @@ class Settings:
             service_titan_disabled_rule_ids=_json_list_env("SERVICE_TITAN_DISABLED_RULE_IDS_JSON"),
             service_titan_required_phases=_json_list_env("SERVICE_TITAN_REQUIRED_PHASES_JSON"),
             service_titan_required_operational_fields=_json_list_env("SERVICE_TITAN_REQUIRED_OPERATIONAL_FIELDS_JSON"),
+            service_titan_rule_scope_config=_json_object_env("SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON"),
         )
 
     @property

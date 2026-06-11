@@ -36,6 +36,18 @@ class ServiceTitanJob:
     technician_name: str = ""
     dispatcher_id: str = ""
     dispatcher_name: str = ""
+    business_unit_id: str = ""
+    business_unit_name: str = ""
+    job_type_id: str = ""
+    job_type_name: str = ""
+    department: str = ""
+    trade: str = ""
+    workflow: str = ""
+    tag_ids: list[str] = field(default_factory=list)
+    tag_names: list[str] = field(default_factory=list)
+    campaign_id: str = ""
+    campaign_name: str = ""
+    cancellation_reason: str = ""
     customer_name: str = ""
     arrival_window_start: datetime | None = None
     arrival_window_end: datetime | None = None
@@ -147,6 +159,18 @@ class ServiceTitanClient:
         invoice_id = job.invoice_id
         technician_id = job.technician_id
         technician_name = job.technician_name
+        business_unit_id = job.business_unit_id
+        business_unit_name = job.business_unit_name
+        job_type_id = job.job_type_id
+        job_type_name = job.job_type_name
+        department = job.department
+        trade = job.trade
+        workflow = job.workflow
+        tag_ids = list(job.tag_ids)
+        tag_names = list(job.tag_names)
+        campaign_id = job.campaign_id
+        campaign_name = job.campaign_name
+        cancellation_reason = job.cancellation_reason
         arrival_window_start = job.arrival_window_start
         arrival_window_end = job.arrival_window_end
         arrived_at = job.arrived_at
@@ -555,6 +579,18 @@ class ServiceTitanClient:
             invoice_id=invoice_id,
             technician_id=technician_id,
             technician_name=technician_name,
+            business_unit_id=business_unit_id,
+            business_unit_name=business_unit_name,
+            job_type_id=job_type_id,
+            job_type_name=job_type_name,
+            department=department,
+            trade=trade,
+            workflow=workflow,
+            tag_ids=_dedupe_strings(tag_ids),
+            tag_names=_dedupe_strings(tag_names),
+            campaign_id=campaign_id,
+            campaign_name=campaign_name,
+            cancellation_reason=cancellation_reason,
             arrival_window_start=arrival_window_start,
             arrival_window_end=arrival_window_end,
             arrived_at=arrived_at,
@@ -709,6 +745,10 @@ def parse_service_titan_job(payload: dict[str, Any], settings: Settings) -> Serv
     invoice = _first_dict(payload.get("invoices")) or _first_dict(payload.get("invoice")) or payload.get("invoice") or {}
     if not isinstance(invoice, dict):
         invoice = {}
+    business_unit = _first_dict(payload.get("businessUnit")) or {}
+    job_type = _first_dict(payload.get("jobType")) or _first_dict(payload.get("type")) or {}
+    department_record = _first_dict(payload.get("department")) or {}
+    campaign_record = _first_dict(payload.get("campaign")) or {}
 
     job_id = str(_value(payload, ("id", "jobId"), present, "job_id") or "")
     appointment_id = str(
@@ -738,6 +778,56 @@ def parse_service_titan_job(payload: dict[str, Any], settings: Settings) -> Serv
         or _nested_value(payload, ("dispatcher", "name"), present, "dispatcher")
         or ""
     )
+    business_unit_id = str(
+        _value(payload, ("businessUnitId",), present, "business_unit")
+        or _value(business_unit, ("id",), present, "business_unit")
+        or ""
+    )
+    business_unit_name = str(
+        _value(payload, ("businessUnitName",), present, "business_unit")
+        or _value(business_unit, ("name", "displayName"), present, "business_unit")
+        or ""
+    )
+    job_type_id = str(
+        _value(payload, ("jobTypeId", "typeId"), present, "job_type")
+        or _value(job_type, ("id",), present, "job_type")
+        or ""
+    )
+    job_type_name = str(
+        _value(payload, ("jobTypeName", "typeName"), present, "job_type")
+        or _value(job_type, ("name", "displayName", "title"), present, "job_type")
+        or ""
+    )
+    department = str(
+        _value(payload, ("departmentName",), present, "department")
+        or _value(department_record, ("name", "displayName"), present, "department")
+        or ""
+    )
+    trade = _display_value(
+        _value(payload, ("tradeName",), present, "trade")
+        or _nested_value(payload, ("trade", "name"), present, "trade")
+        or _value(payload, ("trade",), present, "trade")
+    )
+    workflow = _display_value(
+        _value(payload, ("workflowName", "jobClass"), present, "workflow")
+        or _nested_value(payload, ("workflow", "name"), present, "workflow")
+        or _value(payload, ("workflow",), present, "workflow")
+    )
+    campaign_id = str(
+        _value(payload, ("campaignId",), present, "campaign")
+        or _value(campaign_record, ("id",), present, "campaign")
+        or ""
+    )
+    campaign_name = str(
+        _value(payload, ("campaignName",), present, "campaign")
+        or _value(campaign_record, ("name",), present, "campaign")
+        or ""
+    )
+    cancellation_reason = _display_value(
+        _value(payload, ("cancellationReason", "cancelReason", "canceledReason"), present, "cancellation_reason")
+        or _nested_value(payload, ("cancellationReason", "name"), present, "cancellation_reason")
+    )
+    tag_ids, tag_names = _tag_values(payload, present)
 
     notes_value = _value(payload, ("summary", "notes", "jobNotes", "description"), present, "notes")
     photo_count = _count_from_payload(payload, ("photos", "images", "attachments"), present, "photos")
@@ -785,6 +875,18 @@ def parse_service_titan_job(payload: dict[str, Any], settings: Settings) -> Serv
         technician_name=technician_name,
         dispatcher_id=dispatcher_id,
         dispatcher_name=dispatcher_name,
+        business_unit_id=business_unit_id,
+        business_unit_name=business_unit_name,
+        job_type_id=job_type_id,
+        job_type_name=job_type_name,
+        department=department,
+        trade=trade,
+        workflow=workflow,
+        tag_ids=tag_ids,
+        tag_names=tag_names,
+        campaign_id=campaign_id,
+        campaign_name=campaign_name,
+        cancellation_reason=cancellation_reason,
         customer_name=str(_nested_value(payload, ("customer", "name"), present, "customer") or _value(payload, ("customerName",), present, "customer") or ""),
         arrival_window_start=_parse_datetime(
             _value(appointment, ("arrivalWindowStart", "start"), present, "arrival_window")
@@ -971,6 +1073,26 @@ def _string_list(value: Any) -> list[str]:
                 result.append(str(item))
         return result
     return [str(value)]
+
+
+def _tag_values(payload: dict[str, Any], present: set[str]) -> tuple[list[str], list[str]]:
+    raw = _value(payload, ("tagTypeIds", "tagIds", "tags", "tagTypes"), present, "tags")
+    if raw is None:
+        return [], []
+    values = raw if isinstance(raw, list) else [raw]
+    ids: list[str] = []
+    names: list[str] = []
+    for item in values:
+        if isinstance(item, dict):
+            raw_id = item.get("id") or item.get("tagTypeId") or item.get("value")
+            raw_name = item.get("name") or item.get("displayName") or item.get("label")
+            if raw_id is not None:
+                ids.append(str(raw_id))
+            if raw_name is not None:
+                names.append(str(raw_name))
+        elif item is not None:
+            ids.append(str(item))
+    return _dedupe_strings(ids), _dedupe_strings(names)
 
 
 def _display_value(value: Any) -> str:

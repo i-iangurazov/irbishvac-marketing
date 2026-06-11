@@ -20,8 +20,66 @@ Current data flow:
 1. The one-time command and the audit loop call `ServiceTitanClient.query_recent_jobs(modified_on_or_after)`.
 2. The client fetches `/jpm/v2/tenant/{tenant}/jobs` using `modifiedOnOrAfter`, pagination, `ST-App-Key`, and OAuth client credentials.
 3. Each job is parsed into a conservative `ServiceTitanJob`, then enriched with related ServiceTitan records where the tenant and scopes expose them.
-4. Rules evaluate only mapped fields. If a required source is absent, unavailable, or not scoped, the rule returns `insufficient_data`.
-5. Only `fail` results can create stored violations and Slack alerts. Dry-run does not write violations, send Slack, or advance the checkpoint.
+4. Rule applicability is checked before the rule body runs. If a job is outside the configured scope, the rule returns `not_applicable`.
+5. Rules evaluate only mapped fields. If a required source is absent, unavailable, or applicability cannot be determined, the rule returns `insufficient_data`.
+6. Only `fail` results can create stored violations and Slack alerts. Dry-run does not write violations, send Slack, or advance the checkpoint.
+
+## Rule Scoping
+
+False positives usually happen when a valid handbook rule is applied to the wrong job type, business unit, workflow, status, tag, or missing ServiceTitan context. The audit agent prevents that with a scope/applicability layer in front of every rule.
+
+A rule can return `fail` only when all of the following are true:
+
+- The rule is enabled.
+- The job matches the rule scope.
+- Required applicability context is available.
+- Required rule data is available.
+- The actual violation condition is true.
+
+If the rule does not apply to the job, it returns `not_applicable`. If the agent cannot safely determine whether it applies, or the data source needed to evaluate it is unavailable, it returns `insufficient_data`. Neither status sends Slack.
+
+Every rule carries scope metadata:
+
+- `rule_id`
+- `ruleset`
+- `title`
+- `handbook_source`
+- `applies_to_departments`
+- `applies_to_business_units`
+- `applies_to_trades`
+- `applies_to_job_types`
+- `applies_to_job_statuses`
+- `applies_to_roles`
+- `applies_to_workflows`
+- `excludes_job_types`
+- `excludes_statuses`
+- `excludes_tags`
+- `excludes_cancellation_reasons`
+- `required_context_fields`
+- `required_data_fields`
+- `alert_routing`
+- `default_enabled`
+
+The code also supports exclusion tags and cancellation reasons so canceled, no-access, callback, warranty, no-charge, admin/internal, material-only, and other exception jobs do not generate service-call false positives.
+
+Runtime guardrails:
+
+- `insufficient_data` never alerts.
+- `not_applicable` never alerts.
+- Missing scope context never becomes `fail`.
+- PO/Ply/material rules do not apply when no PO/Ply/material context exists.
+- Diagnostic fee rules do not fail unless repair-sold status is known and the diagnostic-fee branch actually applies.
+- Photo, HHR, equipment, and options rules do not apply to canceled/no-access jobs.
+- Service-call rules do not apply to admin/internal/material-only jobs.
+- Plumbing/Ply rules do not apply to non-plumbing/non-material workflows unless configured.
+
+Use `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` after discovery to narrow or disable rules without code changes. Example:
+
+```env
+SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rules":{"missing_diagnostic_fee_when_repair_not_sold":{"enabled":true,"applies_to":{"business_units":["HVAC Service","Plumbing Service"],"job_types_contains":["Diagnostic","Service","Tune Up"],"statuses":["Completed","Closed"]},"excludes":{"tags_contains":["Warranty","Callback","No Charge"],"cancellation_reasons_contains":["Wrong Equipment","No Access","Safety Concern"]},"alert":{"channel":"accounting/operations channel"}}}}
+```
+
+If exact names are not known, run `servicetitan-discover-scopes` first and keep live Slack disabled until the scope config reflects production values.
 
 Why appointments scanned may be `0`:
 
@@ -34,7 +92,7 @@ Why many handbook rules can still return `insufficient_data`:
 - ServiceTitan tenant scopes may not expose invoice items, payments, forms, installed equipment, purchase orders, reminders/tasks, signatures, or detailed attachments.
 - Some handbook requirements need Ply data. There is no Ply API/client/config in this repository, so Ply-only checks are intentionally `insufficient_data`.
 - Several checks require positive evidence, not inference. For example, a diagnostic fee line name without an amount is not enough to fail the repair-sold waiver rule.
-- The two actual handbook PDFs were not present in the provided attachment folder during this pass; the matrix is based on the detailed handbook excerpts in the request and should be reconciled against the PDFs when they are supplied.
+- The matrix is based on the handbook-backed rule definitions already in this repository and the detailed excerpts in the request. If handbook text changes, reconcile the matrix before enabling live alerts for the affected rules.
 
 ## Rulesets
 
@@ -90,9 +148,10 @@ Each rule returns one of:
 - `pass`
 - `fail`
 - `insufficient_data`
+- `not_applicable`
 - `error`
 
-Only `fail` results create Slack alerts. `insufficient_data` is logged and skipped to avoid false positives when a ServiceTitan endpoint does not expose a required field yet.
+Only `fail` results create Slack alerts. `insufficient_data` and `not_applicable` are logged and skipped to avoid false positives when a ServiceTitan endpoint does not expose a required field yet or the job is outside the rule scope.
 
 ## Required Environment
 
@@ -143,6 +202,7 @@ SERVICE_TITAN_SPECIAL_ORDER_REQUIRED_NOTE_FIELDS_JSON=["purchase order number","
 SERVICE_TITAN_DISABLED_RULE_IDS_JSON=[]
 SERVICE_TITAN_REQUIRED_PHASES_JSON=[]
 SERVICE_TITAN_REQUIRED_OPERATIONAL_FIELDS_JSON=[]
+SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}
 ```
 
 Use `SERVICETITAN_BASE_URL=https://api-integration.servicetitan.io` for the integration environment. Set `SERVICETITAN_AUTH_URL` to the environment-specific token URL provided by ServiceTitan if it differs from production.
@@ -189,6 +249,32 @@ The enrichment pass reads related ServiceTitan records when available:
 - `/sales/v2/tenant/{tenant}/opportunities`
 
 If any related endpoint is unavailable or does not expose a required field, the affected rules remain `insufficient_data` and include source notes in logs/summary context.
+
+## Scope Discovery
+
+Before enabling live alerts, run:
+
+```bash
+python3 -m marketing_os_agent servicetitan-discover-scopes
+```
+
+The command fetches recent ServiceTitan jobs using the configured lookback and prints sanitized discovery output:
+
+- Job statuses.
+- Business units.
+- Job types.
+- Departments.
+- Trades.
+- Workflows.
+- Tags.
+- Technician and dispatcher identifiers.
+- Invoice statuses.
+- Cancellation reasons.
+- PO/material context counts.
+- Related-record counts.
+- Available top-level payload keys by category.
+
+It does not print customer names, addresses, phone numbers, emails, raw notes, secrets, access tokens, or client secrets. Use these values to fill `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON`, then rerun `servicetitan-audit-once` in dry-run mode before live Slack alerts.
 
 ## Handbook Rule Matrix Summary
 
@@ -285,8 +371,9 @@ Runtime mode behavior:
 - `SERVICE_TITAN_AUDIT_DRY_RUN=true`: real ServiceTitan data may be fetched and rules may be evaluated, but Slack alerts, violation writes, dedupe writes, and checkpoint advancement are skipped. The CLI summary prints `dry_run: True`.
 - `SERVICE_TITAN_AUDIT_DRY_RUN=false`: `fail` results create/open violations and immediately call Slack. `alert_sent_at` is set only after Slack returns a timestamp.
 - Slack failure does not crash the audit cycle and leaves `alert_sent_at=NULL`, so the same violation can retry later.
-- `pass` can resolve an existing open violation.
+- `pass` and `not_applicable` can resolve an existing open violation for the same deterministic key.
 - `insufficient_data` is logged and counted in summaries but does not alert by default.
+- `not_applicable` is logged and counted in summaries but does not alert by default.
 
 ### Notification Architecture Report
 
@@ -304,7 +391,7 @@ Required conditions for a live ServiceTitan Slack alert:
 
 Conditions that prevent Slack alerting:
 
-- All rule results are `pass`, `insufficient_data`, or `error`.
+- All rule results are `pass`, `insufficient_data`, `not_applicable`, or `error`.
 - `violations_detected=0`.
 - `SERVICE_TITAN_AUDIT_DRY_RUN=true`.
 - `SLACK_BOT_TOKEN` is missing.
@@ -315,7 +402,7 @@ Conditions that prevent Slack alerting:
 Important behavior:
 
 - A `fail` rule result is required for Slack alerting.
-- `insufficient_data` does not alert by design. It appears in logs and the CLI summary to avoid production false positives.
+- `insufficient_data` and `not_applicable` do not alert by design. They appear in logs and the CLI summary to avoid production false positives.
 - Dry-run blocks Slack, violation writes, dedupe writes, and checkpoint advancement.
 - Dedupe suppresses only already-sent alerts. If Slack fails, `alert_sent_at` remains `NULL`, so the alert can retry later.
 - `SLACK_ALERT_CHANNEL_ID` is preferred. If blank, `SLACK_MARKETING_OPS_CHANNEL_ID` is used.
@@ -459,9 +546,12 @@ The summary includes:
 - Purchase orders scanned.
 - Technician time records scanned.
 - Rules evaluated.
-- Pass/fail/insufficient_data/error counts.
+- Pass/fail/insufficient_data/not_applicable/error counts.
 - Violations detected.
 - `insufficient_data` count by rule.
+- `not_applicable` count by rule.
+- Rules skipped due to `not_applicable`.
+- False-positive prevention summary.
 - Missing data category counts.
 - Alert destinations.
 - Alerts sent.
@@ -489,7 +579,7 @@ The deterministic key is:
 service_titan_job_id + appointment_id + rule_id + relevant_actor_id
 ```
 
-The same violation is not alerted repeatedly. If Slack fails, the violation remains with `alert_sent_at=NULL`, so a later cycle can retry the alert. If a rule later passes for a previously open violation, the record is marked `resolved`.
+The same violation is not alerted repeatedly. If Slack fails, the violation remains with `alert_sent_at=NULL`, so a later cycle can retry the alert. If a rule later passes or becomes `not_applicable` for a previously open violation, the record is marked `resolved`.
 
 ## Commands
 
@@ -499,7 +589,14 @@ Run one audit cycle:
 python3 -m marketing_os_agent servicetitan-audit-once
 ```
 
+Discover sanitized ServiceTitan scope values:
+
+```bash
+python3 -m marketing_os_agent servicetitan-discover-scopes
+```
+
 The one-time command runs exactly one cycle and exits. It intentionally does not require `SERVICE_TITAN_AUDIT_ENABLED=true`, so you can validate real ServiceTitan data without enabling continuous polling. Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` until you are ready to send Slack alerts.
+The discovery command is read-only and prints sanitized scope values for configuring business-unit, job-type, status, tag, and workflow filters.
 
 Validate notification delivery paths:
 
@@ -552,6 +649,7 @@ Review:
 - Jobs, appointments, invoices, invoice items, estimates, notes, forms, equipment, purchase orders, and technician time counts.
 - Rule result counts.
 - `insufficient_data by rule`.
+- `not_applicable by rule`.
 - Missing data category counts.
 - Alerts that would have been sent.
 - Alert destinations.
@@ -576,7 +674,11 @@ Keep dry-run enabled until notification delivery and routing are separately veri
 14. Diagnostic fee rules do not fail repair-sold waiver checks when amount data is unknown.
 15. Special-order, follow-up, scope-change, cancellation-after-materials, and defective-part rules trigger only when notes/PO text indicate the condition applies.
 16. Ply-only rules remain `insufficient_data` until Ply access exists.
-17. `SERVICE_TITAN_DISABLED_RULE_IDS_JSON` disables a noisy rule without changing code.
+17. Jobs with no PO return `not_applicable` for PO rules.
+18. Non-plumbing jobs return `not_applicable` for plumbing/Ply rules.
+19. Canceled/no-access jobs return `not_applicable` for photos/HHR/options rules.
+20. `SERVICE_TITAN_DISABLED_RULE_IDS_JSON` disables a noisy rule without changing code.
+21. `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` narrows a rule without changing code.
 
 ## Render Deployment Notes
 
@@ -584,6 +686,8 @@ Keep dry-run enabled until notification delivery and routing are separately veri
 - Keep `SERVICE_TITAN_AUDIT_ENABLED=false` until credentials and Slack alert channel are ready.
 - Set `SERVICE_TITAN_AUDIT_DRY_RUN=true` for the first production validation run.
 - Run `python3 -m marketing_os_agent init-db` after deploy if the SQLite file is new.
+- Run `python3 -m marketing_os_agent servicetitan-discover-scopes` to collect sanitized production scope names/IDs.
+- Configure `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` when the discovered business units/job types/statuses/tags need tenant-specific narrowing.
 - Run `python3 -m marketing_os_agent servicetitan-audit-once` with a short lookback for first validation.
 - Watch the command summary and logs for `servicetitan_audit_completed`, `servicetitan_rule_insufficient_data`, `servicetitan_alert_dry_run`, `servicetitan_duplicate_alert_suppressed`, and `servicetitan_alert_sent`.
 - After dry-run results look correct, set `SERVICE_TITAN_AUDIT_DRY_RUN=false`, confirm `SLACK_ALERT_CHANNEL_ID` or `SLACK_MARKETING_OPS_CHANNEL_ID`, run one one-time live alert cycle if desired, then set `SERVICE_TITAN_AUDIT_ENABLED=true` to start continuous polling.

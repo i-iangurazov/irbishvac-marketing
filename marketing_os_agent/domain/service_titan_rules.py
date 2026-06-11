@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
-from typing import Callable
+from typing import Any, Callable
 
 from ..clients.servicetitan import ServiceTitanJob
 from ..config import Settings
-from .service_titan_handbook import handbook_rule_by_id
+from .service_titan_handbook import HandbookRuleDefinition, handbook_rule_by_id
 
 
 RESULT_PASS = "pass"
 RESULT_FAIL = "fail"
 RESULT_INSUFFICIENT = "insufficient_data"
+RESULT_NOT_APPLICABLE = "not_applicable"
 RESULT_ERROR = "error"
 
 RULESET_TECHNICIAN = "Technician Compliance"
@@ -19,6 +20,82 @@ RULESET_DISPATCHER = "Dispatcher / Job Quality Audit"
 RULESET_SERVICE_CALL = "Service Call Handbook Audit"
 RULESET_PLY_MATERIALS = "Ply / PO Materials Audit"
 RULESET_FOLLOW_UP = "Follow-up / Escalation Audit"
+
+
+SERVICE_JOB_TYPE_KEYWORDS = (
+    "service",
+    "diagnostic",
+    "diagnosis",
+    "repair",
+    "maintenance",
+    "tune up",
+    "tune-up",
+    "no heat",
+    "no cool",
+)
+PLUMBING_WORKFLOW_KEYWORDS = ("plumbing", "drain", "sewer", "water heater", "ply", "po", "purchase order", "material")
+CLOSED_STATUS_KEYWORDS = ("complete", "completed", "closed", "done")
+ACTIVE_OR_CLOSED_STATUS_KEYWORDS = (
+    "scheduled",
+    "dispatched",
+    "working",
+    "in progress",
+    "complete",
+    "completed",
+    "closed",
+    "done",
+)
+EXCLUDED_STATUS_KEYWORDS = ("canceled", "cancelled", "no access", "rescheduled")
+EXCLUDED_JOB_TYPE_KEYWORDS = ("admin", "internal", "material only", "warehouse only")
+EXCLUDED_TAG_KEYWORDS = ("no access", "safety concern")
+BILLING_EXCLUDED_TAG_KEYWORDS = ("warranty", "callback", "call back", "no charge", "no access", "safety concern")
+
+
+@dataclass(frozen=True)
+class RuleScope:
+    handbook_source: str = ""
+    applies_to_departments: tuple[str, ...] = ()
+    applies_to_business_units: tuple[str, ...] = ()
+    applies_to_trades: tuple[str, ...] = ()
+    applies_to_job_types: tuple[str, ...] = ()
+    applies_to_job_statuses: tuple[str, ...] = ()
+    applies_to_roles: tuple[str, ...] = ()
+    applies_to_workflows: tuple[str, ...] = ()
+    excludes_job_types: tuple[str, ...] = ()
+    excludes_statuses: tuple[str, ...] = ()
+    excludes_tags: tuple[str, ...] = ()
+    excludes_cancellation_reasons: tuple[str, ...] = ()
+    required_context_fields: tuple[str, ...] = ()
+    required_data_fields: tuple[str, ...] = ()
+    alert_routing: str = ""
+    default_enabled: bool = True
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "handbook_source": self.handbook_source,
+            "applies_to_departments": list(self.applies_to_departments),
+            "applies_to_business_units": list(self.applies_to_business_units),
+            "applies_to_trades": list(self.applies_to_trades),
+            "applies_to_job_types": list(self.applies_to_job_types),
+            "applies_to_job_statuses": list(self.applies_to_job_statuses),
+            "applies_to_roles": list(self.applies_to_roles),
+            "applies_to_workflows": list(self.applies_to_workflows),
+            "excludes_job_types": list(self.excludes_job_types),
+            "excludes_statuses": list(self.excludes_statuses),
+            "excludes_tags": list(self.excludes_tags),
+            "excludes_cancellation_reasons": list(self.excludes_cancellation_reasons),
+            "required_context_fields": list(self.required_context_fields),
+            "required_data_fields": list(self.required_data_fields),
+            "alert_routing": self.alert_routing,
+            "default_enabled": self.default_enabled,
+        }
+
+
+@dataclass(frozen=True)
+class ApplicabilityDecision:
+    status: str
+    explanation: str
+    metadata: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -53,14 +130,20 @@ class AuditRule:
     recommended_alert_recipient: str = "slack audit channel"
     delivery: str = "immediate"
     enabled_by_default: bool = True
+    scope: RuleScope = RuleScope()
 
     def run(self, job: ServiceTitanJob, settings: Settings) -> RuleResult:
         try:
-            return self.evaluate(job, settings, self)
+            effective_rule = _effective_rule(self, settings)
+            decision = _applicability_decision(job, effective_rule.scope)
+            if decision.status != "applies":
+                return effective_rule.result(job, decision.status, decision.explanation, effective_rule.action, decision.metadata)
+            return effective_rule.evaluate(job, settings, effective_rule)
         except Exception as exc:
             return self.result(job, RESULT_ERROR, f"Rule evaluation failed: {exc}", self.action)
 
     def result(self, job: ServiceTitanJob, status: str, explanation: str, action: str, metadata: dict[str, object] | None = None) -> RuleResult:
+        merged_metadata = {"rule_scope": self.scope.to_metadata(), **(metadata or {})}
         return RuleResult(
             rule_id=self.rule_id,
             ruleset=self.ruleset,
@@ -72,9 +155,9 @@ class AuditRule:
             recommended_action=action,
             required_fields=self.required_fields,
             violation_key=violation_key(job, self.rule_id),
-            metadata=metadata or {},
-            handbook_source=self.handbook_source,
-            recommended_alert_recipient=self.recommended_alert_recipient,
+            metadata=merged_metadata,
+            handbook_source=self.scope.handbook_source or self.handbook_source,
+            recommended_alert_recipient=self.scope.alert_routing or self.recommended_alert_recipient,
             delivery=self.delivery,
         )
 
@@ -90,6 +173,73 @@ def active_service_titan_rules(settings: Settings) -> list[AuditRule]:
     return [rule for rule in rules if rule.enabled_by_default and rule.rule_id not in disabled]
 
 
+def _service_call_scope(
+    *,
+    handbook_source: str,
+    required_data_fields: tuple[str, ...],
+    roles: tuple[str, ...],
+    alert_routing: str,
+    statuses: tuple[str, ...] = CLOSED_STATUS_KEYWORDS,
+    required_context_fields: tuple[str, ...] = ("status", "job_type"),
+    excludes_tags: tuple[str, ...] = EXCLUDED_TAG_KEYWORDS,
+) -> RuleScope:
+    return RuleScope(
+        handbook_source=handbook_source,
+        applies_to_job_types=SERVICE_JOB_TYPE_KEYWORDS,
+        applies_to_job_statuses=statuses,
+        applies_to_roles=roles,
+        excludes_job_types=EXCLUDED_JOB_TYPE_KEYWORDS,
+        excludes_statuses=EXCLUDED_STATUS_KEYWORDS,
+        excludes_tags=excludes_tags,
+        excludes_cancellation_reasons=("no access", "wrong equipment", "safety concern"),
+        required_context_fields=required_context_fields,
+        required_data_fields=required_data_fields,
+        alert_routing=alert_routing,
+    )
+
+
+def _ply_material_scope(definition: HandbookRuleDefinition) -> RuleScope:
+    return RuleScope(
+        handbook_source=definition.handbook_source,
+        applies_to_workflows=PLUMBING_WORKFLOW_KEYWORDS,
+        applies_to_roles=("dispatcher", "warehouse", "operations"),
+        excludes_statuses=(),
+        required_context_fields=("workflow", "materials_or_po"),
+        required_data_fields=definition.required_data_fields,
+        alert_routing=definition.recommended_alert_recipient,
+        default_enabled=definition.enabled_by_default,
+    )
+
+
+def _scope_for_handbook_rule(definition: HandbookRuleDefinition) -> RuleScope:
+    if definition.ruleset == RULESET_PLY_MATERIALS:
+        return _ply_material_scope(definition)
+    if definition.rule_id in {
+        "scope_change_missing_escalation_note",
+        "cancellation_after_materials_missing_escalation",
+        "defective_part_missing_warranty_claim_data",
+    }:
+        return RuleScope(
+            handbook_source=definition.handbook_source,
+            applies_to_workflows=("service", "plumbing", "material"),
+            applies_to_job_statuses=ACTIVE_OR_CLOSED_STATUS_KEYWORDS,
+            applies_to_roles=("dispatcher", "operations", "warehouse"),
+            excludes_job_types=("admin", "internal"),
+            required_context_fields=("status", "job_type"),
+            required_data_fields=definition.required_data_fields,
+            alert_routing=definition.recommended_alert_recipient,
+            default_enabled=definition.enabled_by_default,
+        )
+    return _service_call_scope(
+        handbook_source=definition.handbook_source,
+        required_data_fields=definition.required_data_fields,
+        roles=("technician", "dispatcher"),
+        alert_routing=definition.recommended_alert_recipient,
+        statuses=ACTIVE_OR_CLOSED_STATUS_KEYWORDS if "arrival" in definition.rule_id else CLOSED_STATUS_KEYWORDS,
+        excludes_tags=BILLING_EXCLUDED_TAG_KEYWORDS if "diagnostic_fee" in definition.rule_id else EXCLUDED_TAG_KEYWORDS,
+    )
+
+
 def technician_compliance_rules() -> list[AuditRule]:
     return [
         AuditRule(
@@ -101,6 +251,12 @@ def technician_compliance_rules() -> list[AuditRule]:
             ("status", "technician", "clock_in"),
             "Confirm the technician clock-in on the job and correct the time entry if needed.",
             _clock_in,
+            scope=_service_call_scope(
+                handbook_source="Technician compliance configuration",
+                required_data_fields=("status", "technician", "clock_in"),
+                roles=("technician",),
+                alert_routing="service/operations audit channel",
+            ),
         ),
         AuditRule(
             "tech_clock_out_missing",
@@ -111,6 +267,12 @@ def technician_compliance_rules() -> list[AuditRule]:
             ("status", "technician", "clock_out"),
             "Confirm the technician clock-out on the job and correct the time entry if needed.",
             _clock_out,
+            scope=_service_call_scope(
+                handbook_source="Technician compliance configuration",
+                required_data_fields=("status", "technician", "clock_out"),
+                roles=("technician",),
+                alert_routing="service/operations audit channel",
+            ),
         ),
         AuditRule(
             "tech_lunch_break_missing",
@@ -121,6 +283,12 @@ def technician_compliance_rules() -> list[AuditRule]:
             ("status", "clock_in", "clock_out", "lunch_break"),
             "Review the technician timesheet and add or correct the required lunch break.",
             _lunch_break,
+            scope=_service_call_scope(
+                handbook_source="Technician compliance configuration",
+                required_data_fields=("status", "clock_in", "clock_out", "lunch_break"),
+                roles=("technician",),
+                alert_routing="service/operations audit channel",
+            ),
         ),
         AuditRule(
             "tech_invoice_diagnostic_fee_missing",
@@ -131,6 +299,13 @@ def technician_compliance_rules() -> list[AuditRule]:
             ("status", "invoice_line_items"),
             "Review the invoice and add or correct the diagnostic fee line item.",
             _diagnostic_fee,
+            scope=_service_call_scope(
+                handbook_source="Technician compliance configuration",
+                required_data_fields=("status", "invoice_line_items", "repair_sold"),
+                roles=("technician", "accounting"),
+                alert_routing="accounting/operations channel",
+                excludes_tags=BILLING_EXCLUDED_TAG_KEYWORDS,
+            ),
         ),
         AuditRule(
             "tech_required_phases_incomplete",
@@ -141,6 +316,12 @@ def technician_compliance_rules() -> list[AuditRule]:
             ("status", "completed_phases"),
             "Review the job workflow and complete or correct the missing required phases.",
             _required_phases,
+            scope=_service_call_scope(
+                handbook_source="Technician compliance configuration",
+                required_data_fields=("status", "completed_phases"),
+                roles=("technician",),
+                alert_routing="service/operations audit channel",
+            ),
         ),
         AuditRule(
             "tech_required_operational_data_incomplete",
@@ -151,6 +332,12 @@ def technician_compliance_rules() -> list[AuditRule]:
             ("status", "operational_data"),
             "Review the job and complete the required operational fields.",
             _operational_data,
+            scope=_service_call_scope(
+                handbook_source="Technician compliance configuration",
+                required_data_fields=("status", "operational_data"),
+                roles=("technician",),
+                alert_routing="service/operations audit channel",
+            ),
         ),
     ]
 
@@ -166,6 +353,13 @@ def dispatcher_audit_rules() -> list[AuditRule]:
             ("arrival_window", "arrived_at"),
             "Review dispatch timing and coach or reschedule when needed.",
             _arrival_window,
+            scope=_service_call_scope(
+                handbook_source="Dispatcher quality configuration",
+                required_data_fields=("arrival_window", "arrived_at"),
+                roles=("dispatcher", "technician"),
+                alert_routing="dispatcher/operations audit channel",
+                statuses=ACTIVE_OR_CLOSED_STATUS_KEYWORDS,
+            ),
         ),
         AuditRule(
             "dispatch_diagnostic_fee_missing",
@@ -176,6 +370,13 @@ def dispatcher_audit_rules() -> list[AuditRule]:
             ("status", "invoice_line_items"),
             "Review dispatch/job closeout and correct the diagnostic fee collection record.",
             _diagnostic_fee,
+            scope=_service_call_scope(
+                handbook_source="Dispatcher quality configuration",
+                required_data_fields=("status", "invoice_line_items", "repair_sold"),
+                roles=("dispatcher", "accounting"),
+                alert_routing="accounting/operations channel",
+                excludes_tags=BILLING_EXCLUDED_TAG_KEYWORDS,
+            ),
         ),
         AuditRule(
             "dispatch_options_not_presented",
@@ -186,6 +387,12 @@ def dispatcher_audit_rules() -> list[AuditRule]:
             ("status", "options_presented"),
             "Confirm options were presented and update the job record with supporting detail.",
             _options_presented,
+            scope=_service_call_scope(
+                handbook_source="Dispatcher quality configuration",
+                required_data_fields=("status", "options_presented"),
+                roles=("dispatcher",),
+                alert_routing="dispatcher/operations audit channel",
+            ),
         ),
         AuditRule(
             "dispatch_notes_missing",
@@ -196,6 +403,12 @@ def dispatcher_audit_rules() -> list[AuditRule]:
             ("status", "notes"),
             "Add clear job notes covering outcome, customer decision, and next step.",
             _notes,
+            scope=_service_call_scope(
+                handbook_source="Dispatcher quality configuration",
+                required_data_fields=("status", "notes"),
+                roles=("dispatcher",),
+                alert_routing="dispatcher/operations audit channel",
+            ),
         ),
         AuditRule(
             "dispatch_photos_missing",
@@ -206,6 +419,12 @@ def dispatcher_audit_rules() -> list[AuditRule]:
             ("status", "photos"),
             "Upload required job photos or document why photos were not required.",
             _photos,
+            scope=_service_call_scope(
+                handbook_source="Dispatcher quality configuration",
+                required_data_fields=("status", "photos"),
+                roles=("technician", "dispatcher"),
+                alert_routing="dispatcher/operations audit channel",
+            ),
         ),
         AuditRule(
             "dispatch_supporting_evidence_missing",
@@ -216,6 +435,12 @@ def dispatcher_audit_rules() -> list[AuditRule]:
             ("status", "supporting_evidence"),
             "Attach supporting evidence such as photos, forms, signatures, or invoice proof.",
             _supporting_evidence,
+            scope=_service_call_scope(
+                handbook_source="Dispatcher quality configuration",
+                required_data_fields=("status", "supporting_evidence"),
+                roles=("technician", "dispatcher"),
+                alert_routing="dispatcher/operations audit channel",
+            ),
         ),
     ]
 
@@ -268,7 +493,242 @@ def _handbook_rule(rule_id: str, evaluator: Callable[[ServiceTitanJob, Settings,
         recommended_alert_recipient=definition.recommended_alert_recipient,
         delivery=definition.delivery,
         enabled_by_default=definition.enabled_by_default,
+        scope=_scope_for_handbook_rule(definition),
     )
+
+
+def _effective_rule(rule: AuditRule, settings: Settings) -> AuditRule:
+    config = settings.service_titan_rule_scope_config or {}
+    rulesets_config = config.get("rulesets", {}) if isinstance(config.get("rulesets", {}), dict) else {}
+    ruleset_config = rulesets_config.get(rule.ruleset, {}) if isinstance(rulesets_config.get(rule.ruleset, {}), dict) else {}
+    rules_config = config.get("rules", {}) if isinstance(config.get("rules", {}), dict) else {}
+    rule_config = rules_config.get(rule.rule_id, {}) if isinstance(rules_config.get(rule.rule_id, {}), dict) else {}
+
+    enabled = rule.scope.default_enabled
+    if "enabled" in ruleset_config:
+        enabled = _config_bool(ruleset_config["enabled"], enabled)
+    if "enabled" in rule_config:
+        enabled = _config_bool(rule_config["enabled"], enabled)
+
+    applies = rule_config.get("applies_to", {}) if isinstance(rule_config.get("applies_to", {}), dict) else {}
+    excludes = rule_config.get("excludes", {}) if isinstance(rule_config.get("excludes", {}), dict) else {}
+    alert = rule_config.get("alert", {}) if isinstance(rule_config.get("alert", {}), dict) else {}
+
+    scope = replace(
+        rule.scope,
+        applies_to_departments=_config_tuple(applies, ("departments",), rule.scope.applies_to_departments),
+        applies_to_business_units=_config_tuple(applies, ("business_units", "business_unit_ids"), rule.scope.applies_to_business_units),
+        applies_to_trades=_config_tuple(applies, ("trades",), rule.scope.applies_to_trades),
+        applies_to_job_types=_config_tuple(applies, ("job_types", "job_types_contains", "job_type_ids"), rule.scope.applies_to_job_types),
+        applies_to_job_statuses=_config_tuple(applies, ("statuses", "job_statuses"), rule.scope.applies_to_job_statuses),
+        applies_to_roles=_config_tuple(applies, ("roles",), rule.scope.applies_to_roles),
+        applies_to_workflows=_config_tuple(applies, ("workflows", "workflow_contains"), rule.scope.applies_to_workflows),
+        excludes_job_types=_config_tuple(excludes, ("job_types", "job_types_contains", "job_type_ids"), rule.scope.excludes_job_types),
+        excludes_statuses=_config_tuple(excludes, ("statuses", "job_statuses"), rule.scope.excludes_statuses),
+        excludes_tags=_config_tuple(excludes, ("tags", "tags_contains", "tag_ids"), rule.scope.excludes_tags),
+        excludes_cancellation_reasons=_config_tuple(
+            excludes,
+            ("cancellation_reasons", "cancellation_reasons_contains"),
+            rule.scope.excludes_cancellation_reasons,
+        ),
+        alert_routing=str(alert.get("channel") or alert.get("destination") or rule.scope.alert_routing),
+        default_enabled=enabled,
+    )
+    return replace(
+        rule,
+        scope=scope,
+        recommended_alert_recipient=scope.alert_routing or rule.recommended_alert_recipient,
+        enabled_by_default=enabled,
+    )
+
+
+def _config_tuple(source: dict[str, Any], keys: tuple[str, ...], default: tuple[str, ...]) -> tuple[str, ...]:
+    for key in keys:
+        if key not in source:
+            continue
+        value = source[key]
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            return (value,)
+        if isinstance(value, list):
+            return tuple(str(item) for item in value if item is not None and str(item).strip())
+    return default
+
+
+def _config_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _applicability_decision(job: ServiceTitanJob, scope: RuleScope) -> ApplicabilityDecision:
+    if not scope.default_enabled:
+        return ApplicabilityDecision(RESULT_NOT_APPLICABLE, "Rule is disabled by scope configuration.", {"scope_decision": "disabled"})
+
+    material_state = _material_context_state(job)
+    if "materials_or_po" in scope.required_context_fields:
+        if material_state == "absent":
+            return ApplicabilityDecision(
+                RESULT_NOT_APPLICABLE,
+                "No PO, Ply, or material context was available for this job.",
+                {"scope_decision": "no_material_or_po_context"},
+            )
+        if material_state == "unknown":
+            return ApplicabilityDecision(
+                RESULT_INSUFFICIENT,
+                "PO/material scope is unknown because purchase-order or Ply data was unavailable.",
+                {"scope_decision": "material_or_po_context_unknown"},
+            )
+
+    missing_context = [field for field in scope.required_context_fields if field != "materials_or_po" and not _context_available(job, field)]
+    if missing_context:
+        return ApplicabilityDecision(
+            RESULT_INSUFFICIENT,
+            "Required applicability context is missing: " + ", ".join(sorted(missing_context)) + ".",
+            {"scope_decision": "missing_context", "missing_context_fields": sorted(missing_context)},
+        )
+
+    excluded = _first_matching_scope(job, {
+        "status": scope.excludes_statuses,
+        "job_type": scope.excludes_job_types,
+        "tags": scope.excludes_tags,
+        "cancellation_reason": scope.excludes_cancellation_reasons,
+    })
+    if excluded:
+        field, pattern = excluded
+        return ApplicabilityDecision(
+            RESULT_NOT_APPLICABLE,
+            f"Rule scope excludes this job because {field} matched {pattern!r}.",
+            {"scope_decision": "excluded", "field": field, "pattern": pattern},
+        )
+
+    include_checks = {
+        "department": scope.applies_to_departments,
+        "business_unit": scope.applies_to_business_units,
+        "trade": scope.applies_to_trades,
+        "job_type": scope.applies_to_job_types,
+        "status": scope.applies_to_job_statuses,
+        "workflow": scope.applies_to_workflows,
+    }
+    for field, patterns in include_checks.items():
+        if not patterns:
+            continue
+        values = _context_values(job, field)
+        if not values:
+            return ApplicabilityDecision(
+                RESULT_INSUFFICIENT,
+                f"Rule applicability requires {field}, but ServiceTitan did not provide it.",
+                {"scope_decision": "missing_include_context", "field": field},
+            )
+        if not _matches_any(values, patterns):
+            return ApplicabilityDecision(
+                RESULT_NOT_APPLICABLE,
+                f"Rule does not apply because {field} did not match configured scope.",
+                {"scope_decision": "include_mismatch", "field": field, "patterns": list(patterns)},
+            )
+
+    return ApplicabilityDecision("applies", "Rule scope applies to this job.", {"scope_decision": "applies"})
+
+
+def _first_matching_scope(job: ServiceTitanJob, checks: dict[str, tuple[str, ...]]) -> tuple[str, str] | None:
+    for field, patterns in checks.items():
+        if not patterns:
+            continue
+        values = _context_values(job, field)
+        pattern = _matched_pattern(values, patterns)
+        if pattern:
+            return field, pattern
+    return None
+
+
+def _context_available(job: ServiceTitanJob, field: str) -> bool:
+    if field in {"status", "technician", "dispatcher", "appointment_id"}:
+        return bool(_context_values(job, field))
+    if field == "workflow":
+        return bool(_context_values(job, field)) and bool({"workflow", "job_type", "business_unit", "department", "trade", "tags"} & job.present_fields)
+    if field in {"job_type", "business_unit", "department", "trade", "workflow", "tags", "cancellation_reason"}:
+        return field in job.present_fields and bool(_context_values(job, field))
+    return field in job.present_fields
+
+
+def _context_values(job: ServiceTitanJob, field: str) -> list[str]:
+    if field == "status":
+        return [job.status] if job.status else []
+    if field == "job_type":
+        return [value for value in (job.job_type_id, job.job_type_name) if value]
+    if field == "business_unit":
+        return [value for value in (job.business_unit_id, job.business_unit_name) if value]
+    if field == "department":
+        return [job.department] if job.department else []
+    if field == "trade":
+        return [job.trade] if job.trade else []
+    if field == "workflow":
+        return [
+            value
+            for value in (
+                job.workflow,
+                job.job_type_name,
+                job.business_unit_name,
+                job.department,
+                job.trade,
+                *job.tag_names,
+            )
+            if value
+        ]
+    if field == "tags":
+        return [*job.tag_ids, *job.tag_names]
+    if field == "cancellation_reason":
+        return [job.cancellation_reason] if job.cancellation_reason else []
+    if field == "technician":
+        return [value for value in (job.technician_id, job.technician_name) if value]
+    if field == "dispatcher":
+        return [value for value in (job.dispatcher_id, job.dispatcher_name) if value]
+    if field == "appointment_id":
+        return [job.appointment_id] if job.appointment_id else []
+    return []
+
+
+def _material_context_state(job: ServiceTitanJob) -> str:
+    if job.ply_data_available:
+        return "present"
+    if job.purchase_orders_count is not None:
+        return "present" if job.purchase_orders_count > 0 else "absent"
+    if job.purchase_orders:
+        return "present"
+    if "purchase_orders" in job.present_fields:
+        return "absent"
+    if "purchase_orders" in job.missing_data:
+        return "unknown"
+    text = " ".join(_context_values(job, "workflow") + _context_values(job, "job_type")).lower()
+    if any(keyword in text for keyword in ("material", "purchase order", " po ", "ply", "special order")):
+        return "present"
+    return "unknown"
+
+
+def _matches_any(values: list[str], patterns: tuple[str, ...]) -> bool:
+    return bool(_matched_pattern(values, patterns))
+
+
+def _matched_pattern(values: list[str], patterns: tuple[str, ...]) -> str:
+    normalized_values = [_normalize(value) for value in values if value]
+    for pattern in patterns:
+        normalized_pattern = _normalize(pattern)
+        if not normalized_pattern:
+            continue
+        if any(normalized_pattern in value or value in normalized_pattern for value in normalized_values):
+            return pattern
+    return ""
+
+
+def _normalize(value: str) -> str:
+    return " ".join(value.lower().replace("_", " ").replace("-", " ").split())
 
 
 def violation_key(job: ServiceTitanJob, rule_id: str) -> str:
@@ -281,7 +741,7 @@ def _closed_or_pass(job: ServiceTitanJob, rule: AuditRule) -> RuleResult | None:
     if "status" not in job.present_fields:
         return rule.result(job, RESULT_INSUFFICIENT, "ServiceTitan payload did not include job status.", rule.action)
     if not job.is_closed:
-        return rule.result(job, RESULT_PASS, "Job is not closed; closeout rule does not apply yet.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "Job is not closed; closeout rule does not apply yet.", rule.action)
     return None
 
 
@@ -359,12 +819,18 @@ def _diagnostic_fee(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -
         return closed
     if "invoice_line_items" not in job.present_fields:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "invoice_line_items", "Invoice line items were not available from ServiceTitan."), rule.action)
+    if job.repair_sold is None:
+        return rule.result(job, RESULT_INSUFFICIENT, "Repair-sold status could not be determined; diagnostic fee rule cannot safely apply.", rule.action)
+    if job.repair_sold:
+        return rule.result(job, RESULT_NOT_APPLICABLE, "Repair was sold; missing diagnostic fee collection rule does not apply.", rule.action)
     keywords = [keyword.lower() for keyword in settings.service_titan_diagnostic_fee_keywords if keyword]
     if not keywords:
         return rule.result(job, RESULT_INSUFFICIENT, "Diagnostic fee keywords are not configured.", rule.action)
     haystack = " | ".join(job.invoice_line_items).lower()
     if any(keyword in haystack for keyword in keywords):
         return rule.result(job, RESULT_PASS, "Diagnostic fee line item is present.", rule.action)
+    if _approved_waiver_note(job):
+        return rule.result(job, RESULT_PASS, "Approved diagnostic fee waiver reason is documented.", rule.action)
     return rule.result(job, RESULT_FAIL, "Invoice line items do not include a configured diagnostic fee keyword.", rule.action, {"line_items": job.invoice_line_items[:10]})
 
 
@@ -484,7 +950,7 @@ def _equipment_registration(job: ServiceTitanJob, settings: Settings, rule: Audi
     if closed:
         return closed
     if not settings.service_titan_require_equipment_registration:
-        return rule.result(job, RESULT_PASS, "Equipment registration requirement is disabled.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "Equipment registration requirement is disabled.", rule.action)
     if "equipment" not in job.present_fields or job.equipment_count is None:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "equipment", "Equipment records were not available from ServiceTitan."), rule.action)
     if job.equipment_count <= 0:
@@ -499,7 +965,7 @@ def _hhr_or_service_form(job: ServiceTitanJob, settings: Settings, rule: AuditRu
     if closed:
         return closed
     if not settings.service_titan_require_hhr:
-        return rule.result(job, RESULT_PASS, "HHR requirement is disabled.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "HHR requirement is disabled.", rule.action)
     if "hhr" not in job.present_fields or job.hhr_completed is None:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "hhr", "HHR/form submissions were not available from ServiceTitan."), rule.action)
     if not job.hhr_completed:
@@ -529,7 +995,7 @@ def _home_comfort_plan_option(job: ServiceTitanJob, settings: Settings, rule: Au
     if closed:
         return closed
     if not settings.service_titan_require_home_comfort_plan_option:
-        return rule.result(job, RESULT_PASS, "Home Comfort Plan option requirement is disabled.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "Home Comfort Plan option requirement is disabled.", rule.action)
     if "home_comfort_plan_option" not in job.present_fields or job.home_comfort_plan_option_present is None:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "home_comfort_plan_option", "Home Comfort Plan option data was not available from ServiceTitan."), rule.action)
     if not job.home_comfort_plan_option_present:
@@ -568,7 +1034,7 @@ def _diagnostic_fee_when_no_repair(job: ServiceTitanJob, _settings: Settings, ru
     if job.repair_sold is None:
         return rule.result(job, RESULT_INSUFFICIENT, "Repair-sold status could not be determined from invoice data.", rule.action)
     if job.repair_sold:
-        return rule.result(job, RESULT_PASS, "Repair was sold; diagnostic collection rule does not apply.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "Repair was sold; diagnostic collection rule does not apply.", rule.action)
     if job.diagnostic_fee_present:
         return rule.result(job, RESULT_PASS, "Diagnostic fee is present for a non-repair job.", rule.action)
     if _approved_waiver_note(job):
@@ -585,7 +1051,7 @@ def _diagnostic_fee_waiver_when_repair_sold(job: ServiceTitanJob, _settings: Set
     if job.repair_sold is None:
         return rule.result(job, RESULT_INSUFFICIENT, "Repair-sold status could not be determined from invoice data.", rule.action)
     if not job.repair_sold:
-        return rule.result(job, RESULT_PASS, "Repair was not sold; diagnostic waiver rule does not apply.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "Repair was not sold; diagnostic waiver rule does not apply.", rule.action)
     if job.diagnostic_fee_charged is None and job.diagnostic_fee_present:
         return rule.result(job, RESULT_INSUFFICIENT, "Diagnostic fee line item was present, but amount/waiver status was unavailable.", rule.action)
     if job.diagnostic_fee_charged and not job.diagnostic_fee_waived:
@@ -602,7 +1068,7 @@ def _payment_on_completed_job(job: ServiceTitanJob, _settings: Settings, rule: A
     if job.invoice_total is None:
         return rule.result(job, RESULT_INSUFFICIENT, "Invoice total was not available from ServiceTitan.", rule.action)
     if job.invoice_total <= 0:
-        return rule.result(job, RESULT_PASS, "Invoice total is not positive; payment rule does not apply.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "Invoice total is not positive; payment rule does not apply.", rule.action)
     if (job.payment_total or 0) > 0 or (job.invoice_balance is not None and job.invoice_balance <= 0) or "paid" in job.invoice_status.lower():
         return rule.result(job, RESULT_PASS, "Payment or paid invoice status is present.", rule.action)
     return rule.result(job, RESULT_FAIL, "Completed job has a positive invoice total but no visible payment or paid status.", rule.action)
@@ -612,7 +1078,7 @@ def _follow_up_task(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) 
     if "notes" not in job.present_fields:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Follow-up notes were not available from ServiceTitan."), rule.action)
     if not job.follow_up_needed:
-        return rule.result(job, RESULT_PASS, "No follow-up need was detected.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "No follow-up need was detected.", rule.action)
     if job.follow_up_task_present:
         return rule.result(job, RESULT_PASS, "Follow-up task/reminder evidence is present.", rule.action)
     return rule.result(job, RESULT_FAIL, "Follow-up was indicated but no follow-up task/reminder evidence was found.", rule.action)
@@ -622,7 +1088,7 @@ def _special_order_required_notes(job: ServiceTitanJob, _settings: Settings, rul
     if "notes" not in job.present_fields:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Special-order notes were not available from ServiceTitan."), rule.action)
     if not job.special_order_detected:
-        return rule.result(job, RESULT_PASS, "No special-order work was detected.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "No special-order work was detected.", rule.action)
     if job.special_order_missing_fields:
         return rule.result(job, RESULT_FAIL, "Special-order note field(s) missing: " + ", ".join(job.special_order_missing_fields), rule.action, {"missing_fields": job.special_order_missing_fields})
     return rule.result(job, RESULT_PASS, "Special-order notes contain the configured required fields.", rule.action)
@@ -632,7 +1098,7 @@ def _special_order_reminder(job: ServiceTitanJob, _settings: Settings, rule: Aud
     if "notes" not in job.present_fields:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Special-order notes were not available from ServiceTitan."), rule.action)
     if not job.special_order_detected:
-        return rule.result(job, RESULT_PASS, "No special-order work was detected.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "No special-order work was detected.", rule.action)
     return rule.result(
         job,
         RESULT_INSUFFICIENT,
@@ -645,7 +1111,7 @@ def _special_order_downpayment(job: ServiceTitanJob, _settings: Settings, rule: 
     if "notes" not in job.present_fields:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Special-order notes were not available from ServiceTitan."), rule.action)
     if not job.special_order_detected:
-        return rule.result(job, RESULT_PASS, "No special-order work was detected.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "No special-order work was detected.", rule.action)
     if "payments" not in job.present_fields and "invoice_line_items" not in job.present_fields:
         return rule.result(job, RESULT_INSUFFICIENT, "Payment and invoice item data are unavailable for special-order downpayment verification.", rule.action)
     if job.downpayment_recorded:
@@ -657,7 +1123,7 @@ def _lead_turnover_documentation(job: ServiceTitanJob, _settings: Settings, rule
     if "notes" not in job.present_fields:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Lead turnover notes were not available from ServiceTitan."), rule.action)
     if not job.lead_turnover_required:
-        return rule.result(job, RESULT_PASS, "No lead turnover was detected.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "No lead turnover was detected.", rule.action)
     missing_sources = [field for field in ("hhr", "photos", "estimates", "equipment") if field not in job.present_fields]
     if missing_sources:
         return rule.result(job, RESULT_INSUFFICIENT, "Lead turnover source(s) unavailable: " + ", ".join(missing_sources), rule.action)
@@ -730,7 +1196,7 @@ def _defective_part_warranty_claim(job: ServiceTitanJob, _settings: Settings, ru
     if "notes" not in job.present_fields:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", "Defective part notes were not available from ServiceTitan."), rule.action)
     if not job.defective_part_detected:
-        return rule.result(job, RESULT_PASS, "No defective-part issue was detected.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, "No defective-part issue was detected.", rule.action)
     if job.warranty_claim_documented:
         return rule.result(job, RESULT_PASS, "Warranty claim/RMA evidence is documented.", rule.action)
     return rule.result(job, RESULT_FAIL, "Defective part was detected without warranty claim/RMA evidence.", rule.action)
@@ -771,7 +1237,7 @@ def _escalation_rule(job: ServiceTitanJob, rule: AuditRule, detected: bool | Non
     if "notes" not in job.present_fields:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "notes", f"{label.title()} notes were not available from ServiceTitan."), rule.action)
     if not detected:
-        return rule.result(job, RESULT_PASS, f"No {label} was detected.", rule.action)
+        return rule.result(job, RESULT_NOT_APPLICABLE, f"No {label} was detected.", rule.action)
     if escalated:
         return rule.result(job, RESULT_PASS, f"{label.title()} escalation evidence is documented.", rule.action)
     return rule.result(job, RESULT_FAIL, f"{label.title()} was detected without escalation evidence.", rule.action)

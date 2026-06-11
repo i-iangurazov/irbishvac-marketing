@@ -12,7 +12,7 @@ from ..clients.slack import SlackClient
 from ..config import Settings
 from ..models import parse_notion_datetime
 from ..persistence import Persistence
-from .service_titan_rules import RESULT_ERROR, RESULT_FAIL, RESULT_INSUFFICIENT, RESULT_PASS, RuleResult, active_service_titan_rules
+from .service_titan_rules import RESULT_ERROR, RESULT_FAIL, RESULT_INSUFFICIENT, RESULT_NOT_APPLICABLE, RESULT_PASS, RuleResult, active_service_titan_rules
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ class ServiceTitanAuditSummary:
     violations_detected: int = 0
     result_counts: dict[str, int] = field(default_factory=dict)
     insufficient_data_by_rule: dict[str, int] = field(default_factory=dict)
+    not_applicable_by_rule: dict[str, int] = field(default_factory=dict)
     missing_data_category_counts: dict[str, int] = field(default_factory=dict)
     alert_destination_counts: dict[str, int] = field(default_factory=dict)
     alerts_sent: int = 0
@@ -75,6 +76,15 @@ class ServiceTitanAuditSummary:
             lines.append("- insufficient_data by rule:")
             for rule_id, count in sorted(self.insufficient_data_by_rule.items()):
                 lines.append(f"  - {rule_id}: {count}")
+        if self.not_applicable_by_rule:
+            lines.append("- not_applicable by rule:")
+            for rule_id, count in sorted(self.not_applicable_by_rule.items()):
+                lines.append(f"  - {rule_id}: {count}")
+            lines.append(f"- rules skipped due to not_applicable: {sum(self.not_applicable_by_rule.values())}")
+        if self.result_counts:
+            lines.append("- false-positive prevention summary:")
+            lines.append(f"  - insufficient_data suppressed from alerts: {self.result_counts.get(RESULT_INSUFFICIENT, 0)}")
+            lines.append(f"  - not_applicable suppressed from alerts: {self.result_counts.get(RESULT_NOT_APPLICABLE, 0)}")
         if self.missing_data_category_counts:
             lines.append("- missing data category counts:")
             for category, count in sorted(self.missing_data_category_counts.items()):
@@ -127,7 +137,7 @@ class ServiceTitanAuditService:
             summary.errors = 1
             return summary
 
-        counts = {RESULT_PASS: 0, RESULT_FAIL: 0, RESULT_INSUFFICIENT: 0, RESULT_ERROR: 0}
+        counts = {RESULT_PASS: 0, RESULT_FAIL: 0, RESULT_INSUFFICIENT: 0, RESULT_NOT_APPLICABLE: 0, RESULT_ERROR: 0}
         summary.jobs_scanned = len(jobs)
         summary.appointments_scanned = sum(job.related_counts.get("appointments", 0) for job in jobs)
         summary.invoices_scanned = sum(job.related_counts.get("invoices", 0) for job in jobs)
@@ -162,6 +172,14 @@ class ServiceTitanAuditService:
                     elif result.status == RESULT_PASS:
                         if self.db.resolve_service_titan_violation(result.violation_key):
                             logger.info("servicetitan_violation_resolved", extra={"violation_key": result.violation_key, "rule_id": result.rule_id})
+                    elif result.status == RESULT_NOT_APPLICABLE:
+                        summary.not_applicable_by_rule[result.rule_id] = summary.not_applicable_by_rule.get(result.rule_id, 0) + 1
+                        if self.db.resolve_service_titan_violation(result.violation_key):
+                            logger.info("servicetitan_violation_resolved_not_applicable", extra={"violation_key": result.violation_key, "rule_id": result.rule_id})
+                        logger.info(
+                            "servicetitan_rule_not_applicable",
+                            extra={"job_id": job.job_id, "rule_id": result.rule_id, "explanation": result.explanation},
+                        )
                     elif result.status == RESULT_INSUFFICIENT:
                         summary.insufficient_data_by_rule[result.rule_id] = summary.insufficient_data_by_rule.get(result.rule_id, 0) + 1
                         logger.info(
@@ -204,6 +222,7 @@ class ServiceTitanAuditService:
                 "counts": counts,
                 "alert_destination_counts": summary.alert_destination_counts,
                 "insufficient_data_by_rule": summary.insufficient_data_by_rule,
+                "not_applicable_by_rule": summary.not_applicable_by_rule,
                 "missing_data_category_counts": summary.missing_data_category_counts,
                 "since": since.isoformat(),
                 "dry_run": summary.dry_run,
@@ -231,6 +250,7 @@ class ServiceTitanAuditService:
                 "errors": summary.errors,
                 "dry_run": summary.dry_run,
                 "missing_data_category_counts": summary.missing_data_category_counts,
+                "not_applicable_by_rule": summary.not_applicable_by_rule,
                 **counts,
             },
         )

@@ -17,6 +17,7 @@ from .domain.owner_mapping import OwnerResolver
 from .domain.formatting import format_friday_roundup_email
 from .domain.reports import ReportService, month_bounds, quarter_bounds, week_bounds
 from .domain.service_titan_audit import ServiceTitanAuditLoop, ServiceTitanAuditService, ServiceTitanAuditSummary
+from .domain.service_titan_discovery import ServiceTitanScopeDiscovery, ServiceTitanScopeDiscoverySummary
 from .domain.service_titan_rules import RESULT_FAIL, RuleResult
 from .domain.task_processor import TaskProcessor
 from .http_server import AgentHttpServer
@@ -59,6 +60,7 @@ class AgentApp:
         )
         self.reports = ReportService(settings, self.db, self.slack, self.claude, self.email, self.owner_resolver)
         self.service_titan_audit = ServiceTitanAuditService(settings, self.db, self.service_titan, self.slack)
+        self.service_titan_scope_discovery = ServiceTitanScopeDiscovery(settings, self.service_titan)
 
     def initialize_storage(self) -> None:
         self.db.initialize()
@@ -124,6 +126,9 @@ class AgentApp:
 
     def run_service_titan_audit_once(self, *, force: bool = False) -> ServiceTitanAuditSummary:
         return self.service_titan_audit.audit_once(require_enabled=not force)
+
+    def run_service_titan_scope_discovery(self) -> ServiceTitanScopeDiscoverySummary:
+        return self.service_titan_scope_discovery.run_once()
 
     def notifications_test_text(self) -> tuple[bool, str]:
         send = self.settings.notifications_test_send
