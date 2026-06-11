@@ -685,12 +685,25 @@ Keep dry-run enabled until notification delivery and routing are separately veri
 - Add ServiceTitan env vars in Render only after the app is connected and scopes are approved.
 - Keep `SERVICE_TITAN_AUDIT_ENABLED=false` until credentials and Slack alert channel are ready.
 - Set `SERVICE_TITAN_AUDIT_DRY_RUN=true` for the first production validation run.
+- Set `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}` until discovery confirms tenant-specific scope narrowing is needed.
 - Run `python3 -m marketing_os_agent init-db` after deploy if the SQLite file is new.
 - Run `python3 -m marketing_os_agent servicetitan-discover-scopes` to collect sanitized production scope names/IDs.
 - Configure `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` when the discovered business units/job types/statuses/tags need tenant-specific narrowing.
-- Run `python3 -m marketing_os_agent servicetitan-audit-once` with a short lookback for first validation.
+- Run `SERVICE_TITAN_AUDIT_ENABLED=false SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-audit-once` with a short lookback for first validation.
 - Watch the command summary and logs for `servicetitan_audit_completed`, `servicetitan_rule_insufficient_data`, `servicetitan_alert_dry_run`, `servicetitan_duplicate_alert_suppressed`, and `servicetitan_alert_sent`.
 - After dry-run results look correct, set `SERVICE_TITAN_AUDIT_DRY_RUN=false`, confirm `SLACK_ALERT_CHANNEL_ID` or `SLACK_MARKETING_OPS_CHANNEL_ID`, run one one-time live alert cycle if desired, then set `SERVICE_TITAN_AUDIT_ENABLED=true` to start continuous polling.
+
+Render-safe command checklist:
+
+```bash
+python3 -m marketing_os_agent init-db
+python3 -m marketing_os_agent servicetitan-discover-scopes
+SERVICE_TITAN_AUDIT_ENABLED=false SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-audit-once
+python3 -m marketing_os_agent servicetitan-alert-test
+NOTIFICATIONS_TEST_SEND=true python3 -m marketing_os_agent servicetitan-alert-test
+```
+
+The default `servicetitan-alert-test` validates configuration and formats a synthetic ServiceTitan alert without sending it. The `NOTIFICATIONS_TEST_SEND=true` variant sends only the synthetic alert to the configured Slack alert channel.
 
 ## Known Limitations
 
