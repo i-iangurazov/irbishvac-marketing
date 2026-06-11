@@ -126,6 +126,7 @@ class ServiceTitanClient:
         self._access_token = ""
         self._token_expires_at: datetime | None = None
         self._disabled_related_categories: set[str] = set()
+        self._disabled_related_reasons: dict[str, str] = {}
 
     @property
     def available(self) -> bool:
@@ -313,13 +314,13 @@ class ServiceTitanClient:
                 invoice_line_items.extend(_invoice_item_names(invoice_item_records))
                 invoice_items.extend(_invoice_items_from_records(invoice_item_records))
             related_counts["invoice_items"] = len(invoice_items) if invoice_items else len(invoice_line_items)
-            if invoices or invoice_item_records or "invoice_line_items" in present_fields:
+            if invoice_line_items or invoice_items or "invoice_line_items" in present_fields:
                 present_fields.add("invoice_line_items")
-                if invoice_status:
-                    present_fields.add("invoice_status")
-                if payment_total is not None or payments_count is not None or invoice_balance is not None:
-                    present_fields.add("payments")
-            elif not invoices_error:
+            if invoices or invoice_status:
+                present_fields.add("invoice_status")
+            if payment_total is not None or payments_count is not None or invoice_balance is not None:
+                present_fields.add("payments")
+            if not invoice_items_error and not invoices_error and not invoice_line_items and not invoice_items:
                 present_fields.add("invoice_line_items")
 
         timesheets, timesheets_error = self._related_records(
@@ -649,13 +650,17 @@ class ServiceTitanClient:
 
     def _related_records(self, category: str, path: str, params: dict[str, str]) -> tuple[list[dict[str, Any]], str | None]:
         if category in self._disabled_related_categories:
-            return [], f"{category} endpoint unavailable earlier in this process"
+            return [], self._disabled_related_reasons.get(category) or f"{category} endpoint unavailable earlier in this process"
         payload = {"pageSize": str(self.settings.service_titan_audit_page_size), "includeTotal": "true", **{k: v for k, v in params.items() if v}}
         try:
-            return self._get_paginated(path, payload), None
+            records = self._get_paginated(path, payload, related_category=category)
+            if category in self._disabled_related_categories:
+                return [], self._disabled_related_reasons.get(category) or f"{category} endpoint unavailable earlier in this process"
+            return records, None
         except ServiceTitanApiError as exc:
             if exc.status in {400, 401, 403, 404, 405}:
                 self._disabled_related_categories.add(category)
+                self._disabled_related_reasons[category] = f"{path} returned HTTP {exc.status}"
             logger.warning(
                 "servicetitan_related_fetch_unavailable",
                 extra={"category": category, "path": path, "status": exc.status, "error_message": exc.message},
@@ -668,16 +673,33 @@ class ServiceTitanClient:
     def _tenant_path(self, api: str, suffix: str) -> str:
         return f"/{api}/v2/tenant/{self.settings.servicetitan_tenant_id}/{suffix.lstrip('/')}"
 
-    def _get_paginated(self, path: str, params: dict[str, str]) -> list[dict[str, Any]]:
+    def _get_paginated(self, path: str, params: dict[str, str], *, related_category: str | None = None) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         page = 1
+        page_size = int(params.get("pageSize") or self.settings.service_titan_audit_page_size)
         while page <= max(1, self.settings.service_titan_audit_max_pages):
             payload = dict(params)
             payload["page"] = str(page)
             data = self._get(path, payload)
             page_records = _records_from_response(data)
-            records.extend(page_records)
-            if not _has_more(data, page, len(page_records), int(payload["pageSize"])):
+            filtered_records = _filter_records_for_params(page_records, params)
+            if len(page_records) > page_size:
+                logger.warning(
+                    "servicetitan_page_size_ignored",
+                    extra={"path": path, "returned_count": len(page_records), "page_size": page_size},
+                )
+                if related_category and len(page_records) > max(page_size * 10, 1000):
+                    reason = f"{path} returned an overbroad page of {len(page_records)} records; related category disabled for this process"
+                    self._disabled_related_categories.add(related_category)
+                    self._disabled_related_reasons[related_category] = reason
+                    logger.warning(
+                        "servicetitan_related_fetch_overbroad",
+                        extra={"category": related_category, "path": path, "returned_count": len(page_records), "page_size": page_size},
+                    )
+                    return []
+                filtered_records = filtered_records[:page_size]
+            records.extend(filtered_records)
+            if not _has_more(data, page, len(page_records), page_size):
                 break
             page += 1
         if page > self.settings.service_titan_audit_max_pages:
@@ -940,6 +962,60 @@ def _records_from_response(data: dict[str, Any] | list[Any]) -> list[dict[str, A
     if isinstance(records, list):
         return [record for record in records if isinstance(record, dict)]
     return []
+
+
+def _filter_records_for_params(records: list[dict[str, Any]], params: dict[str, str]) -> list[dict[str, Any]]:
+    filters: list[tuple[set[str], tuple[str, ...]]] = []
+    if params.get("jobId"):
+        filters.append(({str(params["jobId"])}, ("jobId", "job.id", "job.jobId")))
+    if params.get("jobIds"):
+        filters.append((_csv_values(params["jobIds"]), ("jobId", "job.id", "job.jobId")))
+    if params.get("invoiceIds"):
+        filters.append((_csv_values(params["invoiceIds"]), ("invoiceId", "invoice.id", "invoice.invoiceId")))
+    if params.get("appointmentIds"):
+        filters.append((_csv_values(params["appointmentIds"]), ("appointmentId", "appointment.id")))
+    if params.get("technicianId"):
+        filters.append(({str(params["technicianId"])}, ("technicianId", "technician.id", "employeeId", "employee.id")))
+    filters = [(expected, paths) for expected, paths in filters if expected]
+    if not filters:
+        return records
+
+    matched: list[dict[str, Any]] = []
+    saw_filter_field = False
+    for record in records:
+        include = True
+        for expected, paths in filters:
+            values = _identifier_values(record, paths)
+            if values:
+                saw_filter_field = True
+                if values.isdisjoint(expected):
+                    include = False
+                    break
+        if include:
+            matched.append(record)
+    return matched if saw_filter_field else records
+
+
+def _csv_values(value: str) -> set[str]:
+    return {part.strip() for part in value.split(",") if part.strip()}
+
+
+def _identifier_values(record: dict[str, Any], paths: tuple[str, ...]) -> set[str]:
+    values: set[str] = set()
+    for path in paths:
+        value = _value_at_path(record, path)
+        if value is not None and value != "":
+            values.add(str(value))
+    return values
+
+
+def _value_at_path(record: dict[str, Any], path: str) -> Any:
+    current: Any = record
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
 
 
 def _has_more(data: dict[str, Any], page: int, count: int, page_size: int) -> bool:

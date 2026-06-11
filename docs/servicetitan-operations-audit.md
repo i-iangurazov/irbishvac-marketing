@@ -178,6 +178,7 @@ SERVICE_TITAN_AUDIT_DRY_RUN=false
 SERVICE_TITAN_AUDIT_DEBUG_FIELDS=false
 NOTIFICATIONS_TEST_SEND=false
 SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS=300
+SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS=300
 SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES=240
 SERVICE_TITAN_AUDIT_OVERLAP_SECONDS=300
 SERVICE_TITAN_AUDIT_PAGE_SIZE=100
@@ -248,7 +249,7 @@ The enrichment pass reads related ServiceTitan records when available:
 - `/sales/v2/tenant/{tenant}/estimates`
 - `/sales/v2/tenant/{tenant}/opportunities`
 
-If any related endpoint is unavailable or does not expose a required field, the affected rules remain `insufficient_data` and include source notes in logs/summary context.
+If any related endpoint is unavailable, ignores requested pagination, returns overbroad tenant-level data for a job-scoped request, or does not expose a required field, the affected rules remain `insufficient_data` and include source notes in logs/summary context. Overbroad related endpoints are disabled for the current process after detection so one bad export path does not dominate every job in the audit cycle.
 
 ## Scope Discovery
 
@@ -346,6 +347,7 @@ Exact ServiceTitan alert timing:
 
 - Real violations are evaluated on every `servicetitan-audit-once` run and on every continuous audit polling cycle.
 - Continuous polling uses `ServiceTitanAuditLoop` and `SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS`.
+- Continuous polling waits `SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS` before the first startup cycle, so Render can finish boot and health checks before related ServiceTitan records are fetched.
 - Slack sends immediately when a rule returns `fail`, dry-run is false, Slack config is present, and the exact violation was not already successfully alerted.
 - There is no Friday-only or weekly-only ServiceTitan violation alert path.
 - The `delivery` field in the handbook matrix is metadata included in Slack text; ServiceTitan violation alerts are immediate because no ServiceTitan digest sender exists.
@@ -360,7 +362,7 @@ Scheduler inventory:
 | `Scheduler` / `monthly_kickoff` | first day 9 AM | Monthly campaign kickoff report | no |
 | `Scheduler` / `quarterly_kickoff` | first day of quarter 9 AM | Quarterly campaign kickoff report | no |
 | `Scheduler` / `campaign_health_scan` | daily 7 AM | Campaign health scan/DMs | no |
-| `ServiceTitanAuditLoop` | `SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS` | ServiceTitan operations audit | yes |
+| `ServiceTitanAuditLoop` | `SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS`, then `SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS` | ServiceTitan operations audit | yes |
 | `servicetitan-audit-once` | manual one-time command | One ServiceTitan audit cycle | yes |
 
 Friday/weekly behavior exists only for marketing reports. It does not gate urgent ServiceTitan audit violations.

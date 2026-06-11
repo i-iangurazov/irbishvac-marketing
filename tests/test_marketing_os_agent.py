@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import threading
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from logging import LogRecord
@@ -46,6 +47,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         task_date_only_deadline_hour=17,
         service_titan_audit_enabled=False,
         service_titan_audit_poll_interval_seconds=300,
+        service_titan_audit_startup_delay_seconds=300,
         service_titan_audit_lookback_minutes=240,
         service_titan_audit_overlap_seconds=300,
         service_titan_audit_max_pages=5,
@@ -953,7 +955,12 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(len(self.h.slack.messages), 1)
 
     def test_service_titan_continuous_loop_runs_on_interval_not_friday_schedule(self) -> None:
-        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True, service_titan_audit_poll_interval_seconds=999)
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_poll_interval_seconds=999,
+            service_titan_audit_startup_delay_seconds=0,
+        )
         stop_event = threading.Event()
         calls: list[str] = []
 
@@ -963,6 +970,21 @@ class MarketingOsAgentTests(unittest.TestCase):
 
         ServiceTitanAuditLoop(audit_settings, audit_once).run_loop(stop_event)
         self.assertEqual(calls, ["called"])
+
+    def test_service_titan_continuous_loop_delays_first_startup_cycle(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_startup_delay_seconds=60,
+        )
+        stop_event = threading.Event()
+        calls: list[str] = []
+        thread = threading.Thread(target=ServiceTitanAuditLoop(audit_settings, lambda: calls.append("called")).run_loop, args=(stop_event,))
+        thread.start()
+        time.sleep(0.02)
+        stop_event.set()
+        thread.join(timeout=1)
+        self.assertEqual(calls, [])
 
     def test_service_titan_continuous_loop_disabled_when_feature_flag_false(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=False)
@@ -1418,6 +1440,53 @@ class MarketingOsAgentTests(unittest.TestCase):
         fail_job = fail_client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
         fail_result = _st_rule(audit_settings, "tech_invoice_diagnostic_fee_missing").run(fail_job, audit_settings)
         self.assertEqual(fail_result.status, RESULT_FAIL)
+
+    def test_service_titan_invoice_export_is_filtered_to_requested_invoice_ids(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_page_size=2,
+            service_titan_audit_max_pages=1,
+        )
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                invoices=[{"id": "inv-1"}],
+                invoice_items=[
+                    {"invoiceId": "other-1", "name": "Other Tenant Item"},
+                    {"invoiceId": "inv-1", "name": "Diagnostic Fee"},
+                    {"invoiceId": "inv-1", "name": "Capacitor"},
+                    {"invoiceId": "other-2", "name": "Another Tenant Item"},
+                ],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        self.assertEqual(job.related_counts["invoice_items"], 2)
+        self.assertIn("Diagnostic Fee", job.invoice_line_items)
+        self.assertIn("Capacitor", job.invoice_line_items)
+        self.assertNotIn("Other Tenant Item", job.invoice_line_items)
+        self.assertNotIn("Another Tenant Item", job.invoice_line_items)
+
+    def test_service_titan_overbroad_invoice_export_is_treated_as_unavailable(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_page_size=2,
+            service_titan_audit_max_pages=1,
+        )
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                invoices=[{"id": "inv-1"}],
+                invoice_items=[{"invoiceId": "inv-1", "name": f"Diagnostic Fee {index}"} for index in range(1001)],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        self.assertEqual(job.related_counts["invoice_items"], 0)
+        self.assertNotIn("invoice_line_items", job.present_fields)
+        self.assertIn("overbroad", job.missing_data["invoice_line_items"])
+        result = _st_rule(audit_settings, "tech_invoice_diagnostic_fee_missing").run(job, audit_settings)
+        self.assertEqual(result.status, RESULT_INSUFFICIENT)
 
     def test_service_titan_enrichment_maps_notes_and_photos_for_dispatch_rules(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)

@@ -118,6 +118,7 @@ class Settings:
     task_date_only_deadline_hour: int
     service_titan_audit_enabled: bool
     service_titan_audit_poll_interval_seconds: int
+    service_titan_audit_startup_delay_seconds: int
     service_titan_audit_lookback_minutes: int
     service_titan_audit_overlap_seconds: int
     service_titan_audit_max_pages: int
@@ -253,6 +254,10 @@ class Settings:
             task_date_only_deadline_hour=_int_env("TASK_DATE_ONLY_DEADLINE_HOUR", 17),
             service_titan_audit_enabled=_bool_env("SERVICE_TITAN_AUDIT_ENABLED", False),
             service_titan_audit_poll_interval_seconds=_int_env("SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS", 300),
+            service_titan_audit_startup_delay_seconds=_int_env(
+                "SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS",
+                _int_env("SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS", 300),
+            ),
             service_titan_audit_lookback_minutes=_int_env("SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES", 240),
             service_titan_audit_overlap_seconds=_int_env("SERVICE_TITAN_AUDIT_OVERLAP_SECONDS", 300),
             service_titan_audit_max_pages=_int_env("SERVICE_TITAN_AUDIT_MAX_PAGES", 5),

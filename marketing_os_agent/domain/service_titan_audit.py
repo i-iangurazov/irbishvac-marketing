@@ -370,6 +370,12 @@ class ServiceTitanAuditLoop:
             logger.info("servicetitan_audit_loop_disabled")
             return
         logger.info("servicetitan_audit_loop_started", extra={"interval_seconds": self.settings.service_titan_audit_poll_interval_seconds})
+        startup_delay = max(0, self.settings.service_titan_audit_startup_delay_seconds)
+        if startup_delay:
+            logger.info("servicetitan_audit_startup_delay", extra={"delay_seconds": startup_delay})
+            if stop_event.wait(startup_delay):
+                logger.info("servicetitan_audit_loop_stopped")
+                return
         while not stop_event.is_set():
             started = time.monotonic()
             try:
