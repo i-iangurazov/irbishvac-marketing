@@ -448,6 +448,42 @@ def sales_job(job_id: str = "sales-1001", **overrides: object) -> ServiceTitanJo
     return st_job(job_id, **base)
 
 
+def sales_job_payload(
+    job_id: str = "sales-1001",
+    *,
+    estimate_ids: list[str] | None = None,
+    business_unit_id: str = "bu-sales",
+    business_unit_name: str = "Sales",
+    job_type_id: str = "jt-comfort-advisor",
+    job_type_name: str = "Comfort Advisor",
+    department_name: str = "Sales",
+    trade: str = "Sales",
+    include_workflow: bool = True,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "id": job_id,
+        "jobNumber": f"J-{job_id}",
+        "status": "Completed",
+        "modifiedOn": "2026-05-15T16:00:00Z",
+        "completedOn": "2026-05-15T16:00:00Z",
+        "businessUnitId": business_unit_id,
+        "jobTypeId": job_type_id,
+    }
+    if department_name:
+        payload["departmentName"] = department_name
+    if trade:
+        payload["trade"] = trade
+    if business_unit_name:
+        payload["businessUnit"] = {"id": business_unit_id, "name": business_unit_name}
+    if job_type_name:
+        payload["jobType"] = {"id": job_type_id, "name": job_type_name}
+    if include_workflow:
+        payload["workflow"] = "Sales Consultation"
+    if estimate_ids is not None:
+        payload["estimateIds"] = estimate_ids
+    return payload
+
+
 class FakeNotion:
     def __init__(self) -> None:
         self.available = True
@@ -588,6 +624,10 @@ def st_enrichment_http(
     history: list[dict[str, object]] | None = None,
     estimates: list[dict[str, object]] | None = None,
     opportunities: list[dict[str, object]] | None = None,
+    attachments_response: HttpResponse | None = None,
+    forms_response: HttpResponse | None = None,
+    estimates_response: HttpResponse | None = None,
+    opportunities_response: HttpResponse | None = None,
 ) -> FakeHttp:
     responses = [
         HttpResponse(200, {"access_token": "token", "expires_in": 900}, {}),
@@ -628,13 +668,13 @@ def st_enrichment_http(
     responses.extend(
         [
             HttpResponse(200, {"data": notes or [], "hasMore": False}, {}),
-            HttpResponse(200, {"data": attachments or [], "hasMore": False}, {}),
-            HttpResponse(200, {"data": forms or [], "hasMore": False}, {}),
+            attachments_response or HttpResponse(200, {"data": attachments or [], "hasMore": False}, {}),
+            forms_response or HttpResponse(200, {"data": forms or [], "hasMore": False}, {}),
             HttpResponse(200, {"data": equipment or [], "hasMore": False}, {}),
             HttpResponse(200, {"data": purchase_orders or [], "hasMore": False}, {}),
             HttpResponse(200, {"data": history or [], "hasMore": False}, {}),
-            HttpResponse(200, {"data": estimates or [], "hasMore": False}, {}),
-            HttpResponse(200, {"data": opportunities or [], "hasMore": False}, {}),
+            estimates_response or HttpResponse(200, {"data": estimates or [], "hasMore": False}, {}),
+            opportunities_response or HttpResponse(200, {"data": opportunities or [], "hasMore": False}, {}),
         ]
     )
     return FakeHttp(responses)
@@ -1556,6 +1596,356 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.sales_alerts_sent, 0)
         self.assertEqual(self.h.slack.messages, [])
         self.assertIsNone(self.h.db.get_service_titan_violation("servicetitan:sales-dry-run:2001:sales_options_fewer_than_three:advisor-1"))
+
+    def test_initial_sales_rollout_keeps_options_and_arrival_enabled_with_photos_disabled(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_disabled_rule_ids=["sales_photos_missing"],
+        )
+        job = sales_job(
+            "sales-initial-rollout",
+            estimate_count=2,
+            photo_count=0,
+            arrival_window_start=datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc),
+            arrival_window_end=datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc),
+            arrived_at=datetime(2026, 5, 15, 11, 5, tzinfo=timezone.utc),
+        )
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([job]), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.sales_rules_evaluated, 2)
+        self.assertEqual(summary.sales_fail, 2)
+        self.assertEqual(summary.sales_alerts_sent, 2)
+        self.assertEqual(len(self.h.slack.messages), 2)
+        alert_text = "\n".join(message[1] for message in self.h.slack.messages)
+        self.assertIn("Closed Sales job has fewer than 3 options", alert_text)
+        self.assertIn("Sales advisor arrived after first half of appointment window", alert_text)
+        self.assertNotIn("Closed Sales job is missing required photos", alert_text)
+
+    def test_disabled_sales_photos_rule_does_not_send_alert(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_disabled_rule_ids=["sales_photos_missing"],
+        )
+        job = sales_job(
+            "sales-photo-disabled",
+            estimate_count=3,
+            photo_count=0,
+            arrival_window_start=datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc),
+            arrival_window_end=datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc),
+            arrived_at=datetime(2026, 5, 15, 10, 45, tzinfo=timezone.utc),
+        )
+        summary = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([job]), self.h.slack).audit_once(
+            datetime(2026, 5, 15, 16, tzinfo=timezone.utc)
+        )
+        self.assertEqual(summary.sales_rules_evaluated, 2)
+        self.assertEqual(summary.sales_fail, 0)
+        self.assertEqual(summary.sales_alerts_sent, 0)
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_sales_enrichment_with_three_estimates_passes_options_rule(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-options-pass"),
+                estimates=[
+                    {"id": "est-1", "jobId": "sales-options-pass"},
+                    {"id": "est-2", "jobId": "sales-options-pass"},
+                    {"id": "est-3", "jobId": "sales-options-pass"},
+                ],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "sales_options_fewer_than_three").run(job, audit_settings)
+        self.assertEqual(job.estimate_count, 3)
+        self.assertEqual(result.status, RESULT_PASS)
+
+    def test_empty_sales_scope_config_does_not_guess_from_numeric_ids(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload(
+                    "sales-empty-scope",
+                    business_unit_id="bu-tenant-sales",
+                    business_unit_name="",
+                    job_type_id="jt-tenant-sales",
+                    job_type_name="",
+                    department_name="",
+                    trade="",
+                    include_workflow=False,
+                ),
+                estimates=[
+                    {"id": "est-1", "jobId": "sales-empty-scope"},
+                    {"id": "est-2", "jobId": "sales-empty-scope"},
+                    {"id": "est-3", "jobId": "sales-empty-scope"},
+                ],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "sales_options_fewer_than_three").run(job, audit_settings)
+        self.assertEqual(result.status, RESULT_INSUFFICIENT)
+        self.assertIn("workflow", result.explanation)
+
+    def test_sales_enrichment_with_fewer_than_three_estimates_fails_options_rule(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-options-fail"),
+                estimates=[
+                    {"id": "est-1", "jobId": "sales-options-fail"},
+                    {"id": "est-2", "jobId": "sales-options-fail"},
+                ],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "sales_options_fewer_than_three").run(job, audit_settings)
+        self.assertEqual(result.status, RESULT_FAIL)
+        self.assertEqual(result.metadata["options_count"], 2)
+
+    def test_sales_enrichment_uses_job_estimate_ids_when_estimates_endpoint_is_unavailable(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-estimate-ids", estimate_ids=["est-1", "est-2", "est-3"]),
+                estimates_response=HttpResponse(403, {"error": "estimate scope missing"}, {}),
+                opportunities_response=HttpResponse(403, {"error": "opportunity scope missing"}, {}),
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "sales_options_fewer_than_three").run(job, audit_settings)
+        self.assertEqual(job.estimate_count, 3)
+        self.assertEqual(result.status, RESULT_PASS)
+
+    def test_sales_enrichment_evaluates_tenant_ids_without_workflow_names(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_rule_scope_config={
+                "rulesets": {
+                    "Sales / Comfort Advisor Audit": {
+                        "applies_to": {
+                            "business_unit_ids": ["bu-tenant-sales"],
+                            "job_type_ids": ["jt-tenant-sales"],
+                            "workflows": None,
+                            "statuses": ["Completed"],
+                        }
+                    }
+                }
+            },
+        )
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload(
+                    "sales-id-scope",
+                    business_unit_id="bu-tenant-sales",
+                    business_unit_name="",
+                    job_type_id="jt-tenant-sales",
+                    job_type_name="",
+                    department_name="",
+                    trade="",
+                    include_workflow=False,
+                ),
+                estimates=[
+                    {"id": "est-1", "jobId": "sales-id-scope"},
+                    {"id": "est-2", "jobId": "sales-id-scope"},
+                    {"id": "est-3", "jobId": "sales-id-scope"},
+                ],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "sales_options_fewer_than_three").run(job, audit_settings)
+        self.assertEqual(job.business_unit_id, "bu-tenant-sales")
+        self.assertEqual(job.job_type_id, "jt-tenant-sales")
+        self.assertEqual(job.workflow, "")
+        self.assertEqual(result.status, RESULT_PASS)
+
+    def test_sales_enrichment_missing_estimate_sources_returns_insufficient_data(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-options-missing"),
+                estimates_response=HttpResponse(403, {"error": "estimate scope missing"}, {}),
+                opportunities_response=HttpResponse(403, {"error": "opportunity scope missing"}, {}),
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "sales_options_fewer_than_three").run(job, audit_settings)
+        self.assertEqual(result.status, RESULT_INSUFFICIENT)
+        self.assertIn("sales/v2", result.explanation)
+
+    def test_sales_enrichment_with_photos_or_form_images_passes_photos_rule(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        attachment_client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-photo-attachment"),
+                attachments=[{"fileName": "comfort-advisor-photo.jpg"}],
+            ),
+        )
+        attachment_job = attachment_client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        self.assertEqual(_st_rule(audit_settings, "sales_photos_missing").run(attachment_job, audit_settings).status, RESULT_PASS)
+
+        form_client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-photo-form"),
+                attachments_response=HttpResponse(404, {"error": "attachments unavailable"}, {}),
+                forms=[{"id": "form-1", "jobId": "sales-photo-form", "attachments": [{"fileName": "form-photo.png"}]}],
+            ),
+        )
+        form_job = form_client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        self.assertEqual(form_job.photo_count, 1)
+        self.assertEqual(_st_rule(audit_settings, "sales_photos_missing").run(form_job, audit_settings).status, RESULT_PASS)
+
+    def test_sales_enrichment_without_photos_fails_photos_rule(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(job_payload=sales_job_payload("sales-no-photo"), attachments=[]),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "sales_photos_missing").run(job, audit_settings)
+        self.assertEqual(result.status, RESULT_FAIL)
+        self.assertEqual(result.metadata["photos_count"], 0)
+
+    def test_sales_enrichment_missing_photos_endpoint_returns_insufficient_data(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-photo-missing"),
+                attachments_response=HttpResponse(404, {"error": "attachments unavailable"}, {}),
+                forms=[],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "sales_photos_missing").run(job, audit_settings)
+        self.assertEqual(result.status, RESULT_INSUFFICIENT)
+        self.assertIn("attachments", result.explanation)
+
+    def test_sales_enrichment_arrival_after_first_half_fails_and_before_cutoff_passes(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        late_client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-arrival-late"),
+                appointments=[
+                    {
+                        "id": "appt-late",
+                        "jobId": "sales-arrival-late",
+                        "arrivalWindowStart": "2026-05-15T10:00:00Z",
+                        "arrivalWindowEnd": "2026-05-15T12:00:00Z",
+                    }
+                ],
+                assignments=[{"appointmentId": "appt-late", "technicianId": "advisor-1", "arrivedOn": "2026-05-15T11:01:00Z"}],
+            ),
+        )
+        late_job = late_client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        late = _st_rule(audit_settings, "sales_arrival_after_first_half").run(late_job, audit_settings)
+        self.assertEqual(late.status, RESULT_FAIL)
+
+        on_time_client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-arrival-on-time"),
+                appointments=[
+                    {
+                        "id": "appt-on-time",
+                        "jobId": "sales-arrival-on-time",
+                        "arrivalWindowStart": "2026-05-15T10:00:00Z",
+                        "arrivalWindowEnd": "2026-05-15T12:00:00Z",
+                    }
+                ],
+                assignments=[{"appointmentId": "appt-on-time", "technicianId": "advisor-1", "arrivedOn": "2026-05-15T10:45:00Z"}],
+            ),
+        )
+        on_time_job = on_time_client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        self.assertEqual(_st_rule(audit_settings, "sales_arrival_after_first_half").run(on_time_job, audit_settings).status, RESULT_PASS)
+
+    def test_sales_enrichment_missing_arrival_timestamp_returns_insufficient_data(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-arrival-missing"),
+                appointments=[
+                    {
+                        "id": "appt-missing",
+                        "jobId": "sales-arrival-missing",
+                        "arrivalWindowStart": "2026-05-15T10:00:00Z",
+                        "arrivalWindowEnd": "2026-05-15T12:00:00Z",
+                    }
+                ],
+                assignments=[{"appointmentId": "appt-missing", "technicianId": "advisor-1"}],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        self.assertEqual(_st_rule(audit_settings, "sales_arrival_after_first_half").run(job, audit_settings).status, RESULT_INSUFFICIENT)
+
+    def test_sales_debug_field_output_does_not_include_customer_pii(self) -> None:
+        logging.disable(logging.NOTSET)
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_debug_fields=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        audit_logger = logging.getLogger("marketing_os_agent.domain.service_titan_audit")
+        old_propagate = audit_logger.propagate
+        old_level = audit_logger.level
+        records: list[LogRecord] = []
+
+        class Capture(logging.Handler):
+            def emit(self, record: LogRecord) -> None:
+                records.append(record)
+
+        handler = Capture()
+        audit_logger.addHandler(handler)
+        audit_logger.propagate = False
+        audit_logger.setLevel(logging.INFO)
+        try:
+            client = ServiceTitanClient(
+                audit_settings,
+                st_enrichment_http(
+                    job_payload={
+                        **sales_job_payload("sales-debug-pii"),
+                        "customerName": "Private Customer",
+                        "address": "123 Secret St",
+                        "phone": "555-1212",
+                        "email": "private@example.com",
+                        "summary": "Raw private note",
+                    },
+                    estimates=[{"id": "est-1", "jobId": "sales-debug-pii"}],
+                    attachments_response=HttpResponse(404, {"error": "attachments unavailable"}, {}),
+                ),
+            )
+            job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+            audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([job]), self.h.slack)
+            audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+            rendered = "\n".join(str(record.__dict__) for record in records)
+            self.assertIn("servicetitan_sales_field_availability", rendered)
+            self.assertNotIn("Private Customer", rendered)
+            self.assertNotIn("123 Secret St", rendered)
+            self.assertNotIn("555-1212", rendered)
+            self.assertNotIn("private@example.com", rendered)
+            self.assertNotIn("Raw private note", rendered)
+        finally:
+            audit_logger.removeHandler(handler)
+            audit_logger.propagate = old_propagate
+            audit_logger.setLevel(old_level)
+            logging.disable(logging.CRITICAL)
 
     def test_handbook_arrival_rule_passes_and_fails_with_mapped_appointment_fields(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)

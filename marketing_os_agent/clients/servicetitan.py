@@ -416,6 +416,12 @@ class ServiceTitanClient:
             forms_count = len(form_records)
             hhr_completed = _records_contain_keywords(form_records, self.settings.service_titan_hhr_keywords)
             authorization_count = _authorization_count(form_records, attachments)
+            form_photo_count = _photo_count(form_records)
+            if form_photo_count:
+                photo_count = (photo_count or 0) + form_photo_count
+                related_counts["photos"] = photo_count
+                present_fields.add("photos")
+                missing_data.pop("photos", None)
             present_fields.update({"forms", "hhr", "authorization"})
 
         equipment_records, equipment_error = self._related_records(
@@ -481,7 +487,10 @@ class ServiceTitanClient:
         related_counts["estimates"] = len(estimate_records)
         available_keys["estimates"] = _records_keys(estimate_records)
         if not estimate_error:
-            estimate_count = len(estimate_records)
+            estimate_count = max(
+                estimate_count or 0,
+                _option_count_from_records(estimate_records, fallback_count=len(estimate_records)),
+            )
             same_day_estimate_present = _same_day_estimate_present(estimate_records, job.completed_on or job.modified_on or job.arrival_window_start)
             home_comfort_plan_option_present = _records_contain_keywords(estimate_records, self.settings.service_titan_home_comfort_plan_keywords)
             present_fields.update({"estimates", "same_day_estimate", "home_comfort_plan_option"})
@@ -490,7 +499,8 @@ class ServiceTitanClient:
                 options_presented = explicit_options
                 present_fields.add("options_presented")
         else:
-            missing_data.setdefault("estimates", estimate_error)
+            if "estimates" not in present_fields:
+                missing_data.setdefault("estimates", estimate_error)
             missing_data.setdefault("same_day_estimate", estimate_error)
             missing_data.setdefault("home_comfort_plan_option", estimate_error)
 
@@ -502,10 +512,13 @@ class ServiceTitanClient:
         related_counts["opportunities"] = len(opportunity_records)
         available_keys["opportunities"] = _records_keys(opportunity_records)
         if not opportunity_error:
+            opportunity_option_count = _option_count_from_records(opportunity_records, fallback_count=len(opportunity_records))
             if estimate_count is None:
-                estimate_count = len(opportunity_records)
+                estimate_count = opportunity_option_count
             elif not estimate_count:
-                estimate_count = len(opportunity_records)
+                estimate_count = opportunity_option_count
+            else:
+                estimate_count = max(estimate_count, opportunity_option_count)
             if home_comfort_plan_option_present is not True:
                 home_comfort_plan_option_present = _records_contain_keywords(
                     opportunity_records,
@@ -516,6 +529,10 @@ class ServiceTitanClient:
                 if explicit_options is not None:
                     options_presented = explicit_options
                     present_fields.add("options_presented")
+        elif "estimates" not in present_fields:
+            missing_data.setdefault("estimates", opportunity_error)
+        if estimate_count is not None:
+            related_counts["options"] = estimate_count
         if "options_presented" not in present_fields:
             missing_data.setdefault("options_presented", "sales estimates/opportunities did not expose an explicit options-presented field")
 
@@ -688,6 +705,21 @@ class ServiceTitanClient:
             payload["page"] = str(page)
             data = self._get(path, payload)
             page_records = _records_from_response(data)
+            if (
+                related_category
+                and page_records
+                and len(page_records) >= page_size
+                and _has_scoped_filter_params(params)
+                and not _records_have_filter_fields(page_records, params)
+            ):
+                reason = f"{path} returned an unscoped page of {len(page_records)} records; related category disabled for this process"
+                self._disabled_related_categories.add(related_category)
+                self._disabled_related_reasons[related_category] = reason
+                logger.warning(
+                    "servicetitan_related_fetch_unscoped",
+                    extra={"category": related_category, "path": path, "returned_count": len(page_records), "page_size": page_size},
+                )
+                return []
             filtered_records = _filter_records_for_params(page_records, params)
             if len(page_records) > page_size:
                 logger.warning(
@@ -878,6 +910,8 @@ def parse_service_titan_job(payload: dict[str, Any], settings: Settings) -> Serv
     )
     if completed_phases:
         present.add("completed_phases")
+    estimate_ids = _id_list(_value(payload, ("estimateIds",), present, "estimates"))
+    estimate_count = len(estimate_ids) if "estimates" in present else None
 
     url = ""
     if settings.servicetitan_job_url_template and job_id:
@@ -940,6 +974,7 @@ def parse_service_titan_job(payload: dict[str, Any], settings: Settings) -> Serv
         operational_data=operational_data,
         operational_data_complete=_bool_or_none(_value(payload, ("operationalDataComplete", "requiredDataComplete"), present, "operational_data")),
         options_presented=_bool_or_none(_value(payload, ("optionsPresented", "goodBetterBestPresented"), present, "options_presented")),
+        estimate_count=estimate_count,
         notes=str(notes_value) if notes_value is not None else None,
         photo_count=photo_count,
         supporting_evidence_count=evidence_count,
@@ -972,17 +1007,7 @@ def _records_from_response(data: dict[str, Any] | list[Any]) -> list[dict[str, A
 
 
 def _filter_records_for_params(records: list[dict[str, Any]], params: dict[str, str]) -> list[dict[str, Any]]:
-    filters: list[tuple[set[str], tuple[str, ...]]] = []
-    if params.get("jobId"):
-        filters.append(({str(params["jobId"])}, ("jobId", "job.id", "job.jobId")))
-    if params.get("jobIds"):
-        filters.append((_csv_values(params["jobIds"]), ("jobId", "job.id", "job.jobId")))
-    if params.get("invoiceIds"):
-        filters.append((_csv_values(params["invoiceIds"]), ("invoiceId", "invoice.id", "invoice.invoiceId")))
-    if params.get("appointmentIds"):
-        filters.append((_csv_values(params["appointmentIds"]), ("appointmentId", "appointment.id")))
-    if params.get("technicianId"):
-        filters.append(({str(params["technicianId"])}, ("technicianId", "technician.id", "employeeId", "employee.id")))
+    filters = _filter_specs_for_params(params)
     filters = [(expected, paths) for expected, paths in filters if expected]
     if not filters:
         return records
@@ -1001,6 +1026,36 @@ def _filter_records_for_params(records: list[dict[str, Any]], params: dict[str, 
         if include:
             matched.append(record)
     return matched if saw_filter_field else records
+
+
+def _filter_specs_for_params(params: dict[str, str]) -> list[tuple[set[str], tuple[str, ...]]]:
+    filters: list[tuple[set[str], tuple[str, ...]]] = []
+    if params.get("jobId"):
+        filters.append(({str(params["jobId"])}, ("jobId", "job.id", "job.jobId")))
+    if params.get("jobIds"):
+        filters.append((_csv_values(params["jobIds"]), ("jobId", "job.id", "job.jobId")))
+    if params.get("invoiceIds"):
+        filters.append((_csv_values(params["invoiceIds"]), ("invoiceId", "invoice.id", "invoice.invoiceId")))
+    if params.get("appointmentIds"):
+        filters.append((_csv_values(params["appointmentIds"]), ("appointmentId", "appointment.id")))
+    if params.get("technicianId"):
+        filters.append(({str(params["technicianId"])}, ("technicianId", "technician.id", "employeeId", "employee.id")))
+    return filters
+
+
+def _has_scoped_filter_params(params: dict[str, str]) -> bool:
+    return any(expected for expected, _paths in _filter_specs_for_params(params))
+
+
+def _records_have_filter_fields(records: list[dict[str, Any]], params: dict[str, str]) -> bool:
+    filters = [(expected, paths) for expected, paths in _filter_specs_for_params(params) if expected]
+    if not filters:
+        return True
+    for record in records:
+        for _expected, paths in filters:
+            if _identifier_values(record, paths):
+                return True
+    return False
 
 
 def _csv_values(value: str) -> set[str]:
@@ -1156,6 +1211,18 @@ def _string_list(value: Any) -> list[str]:
                 result.append(str(item))
         return result
     return [str(value)]
+
+
+def _id_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    for item in values:
+        raw = _raw_value(item, ("id", "estimateId", "value")) if isinstance(item, dict) else item
+        if raw is not None and str(raw).strip():
+            result.append(str(raw))
+    return _dedupe_strings(result)
 
 
 def _tag_values(payload: dict[str, Any], present: set[str]) -> tuple[list[str], list[str]]:
@@ -1371,10 +1438,25 @@ def _note_texts(records: list[dict[str, Any]]) -> list[str]:
 def _photo_count(records: list[dict[str, Any]]) -> int:
     count = 0
     for record in records:
-        content_type = str(_raw_value(record, ("contentType", "mimeType", "fileType", "type")) or "").lower()
-        name = str(_raw_value(record, ("fileName", "filename", "name", "url")) or "").lower()
+        count += _photo_count_from_value(record)
+    return count
+
+
+def _photo_count_from_value(value: Any) -> int:
+    count = 0
+    if isinstance(value, dict):
+        content_type = str(_raw_value(value, ("contentType", "mimeType", "fileType", "type")) or "").lower()
+        name = str(_raw_value(value, ("fileName", "filename", "name", "url")) or "").lower()
         if content_type.startswith("image/") or any(name.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic")):
             count += 1
+        for key in ("attachments", "files", "images", "photos", "media"):
+            child = value.get(key)
+            if isinstance(child, list):
+                count += sum(_photo_count_from_value(item) for item in child)
+            elif isinstance(child, dict):
+                count += _photo_count_from_value(child)
+    elif isinstance(value, list):
+        count += sum(_photo_count_from_value(item) for item in value)
     return count
 
 
@@ -1397,6 +1479,25 @@ def _explicit_options_presented(records: list[dict[str, Any]]) -> bool | None:
     if explicit_values:
         return any(explicit_values)
     return None
+
+
+def _option_count_from_records(records: list[dict[str, Any]], *, fallback_count: int) -> int:
+    explicit_counts: list[int] = []
+    for record in records:
+        for key in ("options", "estimateOptions", "presentedOptions", "proposals", "choices"):
+            value = _raw_value(record, (key,))
+            if isinstance(value, list):
+                explicit_counts.append(len([item for item in value if item is not None]))
+            else:
+                count = _int_or_none(value)
+                if count is not None:
+                    explicit_counts.append(count)
+        count_value = _int_or_none(_raw_value(record, ("optionsCount", "optionCount", "presentedOptionsCount")))
+        if count_value is not None:
+            explicit_counts.append(count_value)
+    if explicit_counts:
+        return sum(explicit_counts)
+    return fallback_count
 
 
 def _records_text(records: list[dict[str, Any]]) -> str:

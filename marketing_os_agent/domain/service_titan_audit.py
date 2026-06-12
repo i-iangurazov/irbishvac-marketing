@@ -203,7 +203,10 @@ class ServiceTitanAuditService:
         sales_job_ids: set[str] = set()
         for job in jobs:
             try:
-                for result in self._evaluate_job(job):
+                results = self._evaluate_job(job)
+                if self.settings.service_titan_audit_debug_fields:
+                    self._log_sales_debug(job, results)
+                for result in results:
                     summary.rules_evaluated += 1
                     counts[result.status] = counts.get(result.status, 0) + 1
                     summary.result_counts[result.status] = summary.result_counts.get(result.status, 0) + 1
@@ -344,6 +347,41 @@ class ServiceTitanAuditService:
 
     def _evaluate_job(self, job: ServiceTitanJob) -> list[RuleResult]:
         return [rule.run(job, self.settings) for rule in active_service_titan_rules(self.settings)]
+
+    def _log_sales_debug(self, job: ServiceTitanJob, results: list[RuleResult]) -> None:
+        sales_results = [result for result in results if result.ruleset == RULESET_SALES]
+        if not sales_results or all(result.status == RESULT_NOT_APPLICABLE for result in sales_results):
+            return
+        insufficient = {
+            result.rule_id: result.explanation
+            for result in sales_results
+            if result.status == RESULT_INSUFFICIENT
+        }
+        logger.info(
+            "servicetitan_sales_field_availability",
+            extra={
+                "job_id": job.job_id,
+                "job_number": job.job_number,
+                "business_unit": job.business_unit_name or job.business_unit_id,
+                "job_type": job.job_type_name or job.job_type_id,
+                "status": job.status,
+                "has_appointment_window": bool(job.arrival_window_start and job.arrival_window_end),
+                "has_arrival_time": bool(job.arrived_at),
+                "estimates_count": job.related_counts.get("estimates", 0),
+                "opportunities_count": job.related_counts.get("opportunities", 0),
+                "options_count": job.estimate_count,
+                "attachments_count": job.related_counts.get("attachments", 0),
+                "photos_count": job.photo_count,
+                "forms_count": job.related_counts.get("forms", 0),
+                "sales_rule_statuses": {result.rule_id: result.status for result in sales_results},
+                "sales_scope_decisions": {
+                    result.rule_id: result.metadata.get("scope_decision", "")
+                    for result in sales_results
+                },
+                "sales_rule_insufficient_reasons": insufficient,
+                "missing_data_fields": sorted(job.missing_data),
+            },
+        )
 
     def _record_and_alert(self, job: ServiceTitanJob, result: RuleResult) -> str:
         metadata = {

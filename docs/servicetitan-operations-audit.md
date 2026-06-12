@@ -28,11 +28,20 @@ The Sales / Comfort Advisor Audit applies only to jobs that match Sales scope. I
 
 The default Sales scope uses generic Sales/Comfort Advisor workflow language such as `sales`, `comfort advisor`, `advisor`, `estimate`, `consultation`, and `replacement`. Production tenants should run scope discovery and configure exact business unit, job type, tag, campaign/lead source, department, or workflow values in `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON`.
 
+Some ServiceTitan tenants expose only numeric `businessUnitId` / `jobTypeId` values on job payloads and do not expose workflow names. In that case, Sales rules intentionally stay `insufficient_data` until `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` is configured with the discovered Sales IDs and `"workflows": null`. This prevents the agent from guessing that every completed numeric-ID job is a Sales job.
+
 Sales rules:
 
 - `sales_options_fewer_than_three`: closed Sales jobs must show at least three estimate/option records. If estimate data is unavailable, the result is `insufficient_data`.
 - `sales_photos_missing`: closed Sales jobs must include photos or image attachments. If the photos/attachments source is unavailable, the result is `insufficient_data`.
 - `sales_arrival_after_first_half`: Sales appointments should arrive before the first half of the appointment window ends. If the appointment window or arrival time is unavailable, the result is `insufficient_data`.
+
+Sales data mapping:
+
+- Options use `/sales/v2/tenant/{tenant}/estimates`, `/sales/v2/tenant/{tenant}/opportunities`, or job-level `estimateIds` when ServiceTitan exposes them on the job payload. The rule counts real estimate/opportunity/option records only; it does not infer options from invoice line items or notes.
+- Photos use job attachments when the job attachment endpoint is available. Form submission image attachments can count only when the form records are safely scoped to the job. Broad tenant-level form pages are treated as unavailable instead of evidence.
+- Arrival uses `/jpm/v2/tenant/{tenant}/appointments` for arrival-window start/end and `/dispatch/v2/tenant/{tenant}/appointment-assignments` or payroll job timesheets for actual `arrived_at` timestamps.
+- With `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true`, Sales jobs log sanitized `servicetitan_sales_field_availability` entries with job ID/job number, scope labels, related-record counts, availability booleans, and per-rule `insufficient_data` reasons. Customer names, addresses, phone numbers, emails, raw notes, secrets, and tokens are not logged.
 
 Sales rules return `not_applicable` for HVAC Service, Plumbing Service, Project Management, install, admin, canceled, internal, or otherwise non-Sales jobs. `not_applicable` and `insufficient_data` never send Slack alerts.
 
@@ -117,8 +126,21 @@ SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rulesets":{"Sales / Comfort Advisor Audit
 If discovery shows only numeric ServiceTitan IDs and no workflow names, scope by IDs and clear the default workflow-name filter:
 
 ```env
-SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rulesets":{"Sales / Comfort Advisor Audit":{"applies_to":{"business_unit_ids":["1809"],"job_type_ids":["1815"],"tag_ids":["78"],"workflows":null,"statuses":["Completed","Closed"]}}}}
+SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rulesets":{"Sales / Comfort Advisor Audit":{"applies_to":{"business_unit_ids":["fake-sales-bu-id"],"job_type_ids":["fake-comfort-advisor-job-type-id"],"tag_ids":["fake-sales-tag-id"],"workflows":null,"statuses":["Completed","Closed"]}}}}
 ```
+
+For Sales-only rollout, leave `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}` for the first discovery command, then replace it with reviewed Sales business unit/job type/tag IDs before using dry-run results for a live-alert decision.
+
+Initial Sales / Comfort Advisor production rollout should keep only rules with proven data sources enabled. Use the existing disabled-rule env to keep the photo rule off until a scoped job photo source is available:
+
+```env
+SERVICE_TITAN_DISABLED_RULE_IDS_JSON=["sales_photos_missing"]
+SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rulesets":{"Sales / Comfort Advisor Audit":{"applies_to":{"business_unit_ids":["fake-sales-bu-id"],"job_type_ids":["fake-comfort-advisor-job-type-id"],"workflows":null,"statuses":["Completed","Closed"]}}}}
+```
+
+This leaves `sales_options_fewer_than_three` and `sales_arrival_after_first_half` enabled while disabling `sales_photos_missing`. Empty scope config is intentionally conservative: if ServiceTitan provides only numeric IDs and no workflow names, the agent returns `insufficient_data` rather than guessing which jobs are Sales jobs.
+
+Enable `sales_photos_missing` later by removing it from `SERVICE_TITAN_DISABLED_RULE_IDS_JSON` only after dry-run proves that ServiceTitan exposes scoped job photos or scoped form image attachments. Broad tenant-level form pages and unavailable attachment endpoints must remain `insufficient_data` and should not be used as photo evidence.
 
 Per-rule overrides still work. Example:
 
