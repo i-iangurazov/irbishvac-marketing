@@ -54,6 +54,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         service_titan_audit_page_size=100,
         service_titan_audit_timezone="UTC",
         service_titan_audit_dry_run=False,
+        service_titan_audit_backfill_alerts=True,
         service_titan_audit_debug_fields=False,
         notifications_test_send=False,
         anthropic_api_key="",
@@ -136,6 +137,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         service_titan_require_home_comfort_plan_option=True,
         service_titan_po_reconcile_within_hours=24,
         service_titan_alert_include_customer_name=False,
+        sales_comfort_advisor_audit_enabled=True,
         technician_compliance_enabled=True,
         dispatcher_audit_enabled=True,
         owner_slack_map={"Emil": "UEMIL", "Vadim": "UVADIM"},
@@ -249,6 +251,8 @@ def st_job(
     workflow: str = "Service Call",
     tag_ids: list[str] | None = None,
     tag_names: list[str] | None = None,
+    campaign_id: str = "",
+    campaign_name: str = "",
     cancellation_reason: str = "",
     modified_on: datetime | None = None,
     clock_in_at: datetime | None = datetime(2026, 5, 15, 9, tzinfo=timezone.utc),
@@ -341,6 +345,7 @@ def st_job(
         "trade",
         "workflow",
         "tags",
+        "campaign",
     }
     return ServiceTitanJob(
         job_id=job_id,
@@ -362,6 +367,8 @@ def st_job(
         workflow=workflow,
         tag_ids=tag_ids or [],
         tag_names=tag_names or [],
+        campaign_id=campaign_id,
+        campaign_name=campaign_name,
         cancellation_reason=cancellation_reason,
         arrival_window_start=arrival_window_start,
         arrival_window_end=arrival_window_end,
@@ -420,6 +427,25 @@ def st_job(
         present_fields=fields,
         raw={"id": job_id},
     )
+
+
+def sales_job(job_id: str = "sales-1001", **overrides: object) -> ServiceTitanJob:
+    base = dict(
+        business_unit_id="bu-sales",
+        business_unit_name="Sales",
+        job_type_id="jt-comfort-advisor",
+        job_type_name="Comfort Advisor",
+        department="Sales",
+        trade="Sales",
+        workflow="Sales Consultation",
+        technician_id="advisor-1",
+        technician_name="Advisor One",
+        dispatcher_id="",
+        dispatcher_name="",
+        status="Completed",
+    )
+    base.update(overrides)
+    return st_job(job_id, **base)
 
 
 class FakeNotion:
@@ -954,6 +980,22 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.alerts_sent, 1)
         self.assertEqual(len(self.h.slack.messages), 1)
 
+    def test_service_titan_new_violation_sends_immediately_in_poll_cycle(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        self.h.db.set_kv("servicetitan_audit_last_processed", "2026-05-15T15:55:00+00:00")
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([st_job("new-cycle", clock_out_at=None)]), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.alerts_sent, 1)
+        self.assertEqual(len(self.h.slack.messages), 1)
+
+    def test_service_titan_no_violations_sends_no_slack_message(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([st_job("clean-cycle")]), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.violations_detected, 0)
+        self.assertEqual(summary.alerts_sent, 0)
+        self.assertEqual(self.h.slack.messages, [])
+
     def test_service_titan_continuous_loop_runs_on_interval_not_friday_schedule(self) -> None:
         audit_settings = settings(
             self.h.settings.sqlite_path,
@@ -970,6 +1012,16 @@ class MarketingOsAgentTests(unittest.TestCase):
 
         ServiceTitanAuditLoop(audit_settings, audit_once).run_loop(stop_event)
         self.assertEqual(calls, ["called"])
+
+    def test_service_titan_poll_interval_config_controls_cycle_wait(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_poll_interval_seconds=300,
+        )
+        loop = ServiceTitanAuditLoop(audit_settings, lambda: None)
+        self.assertEqual(loop._wait_seconds_after_cycle(12), 288)
+        self.assertEqual(loop._wait_seconds_after_cycle(400), 1)
 
     def test_service_titan_continuous_loop_delays_first_startup_cycle(self) -> None:
         audit_settings = settings(
@@ -1017,6 +1069,50 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.status, "api_error")
         self.assertEqual(summary.errors, 1)
         self.assertEqual(self.h.slack.messages, [])
+
+    def test_service_titan_first_startup_baselines_without_historical_alert_flood(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_backfill_alerts=False,
+        )
+        client = FakeServiceTitan([st_job("historical", clock_out_at=None)])
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, client, self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.status, "baseline_initialized")
+        self.assertTrue(summary.baseline_initialized)
+        self.assertEqual(summary.alerts_sent, 0)
+        self.assertEqual(summary.violations_detected, 0)
+        self.assertEqual(self.h.slack.messages, [])
+        self.assertIsNone(client.since_seen)
+        self.assertIsNotNone(self.h.db.get_kv("servicetitan_audit_last_processed"))
+        self.assertIsNone(self.h.db.get_service_titan_violation("servicetitan:historical:2001:tech_clock_out_missing:tech-1"))
+
+    def test_service_titan_backfill_alerts_send_only_when_enabled(self) -> None:
+        no_backfill = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_backfill_alerts=False,
+        )
+        disabled_audit = ServiceTitanAuditService(no_backfill, self.h.db, FakeServiceTitan([st_job("old-disabled", clock_out_at=None)]), self.h.slack)
+        disabled = disabled_audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(disabled.status, "baseline_initialized")
+        self.assertEqual(disabled.alerts_sent, 0)
+
+        fresh_db_path = str(Path(self.h.tmp.name) / "backfill-enabled.sqlite3")
+        backfill_db = Persistence(fresh_db_path)
+        backfill_db.initialize()
+        backfill = settings(
+            fresh_db_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_backfill_alerts=True,
+        )
+        enabled_slack = FakeSlack()
+        enabled_audit = ServiceTitanAuditService(backfill, backfill_db, FakeServiceTitan([st_job("old-enabled", clock_out_at=None)]), enabled_slack)
+        enabled = enabled_audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(enabled.status, "completed")
+        self.assertEqual(enabled.alerts_sent, 1)
+        self.assertEqual(len(enabled_slack.messages), 1)
 
     def test_service_titan_pass_and_insufficient_results_do_not_alert(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
@@ -1216,6 +1312,8 @@ class MarketingOsAgentTests(unittest.TestCase):
             self.assertIn("applies_to_trades", metadata)
             self.assertIn("applies_to_job_types", metadata)
             self.assertIn("applies_to_job_statuses", metadata)
+            self.assertIn("applies_to_tags", metadata)
+            self.assertIn("applies_to_campaigns", metadata)
             self.assertIn("applies_to_roles", metadata)
             self.assertIn("applies_to_workflows", metadata)
             self.assertIn("excludes_job_types", metadata)
@@ -1238,6 +1336,226 @@ class MarketingOsAgentTests(unittest.TestCase):
         )
         self.assertEqual(_st_rule(audit_settings, "dispatch_notes_missing").run(st_job(), audit_settings).status, RESULT_NOT_APPLICABLE)
         self.assertEqual(_st_rule(audit_settings, "dispatch_photos_missing").run(st_job(), audit_settings).status, RESULT_NOT_APPLICABLE)
+
+    def test_sales_rules_return_not_applicable_for_non_sales_job(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        job = st_job()
+        for rule_id in ("sales_options_fewer_than_three", "sales_photos_missing", "sales_arrival_after_first_half"):
+            self.assertEqual(_st_rule(audit_settings, rule_id).run(job, audit_settings).status, RESULT_NOT_APPLICABLE)
+
+    def test_sales_options_rule_passes_fails_and_handles_missing_data(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        rule = _st_rule(audit_settings, "sales_options_fewer_than_three")
+        self.assertEqual(rule.run(sales_job(estimate_count=3), audit_settings).status, RESULT_PASS)
+
+        fail = rule.run(sales_job(estimate_count=2), audit_settings)
+        self.assertEqual(fail.status, RESULT_FAIL)
+        self.assertEqual(fail.metadata["options_count"], 2)
+
+        insufficient = rule.run(
+            sales_job(
+                estimate_count=None,
+                present_fields={"status", "business_unit", "job_type", "department", "trade", "workflow", "tags"},
+            ),
+            audit_settings,
+        )
+        self.assertEqual(insufficient.status, RESULT_INSUFFICIENT)
+
+    def test_sales_photos_rule_passes_fails_and_handles_missing_data(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        rule = _st_rule(audit_settings, "sales_photos_missing")
+        self.assertEqual(rule.run(sales_job(photo_count=1), audit_settings).status, RESULT_PASS)
+
+        fail = rule.run(sales_job(photo_count=0), audit_settings)
+        self.assertEqual(fail.status, RESULT_FAIL)
+        self.assertEqual(fail.metadata["photos_count"], 0)
+
+        insufficient = rule.run(
+            sales_job(
+                photo_count=None,
+                present_fields={"status", "business_unit", "job_type", "department", "trade", "workflow", "tags"},
+            ),
+            audit_settings,
+        )
+        self.assertEqual(insufficient.status, RESULT_INSUFFICIENT)
+
+    def test_sales_arrival_first_half_rule_passes_fails_and_handles_missing_data(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        rule = _st_rule(audit_settings, "sales_arrival_after_first_half")
+        window_start = datetime(2026, 5, 15, 10, tzinfo=timezone.utc)
+        window_end = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+
+        on_time = rule.run(
+            sales_job(arrival_window_start=window_start, arrival_window_end=window_end, arrived_at=datetime(2026, 5, 15, 10, 45, tzinfo=timezone.utc)),
+            audit_settings,
+        )
+        self.assertEqual(on_time.status, RESULT_PASS)
+
+        late = rule.run(
+            sales_job(arrival_window_start=window_start, arrival_window_end=window_end, arrived_at=datetime(2026, 5, 15, 11, 1, tzinfo=timezone.utc)),
+            audit_settings,
+        )
+        self.assertEqual(late.status, RESULT_FAIL)
+        self.assertIn("arrival_first_half_cutoff", late.metadata)
+
+        missing = rule.run(
+            sales_job(
+                arrival_window_start=window_start,
+                arrival_window_end=None,
+                arrived_at=None,
+                present_fields={"status", "business_unit", "job_type", "department", "trade", "workflow", "tags"},
+            ),
+            audit_settings,
+        )
+        self.assertEqual(missing.status, RESULT_INSUFFICIENT)
+
+    def test_sales_scope_config_supports_business_unit_tags_and_campaign(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_rule_scope_config={
+                "rulesets": {
+                    "Sales / Comfort Advisor Audit": {
+                        "applies_to": {
+                            "business_units": ["Replacement Sales"],
+                            "tags": ["Comfort Advisor"],
+                            "campaigns": ["Retail Lead"],
+                        }
+                    }
+                }
+            },
+        )
+        matching = sales_job(
+            business_unit_name="Replacement Sales",
+            tag_names=["Comfort Advisor"],
+            campaign_name="Retail Lead",
+            workflow="Replacement Sales",
+        )
+        self.assertEqual(_st_rule(audit_settings, "sales_photos_missing").run(matching, audit_settings).status, RESULT_PASS)
+
+        non_matching = sales_job(
+            business_unit_name="Replacement Sales",
+            tag_names=["Comfort Advisor"],
+            campaign_name="Commercial Lead",
+            workflow="Replacement Sales",
+        )
+        self.assertEqual(_st_rule(audit_settings, "sales_photos_missing").run(non_matching, audit_settings).status, RESULT_NOT_APPLICABLE)
+
+    def test_sales_scope_config_can_match_tenant_ids_without_workflow_names(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_rule_scope_config={
+                "rulesets": {
+                    "Sales / Comfort Advisor Audit": {
+                        "applies_to": {
+                            "business_unit_ids": ["1809"],
+                            "job_type_ids": ["1815"],
+                            "tag_ids": ["78"],
+                            "workflows": None,
+                        }
+                    }
+                }
+            },
+        )
+        job = sales_job(
+            business_unit_id="1809",
+            business_unit_name="",
+            job_type_id="1815",
+            job_type_name="",
+            department="",
+            trade="",
+            workflow="",
+            tag_ids=["78"],
+            tag_names=[],
+            photo_count=1,
+            present_fields={
+                "status",
+                "business_unit",
+                "job_type",
+                "tags",
+                "photos",
+                "estimates",
+                "arrival_window",
+                "arrived_at",
+            },
+        )
+        self.assertEqual(_st_rule(audit_settings, "sales_photos_missing").run(job, audit_settings).status, RESULT_PASS)
+
+    def test_sales_not_applicable_and_insufficient_do_not_send_slack(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        not_applicable = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([st_job("not-sales")]), self.h.slack)
+        not_applicable_summary = not_applicable.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(not_applicable_summary.sales_not_applicable, 3)
+        self.assertEqual(not_applicable_summary.alerts_sent, 0)
+        self.assertEqual(self.h.slack.messages, [])
+
+        insufficient_job = sales_job(
+            "sales-insufficient",
+            estimate_count=None,
+            photo_count=None,
+            arrival_window_start=None,
+            arrival_window_end=None,
+            arrived_at=None,
+            present_fields={"status", "business_unit", "job_type", "department", "trade", "workflow", "tags"},
+        )
+        insufficient = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([insufficient_job]), self.h.slack)
+        insufficient_summary = insufficient.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(insufficient_summary.sales_insufficient_data, 3)
+        self.assertEqual(insufficient_summary.alerts_sent, 0)
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_sales_fail_sends_slack_only_when_live_and_configured(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        job = sales_job("sales-fail", estimate_count=2, photo_count=1, arrived_at=datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc))
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([job]), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.sales_fail, 1)
+        self.assertEqual(summary.sales_alerts_sent, 1)
+        self.assertEqual(len(self.h.slack.messages), 1)
+        alert_text = self.h.slack.messages[0][1]
+        self.assertIn("*Ruleset:* Sales / Comfort Advisor Audit", alert_text)
+        self.assertIn("*Options count:* 2 / required 3", alert_text)
+        self.assertIn("*ServiceTitan:*", alert_text)
+
+        missing_slack = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            slack_bot_token="",
+        )
+        missing_summary = ServiceTitanAuditService(missing_slack, self.h.db, FakeServiceTitan([job]), self.h.slack).audit_once(
+            datetime(2026, 5, 15, 16, tzinfo=timezone.utc)
+        )
+        self.assertEqual(missing_summary.status, "config_error")
+
+    def test_sales_dry_run_sends_no_slack_and_writes_no_violation(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_dry_run=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        job = sales_job("sales-dry-run", estimate_count=2)
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([job]), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertTrue(summary.dry_run)
+        self.assertEqual(summary.sales_alerts_would_send, 1)
+        self.assertEqual(summary.sales_alerts_sent, 0)
+        self.assertEqual(self.h.slack.messages, [])
+        self.assertIsNone(self.h.db.get_service_titan_violation("servicetitan:sales-dry-run:2001:sales_options_fewer_than_three:advisor-1"))
 
     def test_handbook_arrival_rule_passes_and_fails_with_mapped_appointment_fields(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)

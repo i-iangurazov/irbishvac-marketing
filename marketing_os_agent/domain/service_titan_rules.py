@@ -17,6 +17,7 @@ RESULT_ERROR = "error"
 
 RULESET_TECHNICIAN = "Technician Compliance"
 RULESET_DISPATCHER = "Dispatcher / Job Quality Audit"
+RULESET_SALES = "Sales / Comfort Advisor Audit"
 RULESET_SERVICE_CALL = "Service Call Handbook Audit"
 RULESET_PLY_MATERIALS = "Ply / PO Materials Audit"
 RULESET_FOLLOW_UP = "Follow-up / Escalation Audit"
@@ -34,6 +35,14 @@ SERVICE_JOB_TYPE_KEYWORDS = (
     "no cool",
 )
 PLUMBING_WORKFLOW_KEYWORDS = ("plumbing", "drain", "sewer", "water heater", "ply", "po", "purchase order", "material")
+SALES_WORKFLOW_KEYWORDS = (
+    "sales",
+    "comfort advisor",
+    "advisor",
+    "estimate",
+    "consultation",
+    "replacement",
+)
 CLOSED_STATUS_KEYWORDS = ("complete", "completed", "closed", "done")
 ACTIVE_OR_CLOSED_STATUS_KEYWORDS = (
     "scheduled",
@@ -59,6 +68,8 @@ class RuleScope:
     applies_to_trades: tuple[str, ...] = ()
     applies_to_job_types: tuple[str, ...] = ()
     applies_to_job_statuses: tuple[str, ...] = ()
+    applies_to_tags: tuple[str, ...] = ()
+    applies_to_campaigns: tuple[str, ...] = ()
     applies_to_roles: tuple[str, ...] = ()
     applies_to_workflows: tuple[str, ...] = ()
     excludes_job_types: tuple[str, ...] = ()
@@ -78,6 +89,8 @@ class RuleScope:
             "applies_to_trades": list(self.applies_to_trades),
             "applies_to_job_types": list(self.applies_to_job_types),
             "applies_to_job_statuses": list(self.applies_to_job_statuses),
+            "applies_to_tags": list(self.applies_to_tags),
+            "applies_to_campaigns": list(self.applies_to_campaigns),
             "applies_to_roles": list(self.applies_to_roles),
             "applies_to_workflows": list(self.applies_to_workflows),
             "excludes_job_types": list(self.excludes_job_types),
@@ -164,6 +177,8 @@ class AuditRule:
 
 def active_service_titan_rules(settings: Settings) -> list[AuditRule]:
     rules: list[AuditRule] = []
+    if settings.sales_comfort_advisor_audit_enabled:
+        rules.extend(sales_comfort_advisor_rules())
     if settings.technician_compliance_enabled:
         rules.extend(technician_compliance_rules())
     if settings.dispatcher_audit_enabled:
@@ -211,6 +226,42 @@ def _ply_material_scope(definition: HandbookRuleDefinition) -> RuleScope:
     )
 
 
+def _sales_scope(*, required_data_fields: tuple[str, ...], statuses: tuple[str, ...] = CLOSED_STATUS_KEYWORDS) -> RuleScope:
+    return RuleScope(
+        handbook_source="Sales / Comfort Advisor audit configuration",
+        applies_to_job_statuses=statuses,
+        applies_to_workflows=SALES_WORKFLOW_KEYWORDS,
+        excludes_job_types=(
+            "admin",
+            "internal",
+            "material only",
+            "warehouse only",
+            "install",
+            "project",
+            "plumbing",
+            "service",
+            "maintenance",
+            "diagnostic",
+            "repair",
+        ),
+        excludes_statuses=EXCLUDED_STATUS_KEYWORDS,
+        excludes_tags=(
+            "admin",
+            "internal",
+            "install",
+            "project management",
+            "plumbing",
+            "service",
+            "canceled",
+            "cancelled",
+            "no access",
+        ),
+        required_context_fields=("status",),
+        required_data_fields=required_data_fields,
+        alert_routing="sales/comfort advisor audit channel",
+    )
+
+
 def _scope_for_handbook_rule(definition: HandbookRuleDefinition) -> RuleScope:
     if definition.ruleset == RULESET_PLY_MATERIALS:
         return _ply_material_scope(definition)
@@ -238,6 +289,47 @@ def _scope_for_handbook_rule(definition: HandbookRuleDefinition) -> RuleScope:
         statuses=ACTIVE_OR_CLOSED_STATUS_KEYWORDS if "arrival" in definition.rule_id else CLOSED_STATUS_KEYWORDS,
         excludes_tags=BILLING_EXCLUDED_TAG_KEYWORDS if "diagnostic_fee" in definition.rule_id else EXCLUDED_TAG_KEYWORDS,
     )
+
+
+def sales_comfort_advisor_rules() -> list[AuditRule]:
+    return [
+        AuditRule(
+            "sales_options_fewer_than_three",
+            RULESET_SALES,
+            "high",
+            "Closed Sales job has fewer than 3 options",
+            "Closed Sales / Comfort Advisor jobs must show at least three options or estimates.",
+            ("status", "estimates"),
+            "Review the Sales job and confirm Good / Better / Best options were presented or documented.",
+            _sales_three_options,
+            scope=_sales_scope(required_data_fields=("status", "estimates")),
+        ),
+        AuditRule(
+            "sales_photos_missing",
+            RULESET_SALES,
+            "medium",
+            "Closed Sales job is missing required photos",
+            "Closed Sales / Comfort Advisor jobs must include supporting photos or attachments.",
+            ("status", "photos"),
+            "Upload the required Sales photos or document why photos were not required.",
+            _sales_photos,
+            scope=_sales_scope(required_data_fields=("status", "photos")),
+        ),
+        AuditRule(
+            "sales_arrival_after_first_half",
+            RULESET_SALES,
+            "medium",
+            "Sales advisor arrived after first half of appointment window",
+            "Sales / Comfort Advisor appointments should arrive before the first half of the appointment window ends.",
+            ("arrival_window", "arrived_at"),
+            "Review advisor dispatch timing and coach the arrival process if needed.",
+            _sales_arrival_first_half,
+            scope=_sales_scope(
+                required_data_fields=("arrival_window", "arrived_at"),
+                statuses=ACTIVE_OR_CLOSED_STATUS_KEYWORDS,
+            ),
+        ),
+    ]
 
 
 def technician_compliance_rules() -> list[AuditRule]:
@@ -510,28 +602,42 @@ def _effective_rule(rule: AuditRule, settings: Settings) -> AuditRule:
     if "enabled" in rule_config:
         enabled = _config_bool(rule_config["enabled"], enabled)
 
+    ruleset_applies = ruleset_config.get("applies_to", {}) if isinstance(ruleset_config.get("applies_to", {}), dict) else {}
+    ruleset_excludes = ruleset_config.get("excludes", {}) if isinstance(ruleset_config.get("excludes", {}), dict) else {}
+    ruleset_alert = ruleset_config.get("alert", {}) if isinstance(ruleset_config.get("alert", {}), dict) else {}
     applies = rule_config.get("applies_to", {}) if isinstance(rule_config.get("applies_to", {}), dict) else {}
     excludes = rule_config.get("excludes", {}) if isinstance(rule_config.get("excludes", {}), dict) else {}
     alert = rule_config.get("alert", {}) if isinstance(rule_config.get("alert", {}), dict) else {}
 
     scope = replace(
         rule.scope,
-        applies_to_departments=_config_tuple(applies, ("departments",), rule.scope.applies_to_departments),
-        applies_to_business_units=_config_tuple(applies, ("business_units", "business_unit_ids"), rule.scope.applies_to_business_units),
-        applies_to_trades=_config_tuple(applies, ("trades",), rule.scope.applies_to_trades),
-        applies_to_job_types=_config_tuple(applies, ("job_types", "job_types_contains", "job_type_ids"), rule.scope.applies_to_job_types),
-        applies_to_job_statuses=_config_tuple(applies, ("statuses", "job_statuses"), rule.scope.applies_to_job_statuses),
-        applies_to_roles=_config_tuple(applies, ("roles",), rule.scope.applies_to_roles),
-        applies_to_workflows=_config_tuple(applies, ("workflows", "workflow_contains"), rule.scope.applies_to_workflows),
-        excludes_job_types=_config_tuple(excludes, ("job_types", "job_types_contains", "job_type_ids"), rule.scope.excludes_job_types),
-        excludes_statuses=_config_tuple(excludes, ("statuses", "job_statuses"), rule.scope.excludes_statuses),
-        excludes_tags=_config_tuple(excludes, ("tags", "tags_contains", "tag_ids"), rule.scope.excludes_tags),
-        excludes_cancellation_reasons=_config_tuple(
+        applies_to_departments=_merged_config_tuple(ruleset_applies, applies, ("departments",), rule.scope.applies_to_departments),
+        applies_to_business_units=_merged_config_tuple(ruleset_applies, applies, ("business_units", "business_unit_ids"), rule.scope.applies_to_business_units),
+        applies_to_trades=_merged_config_tuple(ruleset_applies, applies, ("trades",), rule.scope.applies_to_trades),
+        applies_to_job_types=_merged_config_tuple(ruleset_applies, applies, ("job_types", "job_types_contains", "job_type_ids"), rule.scope.applies_to_job_types),
+        applies_to_job_statuses=_merged_config_tuple(ruleset_applies, applies, ("statuses", "job_statuses"), rule.scope.applies_to_job_statuses),
+        applies_to_tags=_merged_config_tuple(ruleset_applies, applies, ("tags", "tags_contains", "tag_ids"), rule.scope.applies_to_tags),
+        applies_to_campaigns=_config_tuple(
+            applies,
+            ("campaigns", "campaigns_contains", "campaign_ids", "lead_sources", "lead_sources_contains"),
+            _config_tuple(
+                ruleset_applies,
+                ("campaigns", "campaigns_contains", "campaign_ids", "lead_sources", "lead_sources_contains"),
+                rule.scope.applies_to_campaigns,
+            ),
+        ),
+        applies_to_roles=_merged_config_tuple(ruleset_applies, applies, ("roles",), rule.scope.applies_to_roles),
+        applies_to_workflows=_merged_config_tuple(ruleset_applies, applies, ("workflows", "workflow_contains"), rule.scope.applies_to_workflows),
+        excludes_job_types=_merged_config_tuple(ruleset_excludes, excludes, ("job_types", "job_types_contains", "job_type_ids"), rule.scope.excludes_job_types),
+        excludes_statuses=_merged_config_tuple(ruleset_excludes, excludes, ("statuses", "job_statuses"), rule.scope.excludes_statuses),
+        excludes_tags=_merged_config_tuple(ruleset_excludes, excludes, ("tags", "tags_contains", "tag_ids"), rule.scope.excludes_tags),
+        excludes_cancellation_reasons=_merged_config_tuple(
+            ruleset_excludes,
             excludes,
             ("cancellation_reasons", "cancellation_reasons_contains"),
             rule.scope.excludes_cancellation_reasons,
         ),
-        alert_routing=str(alert.get("channel") or alert.get("destination") or rule.scope.alert_routing),
+        alert_routing=str(alert.get("channel") or alert.get("destination") or ruleset_alert.get("channel") or ruleset_alert.get("destination") or rule.scope.alert_routing),
         default_enabled=enabled,
     )
     return replace(
@@ -554,6 +660,15 @@ def _config_tuple(source: dict[str, Any], keys: tuple[str, ...], default: tuple[
         if isinstance(value, list):
             return tuple(str(item) for item in value if item is not None and str(item).strip())
     return default
+
+
+def _merged_config_tuple(
+    ruleset_source: dict[str, Any],
+    rule_source: dict[str, Any],
+    keys: tuple[str, ...],
+    default: tuple[str, ...],
+) -> tuple[str, ...]:
+    return _config_tuple(rule_source, keys, _config_tuple(ruleset_source, keys, default))
 
 
 def _config_bool(value: object, default: bool) -> bool:
@@ -615,6 +730,8 @@ def _applicability_decision(job: ServiceTitanJob, scope: RuleScope) -> Applicabi
         "trade": scope.applies_to_trades,
         "job_type": scope.applies_to_job_types,
         "status": scope.applies_to_job_statuses,
+        "tags": scope.applies_to_tags,
+        "campaign": scope.applies_to_campaigns,
         "workflow": scope.applies_to_workflows,
     }
     for field, patterns in include_checks.items():
@@ -655,6 +772,8 @@ def _context_available(job: ServiceTitanJob, field: str) -> bool:
         return bool(_context_values(job, field)) and bool({"workflow", "job_type", "business_unit", "department", "trade", "tags"} & job.present_fields)
     if field in {"job_type", "business_unit", "department", "trade", "workflow", "tags", "cancellation_reason"}:
         return field in job.present_fields and bool(_context_values(job, field))
+    if field == "campaign":
+        return field in job.present_fields and bool(_context_values(job, field))
     return field in job.present_fields
 
 
@@ -684,6 +803,8 @@ def _context_values(job: ServiceTitanJob, field: str) -> list[str]:
         ]
     if field == "tags":
         return [*job.tag_ids, *job.tag_names]
+    if field == "campaign":
+        return [value for value in (job.campaign_id, job.campaign_name) if value]
     if field == "cancellation_reason":
         return [job.cancellation_reason] if job.cancellation_reason else []
     if field == "technician":
@@ -883,6 +1004,69 @@ def _arrival_window(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -
             {"arrival_window_start": job.arrival_window_start.isoformat(), "arrived_at": job.arrived_at.isoformat()},
         )
     return rule.result(job, RESULT_PASS, "Technician arrived inside the configured first-window threshold.", rule.action)
+
+
+def _sales_three_options(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "estimates" not in job.present_fields or job.estimate_count is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "estimates", "Estimate/option records were not available from ServiceTitan."), rule.action)
+    required_count = max(3, settings.service_titan_min_repair_options)
+    metadata = {"options_count": job.estimate_count, "required_options_count": required_count}
+    if job.estimate_count < required_count:
+        return rule.result(
+            job,
+            RESULT_FAIL,
+            f"Only {job.estimate_count} option/estimate record(s) were found; required minimum is {required_count}.",
+            rule.action,
+            metadata,
+        )
+    return rule.result(job, RESULT_PASS, "Required Sales option count is satisfied.", rule.action, metadata)
+
+
+def _sales_photos(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "photos" not in job.present_fields or job.photo_count is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "photos", "Photo/attachment records were not available from ServiceTitan."), rule.action)
+    metadata = {"photos_count": job.photo_count}
+    if job.photo_count <= 0:
+        return rule.result(job, RESULT_FAIL, "Closed Sales job has no uploaded photos or image attachments.", rule.action, metadata)
+    return rule.result(job, RESULT_PASS, "Required Sales photos are present.", rule.action, metadata)
+
+
+def _sales_arrival_first_half(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    missing = _missing_fields(job, rule.required_fields)
+    if missing:
+        return rule.result(job, RESULT_INSUFFICIENT, _missing_field_explanation(job, rule.required_fields), rule.action)
+    if not job.arrival_window_start or not job.arrival_window_end or not job.arrived_at:
+        return rule.result(
+            job,
+            RESULT_INSUFFICIENT,
+            "Arrival window start, arrival window end, and arrival time are required.",
+            rule.action,
+        )
+    window_seconds = (job.arrival_window_end - job.arrival_window_start).total_seconds()
+    if window_seconds <= 0:
+        return rule.result(job, RESULT_INSUFFICIENT, "Arrival window end must be after arrival window start.", rule.action)
+    first_half_cutoff = job.arrival_window_start + timedelta(seconds=window_seconds / 2)
+    metadata = {
+        "arrival_window_start": job.arrival_window_start.isoformat(),
+        "arrival_window_end": job.arrival_window_end.isoformat(),
+        "arrival_first_half_cutoff": first_half_cutoff.isoformat(),
+        "arrived_at": job.arrived_at.isoformat(),
+    }
+    if job.arrived_at > first_half_cutoff:
+        return rule.result(
+            job,
+            RESULT_FAIL,
+            f"Advisor arrived at {job.arrived_at.isoformat()}, after the first-half cutoff of {first_half_cutoff.isoformat()}.",
+            rule.action,
+            metadata,
+        )
+    return rule.result(job, RESULT_PASS, "Advisor arrived before the first half of the appointment window ended.", rule.action, metadata)
 
 
 def _options_presented(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:

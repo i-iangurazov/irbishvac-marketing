@@ -4,14 +4,47 @@ The ServiceTitan Operations Audit Agent continuously audits recent ServiceTitan 
 
 It does not replace Agent 1. Notion task dispatching, Slack task reminders, scheduled reports, and campaign health checks continue to run through their existing code paths.
 
+The audit architecture is moving away from one large generic dispatcher audit that tries to apply every rule to every job. The production path is now split into smaller scoped business-unit agents/rulesets:
+
+- Sales / Comfort Advisor Audit.
+- HVAC Service Audit.
+- Plumbing Service Audit.
+- Project Management / Install Audit.
+
+Only the Sales / Comfort Advisor Audit is implemented for this phase. The previous Technician Compliance, Dispatcher / Job Quality, and handbook-backed rule families remain available behind explicit flags for continued testing, but they should stay disabled during Sales-only production validation unless the scope has been reviewed.
+
 ## Architecture
 
 - `marketing_os_agent/clients/servicetitan.py` handles OAuth client credentials, `ST-App-Key`, API calls, pagination, token caching, and conservative ServiceTitan job parsing.
-- `marketing_os_agent/domain/service_titan_rules.py` contains the rule engine, legacy audit rules, and handbook-backed rule evaluators.
+- `marketing_os_agent/domain/service_titan_rules.py` contains the rule engine, the Sales / Comfort Advisor ruleset, legacy audit rules, and handbook-backed rule evaluators.
 - `marketing_os_agent/domain/service_titan_handbook.py` contains the handbook-backed rule matrix: rule ID, handbook source, business reason, data requirements, current availability, routing, delivery mode, and default enabled state.
 - `marketing_os_agent/domain/service_titan_audit.py` coordinates polling, rule execution, durable violation storage, Slack alerting, and retry behavior.
 - `marketing_os_agent/persistence.py` stores audit violations in SQLite.
 - `AgentApp` starts a separate ServiceTitan audit thread only when the feature is enabled.
+
+## Sales / Comfort Advisor Audit
+
+The Sales / Comfort Advisor Audit applies only to jobs that match Sales scope. It is controlled by `SALES_COMFORT_ADVISOR_AUDIT_ENABLED`, which defaults to `true`.
+
+The default Sales scope uses generic Sales/Comfort Advisor workflow language such as `sales`, `comfort advisor`, `advisor`, `estimate`, `consultation`, and `replacement`. Production tenants should run scope discovery and configure exact business unit, job type, tag, campaign/lead source, department, or workflow values in `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON`.
+
+Sales rules:
+
+- `sales_options_fewer_than_three`: closed Sales jobs must show at least three estimate/option records. If estimate data is unavailable, the result is `insufficient_data`.
+- `sales_photos_missing`: closed Sales jobs must include photos or image attachments. If the photos/attachments source is unavailable, the result is `insufficient_data`.
+- `sales_arrival_after_first_half`: Sales appointments should arrive before the first half of the appointment window ends. If the appointment window or arrival time is unavailable, the result is `insufficient_data`.
+
+Sales rules return `not_applicable` for HVAC Service, Plumbing Service, Project Management, install, admin, canceled, internal, or otherwise non-Sales jobs. `not_applicable` and `insufficient_data` never send Slack alerts.
+
+Sales alerts are immediate per audit cycle when all of these are true:
+
+- `SERVICE_TITAN_AUDIT_ENABLED=true` for continuous polling, or the one-time command is run.
+- `SERVICE_TITAN_AUDIT_DRY_RUN=false`.
+- The Sales rule result is `fail`.
+- Slack is configured.
+- The violation has not already been successfully alerted.
+
+Sales alerts are not Friday-only or weekly-only. Email alerts are not implemented for ServiceTitan audits.
 
 ## Current-State Report
 
@@ -49,6 +82,8 @@ Every rule carries scope metadata:
 - `applies_to_trades`
 - `applies_to_job_types`
 - `applies_to_job_statuses`
+- `applies_to_tags`
+- `applies_to_campaigns`
 - `applies_to_roles`
 - `applies_to_workflows`
 - `excludes_job_types`
@@ -73,7 +108,19 @@ Runtime guardrails:
 - Service-call rules do not apply to admin/internal/material-only jobs.
 - Plumbing/Ply rules do not apply to non-plumbing/non-material workflows unless configured.
 
-Use `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` after discovery to narrow or disable rules without code changes. Example:
+Use `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` after discovery to narrow or disable rules without code changes. Sales rules can be configured at the ruleset level so all Sales checks share the same tenant scope. Example:
+
+```env
+SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rulesets":{"Sales / Comfort Advisor Audit":{"applies_to":{"business_units":["Replacement Sales"],"job_types":["Comfort Advisor"],"tags":["Comfort Advisor"],"campaigns":["Retail Lead"],"workflows":["Sales Consultation"],"statuses":["Completed","Closed"]},"excludes":{"job_types":["Install","Project Management","Plumbing Service","HVAC Service"],"tags":["Internal","No Access"]},"alert":{"channel":"sales/comfort advisor audit channel"}}}}
+```
+
+If discovery shows only numeric ServiceTitan IDs and no workflow names, scope by IDs and clear the default workflow-name filter:
+
+```env
+SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rulesets":{"Sales / Comfort Advisor Audit":{"applies_to":{"business_unit_ids":["1809"],"job_type_ids":["1815"],"tag_ids":["78"],"workflows":null,"statuses":["Completed","Closed"]}}}}
+```
+
+Per-rule overrides still work. Example:
 
 ```env
 SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rules":{"missing_diagnostic_fee_when_repair_not_sold":{"enabled":true,"applies_to":{"business_units":["HVAC Service","Plumbing Service"],"job_types_contains":["Diagnostic","Service","Tune Up"],"statuses":["Completed","Closed"]},"excludes":{"tags_contains":["Warranty","Callback","No Charge"],"cancellation_reasons_contains":["Wrong Equipment","No Access","Safety Concern"]},"alert":{"channel":"accounting/operations channel"}}}}
@@ -96,7 +143,13 @@ Why many handbook rules can still return `insufficient_data`:
 
 ## Rulesets
 
-Technician Compliance:
+Sales / Comfort Advisor Audit:
+
+- Closed Sales job has fewer than 3 options.
+- Closed Sales job is missing required photos.
+- Sales advisor arrived after the first half of the appointment window.
+
+Legacy Technician Compliance, disabled by default for the Sales-first phase:
 
 - Technician clock-in missing.
 - Technician clock-out missing.
@@ -105,7 +158,7 @@ Technician Compliance:
 - Required job phases incomplete.
 - Required operational data incomplete.
 
-Dispatcher / Job Quality Audit:
+Legacy Dispatcher / Job Quality Audit, disabled by default for the Sales-first phase:
 
 - Technician arrival outside the first configured minutes of the arrival window.
 - Diagnostic fee not reflected.
@@ -175,6 +228,7 @@ SERVICETITAN_BASE_URL=https://api.servicetitan.io
 SERVICETITAN_AUTH_URL=https://auth.servicetitan.io/connect/token
 SERVICETITAN_JOB_URL_TEMPLATE=
 SERVICE_TITAN_AUDIT_DRY_RUN=false
+SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false
 SERVICE_TITAN_AUDIT_DEBUG_FIELDS=false
 NOTIFICATIONS_TEST_SEND=false
 SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS=300
@@ -183,8 +237,9 @@ SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES=240
 SERVICE_TITAN_AUDIT_OVERLAP_SECONDS=300
 SERVICE_TITAN_AUDIT_PAGE_SIZE=100
 SERVICE_TITAN_AUDIT_MAX_PAGES=5
-TECHNICIAN_COMPLIANCE_ENABLED=true
-DISPATCHER_AUDIT_ENABLED=true
+SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true
+TECHNICIAN_COMPLIANCE_ENABLED=false
+DISPATCHER_AUDIT_ENABLED=false
 SERVICE_TITAN_FIRST_CALL_GRACE_MINUTES=0
 SERVICE_TITAN_ARRIVAL_GRACE_MINUTES=30
 SERVICE_TITAN_MIN_LUNCH_BREAK_MINUTES=30
@@ -228,6 +283,9 @@ Minimum expected read scopes:
 
 - Job Planning and Management -> Jobs.
 - Job Planning and Management -> Appointments, if appointment timing is not embedded in job payloads.
+- Dispatch -> Appointment Assignments, if actual arrival time is stored there.
+- Sales -> Estimates or Opportunities, for Sales option count.
+- Job Planning and Management -> Attachments, for Sales photo checks.
 - Any invoice, payroll, forms, notes, photos, or attachment scopes needed for your tenant to expose the fields used by the rules.
 
 The audit starts from recent jobs, then enriches each job with related records. If a related endpoint or required field is unavailable in the tenant, the corresponding rules return `insufficient_data`.
@@ -262,13 +320,14 @@ python3 -m marketing_os_agent servicetitan-discover-scopes
 The command fetches recent ServiceTitan jobs using the configured lookback and prints sanitized discovery output:
 
 - Job statuses.
+- Appointment statuses.
 - Business units.
 - Job types.
 - Departments.
 - Trades.
 - Workflows.
 - Tags.
-- Technician and dispatcher identifiers.
+- Advisor/technician and dispatcher identifiers.
 - Invoice statuses.
 - Cancellation reasons.
 - PO/material context counts.
@@ -313,6 +372,7 @@ The full structured matrix is in `marketing_os_agent/domain/service_titan_handbo
 
 Production-ready now:
 
+- The Sales / Comfort Advisor rules are production-ready when Sales scope values are configured from discovery and the tenant exposes estimates/opportunities, photos/attachments, appointment windows, and actual arrival timestamps.
 - Rules using notes, attachments/photos, appointment windows, invoice line items, invoice payment fields, estimates/opportunities, forms, equipment, and ServiceTitan purchase orders are production-ready only when those ServiceTitan endpoints are scoped and return the needed fields.
 - Rules intentionally fail only when the source is available and the mapped fact is missing or noncompliant.
 
@@ -348,6 +408,8 @@ Exact ServiceTitan alert timing:
 - Real violations are evaluated on every `servicetitan-audit-once` run and on every continuous audit polling cycle.
 - Continuous polling uses `ServiceTitanAuditLoop` and `SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS`.
 - Continuous polling waits `SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS` before the first startup cycle, so Render can finish boot and health checks before related ServiceTitan records are fetched.
+- On the first live run with no checkpoint, `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false` initializes a baseline checkpoint and sends no historical Slack alerts.
+- Set `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true` only when you intentionally want the first live run to evaluate and alert on the configured lookback window.
 - Slack sends immediately when a rule returns `fail`, dry-run is false, Slack config is present, and the exact violation was not already successfully alerted.
 - There is no Friday-only or weekly-only ServiceTitan violation alert path.
 - The `delivery` field in the handbook matrix is metadata included in Slack text; ServiceTitan violation alerts are immediate because no ServiceTitan digest sender exists.
@@ -371,7 +433,9 @@ Runtime mode behavior:
 
 - `SERVICE_TITAN_AUDIT_ENABLED=false`: continuous ServiceTitan polling does not start. The one-time `servicetitan-audit-once` command can still run because it forces a validation cycle.
 - `SERVICE_TITAN_AUDIT_DRY_RUN=true`: real ServiceTitan data may be fetched and rules may be evaluated, but Slack alerts, violation writes, dedupe writes, and checkpoint advancement are skipped. The CLI summary prints `dry_run: True`.
-- `SERVICE_TITAN_AUDIT_DRY_RUN=false`: `fail` results create/open violations and immediately call Slack. `alert_sent_at` is set only after Slack returns a timestamp.
+- `SERVICE_TITAN_AUDIT_DRY_RUN=false` and `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false`: the first run with no checkpoint creates a baseline and sends nothing. Later cycles fetch updated jobs using the checkpoint plus overlap.
+- `SERVICE_TITAN_AUDIT_DRY_RUN=false` and `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true`: the first run uses `SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES` and can alert historical failures. Use only for explicit backfill.
+- After a checkpoint exists, `fail` results create/open violations and immediately call Slack. `alert_sent_at` is set only after Slack returns a timestamp.
 - Slack failure does not crash the audit cycle and leaves `alert_sent_at=NULL`, so the same violation can retry later.
 - `pass` and `not_applicable` can resolve an existing open violation for the same deterministic key.
 - `insufficient_data` is logged and counted in summaries but does not alert by default.
@@ -495,6 +559,7 @@ Required for live ServiceTitan Slack alert delivery:
 
 ```env
 SERVICE_TITAN_AUDIT_DRY_RUN=false
+SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false
 SLACK_BOT_TOKEN=
 SLACK_ALERT_CHANNEL_ID=
 ```
@@ -616,6 +681,8 @@ Run the long-lived service:
 python3 -m marketing_os_agent run
 ```
 
+With `SERVICE_TITAN_AUDIT_ENABLED=true`, the long-lived service starts `ServiceTitanAuditLoop`. It waits `SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS`, then runs an audit cycle every `SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS`. Each cycle fetches recently updated jobs using the durable checkpoint plus `SERVICE_TITAN_AUDIT_OVERLAP_SECONDS`, evaluates scoped rules, and immediately sends Slack only for new real `fail` results. It does not batch ServiceTitan violations into daily, Friday, or weekly reports.
+
 ## Adding A Rule
 
 1. Add a `HandbookRuleDefinition` in `service_titan_handbook.py` when the rule comes from a handbook.
@@ -650,6 +717,10 @@ Review:
 
 - Jobs, appointments, invoices, invoice items, estimates, notes, forms, equipment, purchase orders, and technician time counts.
 - Rule result counts.
+- Sales jobs scanned.
+- Sales rules evaluated.
+- Sales pass/fail/insufficient_data/not_applicable counts.
+- Sales alerts that would have been sent and Sales alerts sent.
 - `insufficient_data by rule`.
 - `not_applicable by rule`.
 - Missing data category counts.
@@ -681,19 +752,27 @@ Keep dry-run enabled until notification delivery and routing are separately veri
 19. Canceled/no-access jobs return `not_applicable` for photos/HHR/options rules.
 20. `SERVICE_TITAN_DISABLED_RULE_IDS_JSON` disables a noisy rule without changing code.
 21. `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` narrows a rule without changing code.
+22. Non-Sales jobs return `not_applicable` for all Sales rules.
+23. Closed Sales jobs with 3 or more estimates pass the option rule.
+24. Closed Sales jobs with fewer than 3 estimates fail only when estimate data is available.
+25. Sales photo checks fail only when the attachment/photo source is available and contains no photos.
+26. Sales arrival checks fail only when arrival window and arrival time are both available and arrival is after the first-half cutoff.
 
 ## Render Deployment Notes
 
 - Add ServiceTitan env vars in Render only after the app is connected and scopes are approved.
 - Keep `SERVICE_TITAN_AUDIT_ENABLED=false` until credentials and Slack alert channel are ready.
 - Set `SERVICE_TITAN_AUDIT_DRY_RUN=true` for the first production validation run.
+- Keep `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false` unless you explicitly want historical first-run alerts.
+- Set `SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true`.
+- Keep `TECHNICIAN_COMPLIANCE_ENABLED=false` and `DISPATCHER_AUDIT_ENABLED=false` during Sales-only validation.
 - Set `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}` until discovery confirms tenant-specific scope narrowing is needed.
 - Run `python3 -m marketing_os_agent init-db` after deploy if the SQLite file is new.
 - Run `python3 -m marketing_os_agent servicetitan-discover-scopes` to collect sanitized production scope names/IDs.
 - Configure `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` when the discovered business units/job types/statuses/tags need tenant-specific narrowing.
 - Run `SERVICE_TITAN_AUDIT_ENABLED=false SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-audit-once` with a short lookback for first validation.
 - Watch the command summary and logs for `servicetitan_audit_completed`, `servicetitan_rule_insufficient_data`, `servicetitan_alert_dry_run`, `servicetitan_duplicate_alert_suppressed`, and `servicetitan_alert_sent`.
-- After dry-run results look correct, set `SERVICE_TITAN_AUDIT_DRY_RUN=false`, confirm `SLACK_ALERT_CHANNEL_ID` or `SLACK_MARKETING_OPS_CHANNEL_ID`, run one one-time live alert cycle if desired, then set `SERVICE_TITAN_AUDIT_ENABLED=true` to start continuous polling.
+- After dry-run results look correct, set `SERVICE_TITAN_AUDIT_DRY_RUN=false`, keep `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false`, confirm `SLACK_ALERT_CHANNEL_ID` or `SLACK_MARKETING_OPS_CHANNEL_ID`, then set `SERVICE_TITAN_AUDIT_ENABLED=true` to start continuous polling. The first live cycle establishes a baseline; later cycles alert only new/updated violations.
 
 Render-safe command checklist:
 

@@ -12,7 +12,16 @@ from ..clients.slack import SlackClient
 from ..config import Settings
 from ..models import parse_notion_datetime
 from ..persistence import Persistence
-from .service_titan_rules import RESULT_ERROR, RESULT_FAIL, RESULT_INSUFFICIENT, RESULT_NOT_APPLICABLE, RESULT_PASS, RuleResult, active_service_titan_rules
+from .service_titan_rules import (
+    RESULT_ERROR,
+    RESULT_FAIL,
+    RESULT_INSUFFICIENT,
+    RESULT_NOT_APPLICABLE,
+    RESULT_PASS,
+    RULESET_SALES,
+    RuleResult,
+    active_service_titan_rules,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +31,8 @@ logger = logging.getLogger(__name__)
 class ServiceTitanAuditSummary:
     status: str = "completed"
     dry_run: bool = False
+    backfill_alerts: bool = False
+    baseline_initialized: bool = False
     jobs_scanned: int = 0
     appointments_scanned: int = 0
     invoices_scanned: int = 0
@@ -35,6 +46,14 @@ class ServiceTitanAuditSummary:
     technician_time_records_scanned: int = 0
     rules_evaluated: int = 0
     violations_detected: int = 0
+    sales_jobs_scanned: int = 0
+    sales_rules_evaluated: int = 0
+    sales_pass: int = 0
+    sales_fail: int = 0
+    sales_insufficient_data: int = 0
+    sales_not_applicable: int = 0
+    sales_alerts_sent: int = 0
+    sales_alerts_would_send: int = 0
     result_counts: dict[str, int] = field(default_factory=dict)
     insufficient_data_by_rule: dict[str, int] = field(default_factory=dict)
     not_applicable_by_rule: dict[str, int] = field(default_factory=dict)
@@ -50,6 +69,8 @@ class ServiceTitanAuditSummary:
         lines = [
             f"ServiceTitan audit: {self.status}",
             f"- dry_run: {self.dry_run}",
+            f"- backfill_alerts: {self.backfill_alerts}",
+            f"- baseline_initialized: {self.baseline_initialized}",
             f"- jobs scanned: {self.jobs_scanned}",
             f"- appointments scanned: {self.appointments_scanned}",
             f"- invoices scanned: {self.invoices_scanned}",
@@ -63,6 +84,14 @@ class ServiceTitanAuditSummary:
             f"- technician time records scanned: {self.technician_time_records_scanned}",
             f"- rules evaluated: {self.rules_evaluated}",
             f"- violations detected: {self.violations_detected}",
+            f"- sales jobs scanned: {self.sales_jobs_scanned}",
+            f"- sales rules evaluated: {self.sales_rules_evaluated}",
+            f"- sales pass: {self.sales_pass}",
+            f"- sales fail: {self.sales_fail}",
+            f"- sales insufficient_data: {self.sales_insufficient_data}",
+            f"- sales not_applicable: {self.sales_not_applicable}",
+            f"- sales alerts that would have been sent: {self.sales_alerts_would_send}",
+            f"- sales alerts sent: {self.sales_alerts_sent}",
             f"- alerts sent: {self.alerts_sent}",
             f"- alerts that would have been sent: {self.alerts_would_send}",
             f"- alerts skipped due to dedupe: {self.alerts_skipped_dedupe}",
@@ -107,7 +136,10 @@ class ServiceTitanAuditService:
         self.slack = slack
 
     def audit_once(self, now: datetime | None = None, *, require_enabled: bool = True) -> ServiceTitanAuditSummary:
-        summary = ServiceTitanAuditSummary(dry_run=self.settings.service_titan_audit_dry_run)
+        summary = ServiceTitanAuditSummary(
+            dry_run=self.settings.service_titan_audit_dry_run,
+            backfill_alerts=self.settings.service_titan_audit_backfill_alerts,
+        )
         if require_enabled and not self.settings.service_titan_audit_enabled:
             logger.info("servicetitan_audit_skipped_disabled")
             summary.status = "disabled"
@@ -121,7 +153,23 @@ class ServiceTitanAuditService:
 
         run_id = self.db.log_run_start("servicetitan_audit")
         now = now or datetime.now(timezone.utc)
-        since = self._poll_since(now)
+        previous_checkpoint = self.db.get_kv("servicetitan_audit_last_processed")
+        if self._should_initialize_baseline(previous_checkpoint):
+            baseline_checkpoint = now.astimezone(timezone.utc) + timedelta(seconds=self.settings.service_titan_audit_overlap_seconds)
+            self.db.set_kv("servicetitan_audit_last_processed", baseline_checkpoint.isoformat())
+            summary.status = "baseline_initialized"
+            summary.baseline_initialized = True
+            details = {
+                "dry_run": summary.dry_run,
+                "backfill_alerts": summary.backfill_alerts,
+                "baseline_checkpoint": baseline_checkpoint.isoformat(),
+                "alerts_sent": 0,
+                "alerts_would_send": 0,
+            }
+            self.db.log_run_complete(run_id, "baseline_initialized", details)
+            logger.info("servicetitan_audit_baseline_initialized", extra=details)
+            return summary
+        since = self._poll_since(now, previous_checkpoint)
         try:
             jobs = self.client.query_recent_jobs(since)
         except ServiceTitanApiError as exc:
@@ -152,12 +200,25 @@ class ServiceTitanAuditService:
         for job in jobs:
             for category in job.missing_data:
                 summary.missing_data_category_counts[category] = summary.missing_data_category_counts.get(category, 0) + 1
+        sales_job_ids: set[str] = set()
         for job in jobs:
             try:
                 for result in self._evaluate_job(job):
                     summary.rules_evaluated += 1
                     counts[result.status] = counts.get(result.status, 0) + 1
                     summary.result_counts[result.status] = summary.result_counts.get(result.status, 0) + 1
+                    if result.ruleset == RULESET_SALES:
+                        summary.sales_rules_evaluated += 1
+                        if result.status != RESULT_NOT_APPLICABLE:
+                            sales_job_ids.add(job.job_id)
+                        if result.status == RESULT_PASS:
+                            summary.sales_pass += 1
+                        elif result.status == RESULT_FAIL:
+                            summary.sales_fail += 1
+                        elif result.status == RESULT_INSUFFICIENT:
+                            summary.sales_insufficient_data += 1
+                        elif result.status == RESULT_NOT_APPLICABLE:
+                            summary.sales_not_applicable += 1
                     if result.status == RESULT_FAIL:
                         summary.violations_detected += 1
                         destination = result.recommended_alert_recipient or "slack audit channel"
@@ -165,8 +226,12 @@ class ServiceTitanAuditService:
                         alert_status = self._record_and_alert(job, result)
                         if alert_status == "sent":
                             summary.alerts_sent += 1
+                            if result.ruleset == RULESET_SALES:
+                                summary.sales_alerts_sent += 1
                         elif alert_status == "would_send":
                             summary.alerts_would_send += 1
+                            if result.ruleset == RULESET_SALES:
+                                summary.sales_alerts_would_send += 1
                         elif alert_status == "deduped":
                             summary.alerts_skipped_dedupe += 1
                     elif result.status == RESULT_PASS:
@@ -193,6 +258,7 @@ class ServiceTitanAuditService:
                 counts[RESULT_ERROR] = counts.get(RESULT_ERROR, 0) + 1
                 summary.errors += 1
                 logger.warning("servicetitan_job_audit_failed", exc_info=True, extra={"job_id": job.job_id, "error": str(exc)})
+        summary.sales_jobs_scanned = len(sales_job_ids)
 
         max_modified = max((job.modified_on for job in jobs if job.modified_on), default=now)
         if summary.dry_run:
@@ -216,6 +282,14 @@ class ServiceTitanAuditService:
                 "technician_time_records_seen": summary.technician_time_records_scanned,
                 "rules_evaluated": summary.rules_evaluated,
                 "violations_detected": summary.violations_detected,
+                "sales_jobs_seen": summary.sales_jobs_scanned,
+                "sales_rules_evaluated": summary.sales_rules_evaluated,
+                "sales_pass": summary.sales_pass,
+                "sales_fail": summary.sales_fail,
+                "sales_insufficient_data": summary.sales_insufficient_data,
+                "sales_not_applicable": summary.sales_not_applicable,
+                "sales_alerts_sent": summary.sales_alerts_sent,
+                "sales_alerts_would_send": summary.sales_alerts_would_send,
                 "alerts_sent": summary.alerts_sent,
                 "alerts_would_send": summary.alerts_would_send,
                 "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
@@ -226,6 +300,8 @@ class ServiceTitanAuditService:
                 "missing_data_category_counts": summary.missing_data_category_counts,
                 "since": since.isoformat(),
                 "dry_run": summary.dry_run,
+                "backfill_alerts": summary.backfill_alerts,
+                "baseline_initialized": summary.baseline_initialized,
             },
         )
         logger.info(
@@ -244,11 +320,21 @@ class ServiceTitanAuditService:
                 "technician_time_records_seen": summary.technician_time_records_scanned,
                 "rules_evaluated": summary.rules_evaluated,
                 "violations_detected": summary.violations_detected,
+                "sales_jobs_seen": summary.sales_jobs_scanned,
+                "sales_rules_evaluated": summary.sales_rules_evaluated,
+                "sales_pass": summary.sales_pass,
+                "sales_fail": summary.sales_fail,
+                "sales_insufficient_data": summary.sales_insufficient_data,
+                "sales_not_applicable": summary.sales_not_applicable,
+                "sales_alerts_sent": summary.sales_alerts_sent,
+                "sales_alerts_would_send": summary.sales_alerts_would_send,
                 "alerts_sent": summary.alerts_sent,
                 "alerts_would_send": summary.alerts_would_send,
                 "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
                 "errors": summary.errors,
                 "dry_run": summary.dry_run,
+                "backfill_alerts": summary.backfill_alerts,
+                "baseline_initialized": summary.baseline_initialized,
                 "missing_data_category_counts": summary.missing_data_category_counts,
                 "not_applicable_by_rule": summary.not_applicable_by_rule,
                 **counts,
@@ -336,6 +422,14 @@ class ServiceTitanAuditService:
             lines.append(f"*Arrived:* {self._format_dt(job.arrived_at)}")
         if job.invoice_total is not None:
             lines.append(f"*Invoice total:* {job.invoice_total}")
+        if "options_count" in result.metadata:
+            required = result.metadata.get("required_options_count")
+            suffix = f" / required {required}" if required is not None else ""
+            lines.append(f"*Options count:* {result.metadata['options_count']}{suffix}")
+        if "photos_count" in result.metadata:
+            lines.append(f"*Photos count:* {result.metadata['photos_count']}")
+        if "arrival_first_half_cutoff" in result.metadata:
+            lines.append(f"*First-half cutoff:* {result.metadata['arrival_first_half_cutoff']}")
         lines.extend(
             [
                 f"*Issue:* {result.explanation}",
@@ -349,8 +443,16 @@ class ServiceTitanAuditService:
     def _format_dt(self, value: datetime) -> str:
         return value.astimezone(ZoneInfo(self.settings.service_titan_audit_timezone)).isoformat()
 
-    def _poll_since(self, now: datetime) -> datetime:
-        previous = self.db.get_kv("servicetitan_audit_last_processed")
+    def _should_initialize_baseline(self, previous_checkpoint: str | None) -> bool:
+        return bool(
+            not previous_checkpoint
+            and not self.settings.service_titan_audit_dry_run
+            and not self.settings.service_titan_audit_backfill_alerts
+        )
+
+    def _poll_since(self, now: datetime, previous: str | None = None) -> datetime:
+        if previous is None:
+            previous = self.db.get_kv("servicetitan_audit_last_processed")
         if not previous:
             return now.astimezone(timezone.utc) - timedelta(minutes=self.settings.service_titan_audit_lookback_minutes)
         try:
@@ -383,6 +485,9 @@ class ServiceTitanAuditLoop:
             except Exception:
                 logger.exception("servicetitan_audit_cycle_failed")
             elapsed = time.monotonic() - started
-            wait_seconds = max(1, self.settings.service_titan_audit_poll_interval_seconds - elapsed)
+            wait_seconds = self._wait_seconds_after_cycle(elapsed)
             stop_event.wait(wait_seconds)
         logger.info("servicetitan_audit_loop_stopped")
+
+    def _wait_seconds_after_cycle(self, elapsed_seconds: float) -> float:
+        return max(1, self.settings.service_titan_audit_poll_interval_seconds - elapsed_seconds)

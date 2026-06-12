@@ -78,12 +78,14 @@ class ServiceTitanScopeDiscovery:
         summary.jobs_scanned = len(jobs)
         counters: dict[str, Counter[str]] = {
             "statuses": Counter(),
+            "appointment_statuses": Counter(),
             "business_units": Counter(),
             "job_types": Counter(),
             "departments": Counter(),
             "trades": Counter(),
             "workflows": Counter(),
             "tags": Counter(),
+            "advisor_or_technician_ids": Counter(),
             "technician_ids": Counter(),
             "dispatcher_ids": Counter(),
             "invoice_statuses": Counter(),
@@ -95,6 +97,7 @@ class ServiceTitanScopeDiscovery:
 
         for job in jobs:
             self._add(counters["statuses"], job.status)
+            self._add(counters["appointment_statuses"], job.appointment_status)
             self._add(counters["business_units"], job.business_unit_name or job.business_unit_id)
             self._add(counters["job_types"], job.job_type_name or job.job_type_id)
             self._add(counters["departments"], job.department)
@@ -102,6 +105,7 @@ class ServiceTitanScopeDiscovery:
             self._add(counters["workflows"], job.workflow)
             for tag in [*job.tag_names, *job.tag_ids]:
                 self._add(counters["tags"], tag)
+            self._add(counters["advisor_or_technician_ids"], job.technician_id or ("<name-present>" if job.technician_name else ""))
             self._add(counters["technician_ids"], job.technician_id or ("<name-present>" if job.technician_name else ""))
             self._add(counters["dispatcher_ids"], job.dispatcher_id or ("<name-present>" if job.dispatcher_name else ""))
             self._add(counters["invoice_statuses"], job.invoice_status)

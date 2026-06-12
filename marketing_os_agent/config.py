@@ -125,6 +125,7 @@ class Settings:
     service_titan_audit_page_size: int
     service_titan_audit_timezone: str
     service_titan_audit_dry_run: bool
+    service_titan_audit_backfill_alerts: bool
     service_titan_audit_debug_fields: bool
     notifications_test_send: bool
 
@@ -213,6 +214,7 @@ class Settings:
     service_titan_require_home_comfort_plan_option: bool
     service_titan_po_reconcile_within_hours: int
     service_titan_alert_include_customer_name: bool
+    sales_comfort_advisor_audit_enabled: bool
     technician_compliance_enabled: bool
     dispatcher_audit_enabled: bool
 
@@ -264,6 +266,7 @@ class Settings:
             service_titan_audit_page_size=_int_env("SERVICE_TITAN_AUDIT_PAGE_SIZE", 100),
             service_titan_audit_timezone=_env("SERVICE_TITAN_AUDIT_TIMEZONE", timezone),
             service_titan_audit_dry_run=_bool_env("SERVICE_TITAN_AUDIT_DRY_RUN", False),
+            service_titan_audit_backfill_alerts=_bool_env("SERVICE_TITAN_AUDIT_BACKFILL_ALERTS", False),
             service_titan_audit_debug_fields=_bool_env("SERVICE_TITAN_AUDIT_DEBUG_FIELDS", False),
             notifications_test_send=_bool_env("NOTIFICATIONS_TEST_SEND", False),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
@@ -346,8 +349,9 @@ class Settings:
             service_titan_require_home_comfort_plan_option=_bool_env("SERVICE_TITAN_REQUIRE_HOME_COMFORT_PLAN_OPTION", True),
             service_titan_po_reconcile_within_hours=_int_env("SERVICE_TITAN_PO_RECONCILE_WITHIN_HOURS", 24),
             service_titan_alert_include_customer_name=_bool_env("SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME", False),
-            technician_compliance_enabled=_bool_env("TECHNICIAN_COMPLIANCE_ENABLED", True),
-            dispatcher_audit_enabled=_bool_env("DISPATCHER_AUDIT_ENABLED", True),
+            sales_comfort_advisor_audit_enabled=_bool_env("SALES_COMFORT_ADVISOR_AUDIT_ENABLED", True),
+            technician_compliance_enabled=_bool_env("TECHNICIAN_COMPLIANCE_ENABLED", False),
+            dispatcher_audit_enabled=_bool_env("DISPATCHER_AUDIT_ENABLED", False),
             owner_slack_map=_json_map_env("OWNER_SLACK_MAP_JSON"),
             owner_email_map=_json_map_env("OWNER_EMAIL_MAP_JSON"),
             task_status_map={

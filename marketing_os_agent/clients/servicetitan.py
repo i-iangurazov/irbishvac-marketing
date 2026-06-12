@@ -31,6 +31,7 @@ class ServiceTitanJob:
     modified_on: datetime | None
     completed_on: datetime | None
     appointment_id: str = ""
+    appointment_status: str = ""
     invoice_id: str = ""
     technician_id: str = ""
     technician_name: str = ""
@@ -157,6 +158,7 @@ class ServiceTitanClient:
         missing_data = dict(job.missing_data)
 
         appointment_id = job.appointment_id
+        appointment_status = job.appointment_status
         invoice_id = job.invoice_id
         technician_id = job.technician_id
         technician_name = job.technician_name
@@ -235,6 +237,9 @@ class ServiceTitanClient:
         elif appointments:
             appointment = _select_appointment(appointments)
             appointment_id = appointment_id or str(_value(appointment, ("id", "appointmentId"), present_fields, "appointment_id") or "")
+            appointment_status = appointment_status or _display_value(
+                _value(appointment, ("status", "appointmentStatus", "status.name"), present_fields, "appointment_status")
+            )
             arrival_window_start = arrival_window_start or _parse_datetime(
                 _value(appointment, ("arrivalWindowStart", "start"), present_fields, "arrival_window")
             )
@@ -577,6 +582,7 @@ class ServiceTitanClient:
         return replace(
             job,
             appointment_id=appointment_id,
+            appointment_status=appointment_status,
             invoice_id=invoice_id,
             technician_id=technician_id,
             technician_name=technician_name,
@@ -892,6 +898,7 @@ def parse_service_titan_job(payload: dict[str, Any], settings: Settings) -> Serv
         modified_on=_parse_datetime(_value(payload, ("modifiedOn", "lastModifiedOn", "updatedOn"), present, "modified_on")),
         completed_on=_parse_datetime(_value(payload, ("completedOn", "closedOn", "completedDate"), present, "completed_on")),
         appointment_id=appointment_id,
+        appointment_status=_display_value(_value(appointment, ("status", "appointmentStatus", "status.name"), present, "appointment_status")),
         invoice_id=str(_value(invoice, ("id", "invoiceId"), present, "invoice") or _value(payload, ("invoiceId",), present, "invoice") or ""),
         technician_id=technician_id,
         technician_name=technician_name,
