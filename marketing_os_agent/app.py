@@ -330,6 +330,7 @@ class AgentApp:
             f"  - SERVICE_TITAN_AUDIT_ENABLED: {self.settings.service_titan_audit_enabled}",
             f"  - SERVICE_TITAN_AUDIT_DRY_RUN: {self.settings.service_titan_audit_dry_run}",
             f"  - SERVICE_TITAN_AUDIT_BACKFILL_ALERTS: {self.settings.service_titan_audit_backfill_alerts}",
+            f"  - SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE: {self.settings.service_titan_audit_ignore_checkpoint_once}",
             f"  - SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS: {self.settings.service_titan_audit_poll_interval_seconds}",
             f"  - SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS: {self.settings.service_titan_audit_startup_delay_seconds}",
             f"  - SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES: {self.settings.service_titan_audit_lookback_minutes}",
@@ -364,6 +365,7 @@ class AgentApp:
                     "  - "
                     + f"id={row.get('id')} status={row.get('status')} started_at={row.get('started_at')} completed_at={row.get('completed_at')} "
                     + f"dry_run={details.get('dry_run', '<unknown>')} jobs={details.get('jobs_seen', '<unknown>')} "
+                    + f"checkpoint_ignored={details.get('checkpoint_ignored', '<unknown>')} "
                     + f"sales_fail={details.get('sales_fail', '<unknown>')} alerts_sent={details.get('alerts_sent', '<unknown>')} "
                     + f"alerts_would_send={details.get('alerts_would_send', '<unknown>')} deduped={details.get('alerts_skipped_dedupe', '<unknown>')} "
                     + f"limited={details.get('alerts_skipped_limit', '<unknown>')} failed={details.get('alerts_failed', '<unknown>')} "

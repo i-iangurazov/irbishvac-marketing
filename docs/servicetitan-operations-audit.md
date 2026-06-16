@@ -251,6 +251,7 @@ SERVICETITAN_AUTH_URL=https://auth.servicetitan.io/connect/token
 SERVICETITAN_JOB_URL_TEMPLATE=
 SERVICE_TITAN_AUDIT_DRY_RUN=false
 SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false
+SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE=false
 SERVICE_TITAN_AUDIT_DEBUG_FIELDS=false
 NOTIFICATIONS_TEST_SEND=false
 SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS=300
@@ -460,6 +461,7 @@ Runtime mode behavior:
 - `SERVICE_TITAN_AUDIT_DRY_RUN=false` and `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false`: the first run with no checkpoint creates a baseline and sends nothing. Later cycles fetch updated jobs using the checkpoint plus overlap.
 - `SERVICE_TITAN_AUDIT_DRY_RUN=false` and `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true`: the first run uses `SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES` and can alert historical failures. Use only for explicit backfill.
 - Live backfill should always include `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE`. The initial production default is 25; set it to 1 for a one-alert validation run.
+- `SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE=true`: honored only by one-time forced commands, only when backfill is true, and in live mode only when `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE=1`. This is for controlled historical validation after a checkpoint already exists. Continuous polling ignores it.
 - After a checkpoint exists, `fail` results create/open violations and immediately call Slack. `alert_sent_at` is set only after Slack returns a timestamp.
 - Slack failure does not crash the audit cycle and leaves `alert_sent_at=NULL`, so the same violation can retry later. If Slack fails or the per-cycle alert cap is reached, checkpoint advancement is skipped so pending alertable violations are not left behind.
 - `pass` and `not_applicable` can resolve an existing open violation for the same deterministic key.
@@ -790,6 +792,7 @@ Safe one-real-historical-Sales-alert validation:
 SERVICE_TITAN_AUDIT_ENABLED=false \
 SERVICE_TITAN_AUDIT_DRY_RUN=false \
 SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true \
+SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE=true \
 SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE=1 \
 SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME=false \
 SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true \
@@ -799,7 +802,15 @@ SERVICE_TITAN_DISABLED_RULE_IDS_JSON='["sales_photos_missing"]' \
 python3 -m marketing_os_agent servicetitan-audit-once
 ```
 
-This sends at most one real historical Sales alert to Slack. It respects `SERVICE_TITAN_DISABLED_RULE_IDS_JSON`, does not enable `sales_photos_missing`, and logs `servicetitan_controlled_backfill_alert_attempt` with `manual_validation=true`. If additional historical violations are found, they are recorded without `alert_sent_at`, the max-alert log is emitted, and checkpoint advancement is skipped so nothing is silently lost.
+This sends at most one real historical Sales alert to Slack, even when a production checkpoint already exists. It respects `SERVICE_TITAN_DISABLED_RULE_IDS_JSON`, does not enable `sales_photos_missing`, and logs `servicetitan_controlled_backfill_alert_attempt` with `manual_validation=true`. If additional historical violations are found, they are recorded without `alert_sent_at`, the max-alert log is emitted, and checkpoint advancement is skipped so nothing is silently lost.
+
+When setting JSON env vars manually in a shell, quote them so the shell does not strip the JSON quotes:
+
+```bash
+export SERVICE_TITAN_DISABLED_RULE_IDS_JSON='["sales_photos_missing"]'
+```
+
+Do not use `SERVICE_TITAN_DISABLED_RULE_IDS_JSON=["sales_photos_missing"]` as a standalone shell assignment; many shells pass that to child processes as `[sales_photos_missing]`, which is invalid JSON.
 
 Continuous loop verification:
 

@@ -32,6 +32,7 @@ class ServiceTitanAuditSummary:
     status: str = "completed"
     dry_run: bool = False
     backfill_alerts: bool = False
+    checkpoint_ignored: bool = False
     baseline_initialized: bool = False
     jobs_scanned: int = 0
     appointments_scanned: int = 0
@@ -73,6 +74,7 @@ class ServiceTitanAuditSummary:
             f"ServiceTitan audit: {self.status}",
             f"- dry_run: {self.dry_run}",
             f"- backfill_alerts: {self.backfill_alerts}",
+            f"- checkpoint_ignored: {self.checkpoint_ignored}",
             f"- baseline_initialized: {self.baseline_initialized}",
             f"- jobs scanned: {self.jobs_scanned}",
             f"- appointments scanned: {self.appointments_scanned}",
@@ -160,7 +162,19 @@ class ServiceTitanAuditService:
         run_id = self.db.log_run_start("servicetitan_audit")
         now = now or datetime.now(timezone.utc)
         previous_checkpoint = self.db.get_kv("servicetitan_audit_last_processed")
-        if self._should_initialize_baseline(previous_checkpoint):
+        ignore_checkpoint = self._should_ignore_checkpoint_once(require_enabled=require_enabled)
+        summary.checkpoint_ignored = ignore_checkpoint
+        if ignore_checkpoint:
+            logger.warning(
+                "servicetitan_audit_checkpoint_ignored_once",
+                extra={
+                    "previous_checkpoint_present": bool(previous_checkpoint),
+                    "dry_run": summary.dry_run,
+                    "backfill_alerts": summary.backfill_alerts,
+                    "max_alerts_per_cycle": self.settings.service_titan_audit_max_alerts_per_cycle,
+                },
+            )
+        if not ignore_checkpoint and self._should_initialize_baseline(previous_checkpoint):
             baseline_checkpoint = now.astimezone(timezone.utc) + timedelta(seconds=self.settings.service_titan_audit_overlap_seconds)
             self.db.set_kv("servicetitan_audit_last_processed", baseline_checkpoint.isoformat())
             summary.status = "baseline_initialized"
@@ -168,6 +182,7 @@ class ServiceTitanAuditService:
             details = {
                 "dry_run": summary.dry_run,
                 "backfill_alerts": summary.backfill_alerts,
+                "checkpoint_ignored": summary.checkpoint_ignored,
                 "baseline_checkpoint": baseline_checkpoint.isoformat(),
                 "alerts_sent": 0,
                 "alerts_would_send": 0,
@@ -175,13 +190,17 @@ class ServiceTitanAuditService:
             self.db.log_run_complete(run_id, "baseline_initialized", details)
             logger.info("servicetitan_audit_baseline_initialized", extra=details)
             return summary
-        since = self._poll_since(now, previous_checkpoint)
+        if ignore_checkpoint:
+            since = now.astimezone(timezone.utc) - timedelta(minutes=self.settings.service_titan_audit_lookback_minutes)
+        else:
+            since = self._poll_since(now, previous_checkpoint)
         logger.info(
             "servicetitan_audit_cycle_started",
             extra={
                 "since": since.isoformat(),
                 "dry_run": summary.dry_run,
                 "backfill_alerts": summary.backfill_alerts,
+                "checkpoint_ignored": summary.checkpoint_ignored,
                 "max_alerts_per_cycle": self.settings.service_titan_audit_max_alerts_per_cycle,
             },
         )
@@ -294,6 +313,15 @@ class ServiceTitanAuditService:
         max_modified = max((job.modified_on for job in jobs if job.modified_on), default=now)
         if summary.dry_run:
             logger.info("servicetitan_audit_dry_run_checkpoint_skipped", extra={"max_modified": max_modified.astimezone(timezone.utc).isoformat()})
+        elif summary.checkpoint_ignored:
+            logger.warning(
+                "servicetitan_audit_checkpoint_skipped_manual_backfill",
+                extra={
+                    "max_modified": max_modified.astimezone(timezone.utc).isoformat(),
+                    "alerts_sent": summary.alerts_sent,
+                    "alerts_skipped_limit": summary.alerts_skipped_limit,
+                },
+            )
         elif summary.alerts_failed or summary.alerts_skipped_limit:
             logger.warning(
                 "servicetitan_audit_checkpoint_skipped_pending_alerts",
@@ -344,6 +372,7 @@ class ServiceTitanAuditService:
                 "since": since.isoformat(),
                 "dry_run": summary.dry_run,
                 "backfill_alerts": summary.backfill_alerts,
+                "checkpoint_ignored": summary.checkpoint_ignored,
                 "baseline_initialized": summary.baseline_initialized,
             },
         )
@@ -380,6 +409,7 @@ class ServiceTitanAuditService:
                 "errors": summary.errors,
                 "dry_run": summary.dry_run,
                 "backfill_alerts": summary.backfill_alerts,
+                "checkpoint_ignored": summary.checkpoint_ignored,
                 "baseline_initialized": summary.baseline_initialized,
                 "missing_data_category_counts": summary.missing_data_category_counts,
                 "not_applicable_by_rule": summary.not_applicable_by_rule,
@@ -400,6 +430,7 @@ class ServiceTitanAuditService:
                 "alerts_failed": summary.alerts_failed,
                 "dry_run": summary.dry_run,
                 "backfill_alerts": summary.backfill_alerts,
+                "checkpoint_ignored": summary.checkpoint_ignored,
             },
         )
         return summary
@@ -584,6 +615,22 @@ class ServiceTitanAuditService:
             and not self.settings.service_titan_audit_dry_run
             and not self.settings.service_titan_audit_backfill_alerts
         )
+
+    def _should_ignore_checkpoint_once(self, *, require_enabled: bool) -> bool:
+        if require_enabled:
+            return False
+        if not self.settings.service_titan_audit_ignore_checkpoint_once:
+            return False
+        if not self.settings.service_titan_audit_backfill_alerts:
+            logger.warning("servicetitan_ignore_checkpoint_once_ignored_without_backfill")
+            return False
+        if not self.settings.service_titan_audit_dry_run and self.settings.service_titan_audit_max_alerts_per_cycle != 1:
+            logger.warning(
+                "servicetitan_ignore_checkpoint_once_ignored_without_one_alert_cap",
+                extra={"max_alerts_per_cycle": self.settings.service_titan_audit_max_alerts_per_cycle},
+            )
+            return False
+        return True
 
     def _poll_since(self, now: datetime, previous: str | None = None) -> datetime:
         if previous is None:

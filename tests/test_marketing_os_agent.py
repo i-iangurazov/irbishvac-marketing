@@ -58,6 +58,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         service_titan_audit_timezone="UTC",
         service_titan_audit_dry_run=False,
         service_titan_audit_backfill_alerts=True,
+        service_titan_audit_ignore_checkpoint_once=False,
         service_titan_audit_debug_fields=False,
         notifications_test_send=False,
         anthropic_api_key="",
@@ -1224,6 +1225,31 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.alerts_sent, 1)
         self.assertEqual(len(self.h.slack.messages), 1)
         self.assertNotIn("Private Customer", self.h.slack.messages[0][1])
+
+    def test_controlled_one_alert_backfill_can_ignore_existing_checkpoint_once(self) -> None:
+        self.h.db.set_kv("servicetitan_audit_last_processed", "2026-06-16T07:55:00+00:00")
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=False,
+            service_titan_audit_backfill_alerts=True,
+            service_titan_audit_ignore_checkpoint_once=True,
+            service_titan_audit_max_alerts_per_cycle=1,
+            sales_comfort_advisor_audit_enabled=False,
+            dispatcher_audit_enabled=False,
+            technician_compliance_enabled=True,
+        )
+        jobs = [
+            st_job("checkpoint-ignore-1", clock_out_at=None),
+            st_job("checkpoint-ignore-2", clock_out_at=None),
+        ]
+        client = FakeServiceTitan(jobs)
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, client, self.h.slack)
+        summary = audit.audit_once(datetime(2026, 6, 16, 8, tzinfo=timezone.utc), require_enabled=False)
+        self.assertTrue(summary.checkpoint_ignored)
+        self.assertEqual(client.since_seen, datetime(2026, 6, 16, 4, tzinfo=timezone.utc))
+        self.assertEqual(summary.alerts_sent, 1)
+        self.assertEqual(summary.alerts_skipped_limit, 1)
+        self.assertEqual(self.h.db.get_kv("servicetitan_audit_last_processed"), "2026-06-16T07:55:00+00:00")
 
     def test_service_titan_pass_and_insufficient_results_do_not_alert(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)

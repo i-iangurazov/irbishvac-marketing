@@ -60,6 +60,7 @@ Defaults:
 - `SERVICE_TITAN_AUDIT_ENABLED=false`
 - `SERVICE_TITAN_AUDIT_DRY_RUN=false`
 - `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false`
+- `SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE=false`
 - `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=false`
 - `SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS=300`
 - `SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS=300`
@@ -172,7 +173,7 @@ Rules return `pass`, `fail`, `insufficient_data`, `not_applicable`, or `error`. 
 
 Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` for first production validation. Dry-run fetches real ServiceTitan jobs, evaluates rules, prints the one-time run summary, and skips Slack alerts and audit dedupe writes. The `servicetitan-audit-once` command runs one cycle and exits, even when continuous polling is still disabled. Set `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true` only when you need sanitized field availability logs for ServiceTitan payloads.
 
-Use `python3 -m marketing_os_agent servicetitan-runtime-diagnostics` on Render to confirm masked runtime config, parsed rule JSON, checkpoint state, recent audit cycles, and durable alert dedupe state. Live Slack sends are capped by `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE`; set it to `1` with `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true` only for controlled one-real-historical-alert validation.
+Use `python3 -m marketing_os_agent servicetitan-runtime-diagnostics` on Render to confirm masked runtime config, parsed rule JSON, checkpoint state, recent audit cycles, and durable alert dedupe state. Live Slack sends are capped by `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE`; set it to `1` with `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true` and `SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE=true` only for controlled one-real-historical-alert validation.
 
 See [docs/servicetitan-operations-audit.md](docs/servicetitan-operations-audit.md) for setup, required scopes, dedupe behavior, adding rules, manual QA, known field limitations, and Render deployment notes.
 

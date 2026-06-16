@@ -127,6 +127,7 @@ class Settings:
     service_titan_audit_timezone: str
     service_titan_audit_dry_run: bool
     service_titan_audit_backfill_alerts: bool
+    service_titan_audit_ignore_checkpoint_once: bool
     service_titan_audit_debug_fields: bool
     notifications_test_send: bool
 
@@ -269,6 +270,7 @@ class Settings:
             service_titan_audit_timezone=_env("SERVICE_TITAN_AUDIT_TIMEZONE", timezone),
             service_titan_audit_dry_run=_bool_env("SERVICE_TITAN_AUDIT_DRY_RUN", False),
             service_titan_audit_backfill_alerts=_bool_env("SERVICE_TITAN_AUDIT_BACKFILL_ALERTS", False),
+            service_titan_audit_ignore_checkpoint_once=_bool_env("SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE", False),
             service_titan_audit_debug_fields=_bool_env("SERVICE_TITAN_AUDIT_DEBUG_FIELDS", False),
             notifications_test_send=_bool_env("NOTIFICATIONS_TEST_SEND", False),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
