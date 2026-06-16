@@ -793,6 +793,7 @@ SERVICE_TITAN_AUDIT_ENABLED=false \
 SERVICE_TITAN_AUDIT_DRY_RUN=false \
 SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true \
 SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE=true \
+SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES=4320 \
 SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE=1 \
 SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME=false \
 SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true \
@@ -802,7 +803,7 @@ SERVICE_TITAN_DISABLED_RULE_IDS_JSON='["sales_photos_missing"]' \
 python3 -m marketing_os_agent servicetitan-audit-once
 ```
 
-This sends at most one real historical Sales alert to Slack, even when a production checkpoint already exists. It respects `SERVICE_TITAN_DISABLED_RULE_IDS_JSON`, does not enable `sales_photos_missing`, and logs `servicetitan_controlled_backfill_alert_attempt` with `manual_validation=true`. If additional historical violations are found, they are recorded without `alert_sent_at`, the max-alert log is emitted, and checkpoint advancement is skipped so nothing is silently lost.
+This sends at most one real historical Sales alert to Slack, even when a production checkpoint already exists. `SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES=4320` scans the last three days; lower or raise it based on the dry-run window you already validated. It respects `SERVICE_TITAN_DISABLED_RULE_IDS_JSON`, does not enable `sales_photos_missing`, and logs `servicetitan_controlled_backfill_alert_attempt` with `manual_validation=true`. If additional historical violations are found, they are recorded without `alert_sent_at`, the max-alert log is emitted, and checkpoint advancement is skipped so nothing is silently lost.
 
 When setting JSON env vars manually in a shell, quote them so the shell does not strip the JSON quotes:
 
