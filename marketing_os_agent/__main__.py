@@ -228,6 +228,7 @@ def _settings_error_diagnostics_text(error: str) -> str:
             f"- SERVICE_TITAN_AUDIT_ENABLED raw: {os.getenv('SERVICE_TITAN_AUDIT_ENABLED', '<unset>')}",
             f"- SERVICE_TITAN_AUDIT_DRY_RUN raw: {os.getenv('SERVICE_TITAN_AUDIT_DRY_RUN', '<unset>')}",
             f"- SERVICE_TITAN_AUDIT_BACKFILL_ALERTS raw: {os.getenv('SERVICE_TITAN_AUDIT_BACKFILL_ALERTS', '<unset>')}",
+            f"- SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE raw: {os.getenv('SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE', '<unset>')}",
             f"- SALES_COMFORT_ADVISOR_AUDIT_ENABLED raw: {os.getenv('SALES_COMFORT_ADVISOR_AUDIT_ENABLED', '<unset>')}",
             f"- TECHNICIAN_COMPLIANCE_ENABLED raw: {os.getenv('TECHNICIAN_COMPLIANCE_ENABLED', '<unset>')}",
             f"- DISPATCHER_AUDIT_ENABLED raw: {os.getenv('DISPATCHER_AUDIT_ENABLED', '<unset>')}",

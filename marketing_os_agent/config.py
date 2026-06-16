@@ -123,6 +123,7 @@ class Settings:
     service_titan_audit_overlap_seconds: int
     service_titan_audit_max_pages: int
     service_titan_audit_page_size: int
+    service_titan_audit_max_alerts_per_cycle: int
     service_titan_audit_timezone: str
     service_titan_audit_dry_run: bool
     service_titan_audit_backfill_alerts: bool
@@ -264,6 +265,7 @@ class Settings:
             service_titan_audit_overlap_seconds=_int_env("SERVICE_TITAN_AUDIT_OVERLAP_SECONDS", 300),
             service_titan_audit_max_pages=_int_env("SERVICE_TITAN_AUDIT_MAX_PAGES", 5),
             service_titan_audit_page_size=_int_env("SERVICE_TITAN_AUDIT_PAGE_SIZE", 100),
+            service_titan_audit_max_alerts_per_cycle=max(0, _int_env("SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE", 25)),
             service_titan_audit_timezone=_env("SERVICE_TITAN_AUDIT_TIMEZONE", timezone),
             service_titan_audit_dry_run=_bool_env("SERVICE_TITAN_AUDIT_DRY_RUN", False),
             service_titan_audit_backfill_alerts=_bool_env("SERVICE_TITAN_AUDIT_BACKFILL_ALERTS", False),

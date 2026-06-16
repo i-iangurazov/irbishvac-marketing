@@ -54,6 +54,7 @@ class ServiceTitanAuditSummary:
     sales_not_applicable: int = 0
     sales_alerts_sent: int = 0
     sales_alerts_would_send: int = 0
+    sales_alerts_skipped_limit: int = 0
     result_counts: dict[str, int] = field(default_factory=dict)
     insufficient_data_by_rule: dict[str, int] = field(default_factory=dict)
     not_applicable_by_rule: dict[str, int] = field(default_factory=dict)
@@ -62,6 +63,8 @@ class ServiceTitanAuditSummary:
     alerts_sent: int = 0
     alerts_would_send: int = 0
     alerts_skipped_dedupe: int = 0
+    alerts_skipped_limit: int = 0
+    alerts_failed: int = 0
     errors: int = 0
     config_errors: list[str] = field(default_factory=list)
 
@@ -92,9 +95,12 @@ class ServiceTitanAuditSummary:
             f"- sales not_applicable: {self.sales_not_applicable}",
             f"- sales alerts that would have been sent: {self.sales_alerts_would_send}",
             f"- sales alerts sent: {self.sales_alerts_sent}",
+            f"- sales alerts skipped due to max alert limit: {self.sales_alerts_skipped_limit}",
             f"- alerts sent: {self.alerts_sent}",
             f"- alerts that would have been sent: {self.alerts_would_send}",
             f"- alerts skipped due to dedupe: {self.alerts_skipped_dedupe}",
+            f"- alerts skipped due to max alert limit: {self.alerts_skipped_limit}",
+            f"- alerts failed: {self.alerts_failed}",
             f"- errors: {self.errors}",
         ]
         if self.result_counts:
@@ -170,6 +176,15 @@ class ServiceTitanAuditService:
             logger.info("servicetitan_audit_baseline_initialized", extra=details)
             return summary
         since = self._poll_since(now, previous_checkpoint)
+        logger.info(
+            "servicetitan_audit_cycle_started",
+            extra={
+                "since": since.isoformat(),
+                "dry_run": summary.dry_run,
+                "backfill_alerts": summary.backfill_alerts,
+                "max_alerts_per_cycle": self.settings.service_titan_audit_max_alerts_per_cycle,
+            },
+        )
         try:
             jobs = self.client.query_recent_jobs(since)
         except ServiceTitanApiError as exc:
@@ -201,6 +216,7 @@ class ServiceTitanAuditService:
             for category in job.missing_data:
                 summary.missing_data_category_counts[category] = summary.missing_data_category_counts.get(category, 0) + 1
         sales_job_ids: set[str] = set()
+        alert_attempts = 0
         for job in jobs:
             try:
                 results = self._evaluate_job(job)
@@ -226,17 +242,29 @@ class ServiceTitanAuditService:
                         summary.violations_detected += 1
                         destination = result.recommended_alert_recipient or "slack audit channel"
                         summary.alert_destination_counts[destination] = summary.alert_destination_counts.get(destination, 0) + 1
-                        alert_status = self._record_and_alert(job, result)
+                        alert_status = self._record_and_alert(
+                            job,
+                            result,
+                            alert_limit_reached=self._alert_limit_reached(alert_attempts),
+                        )
                         if alert_status == "sent":
+                            alert_attempts += 1
                             summary.alerts_sent += 1
                             if result.ruleset == RULESET_SALES:
                                 summary.sales_alerts_sent += 1
+                        elif alert_status == "failed":
+                            alert_attempts += 1
+                            summary.alerts_failed += 1
                         elif alert_status == "would_send":
                             summary.alerts_would_send += 1
                             if result.ruleset == RULESET_SALES:
                                 summary.sales_alerts_would_send += 1
                         elif alert_status == "deduped":
                             summary.alerts_skipped_dedupe += 1
+                        elif alert_status == "limited":
+                            summary.alerts_skipped_limit += 1
+                            if result.ruleset == RULESET_SALES:
+                                summary.sales_alerts_skipped_limit += 1
                     elif result.status == RESULT_PASS:
                         if not summary.dry_run and self.db.resolve_service_titan_violation(result.violation_key):
                             logger.info("servicetitan_violation_resolved", extra={"violation_key": result.violation_key, "rule_id": result.rule_id})
@@ -266,6 +294,15 @@ class ServiceTitanAuditService:
         max_modified = max((job.modified_on for job in jobs if job.modified_on), default=now)
         if summary.dry_run:
             logger.info("servicetitan_audit_dry_run_checkpoint_skipped", extra={"max_modified": max_modified.astimezone(timezone.utc).isoformat()})
+        elif summary.alerts_failed or summary.alerts_skipped_limit:
+            logger.warning(
+                "servicetitan_audit_checkpoint_skipped_pending_alerts",
+                extra={
+                    "max_modified": max_modified.astimezone(timezone.utc).isoformat(),
+                    "alerts_failed": summary.alerts_failed,
+                    "alerts_skipped_limit": summary.alerts_skipped_limit,
+                },
+            )
         else:
             self.db.set_kv("servicetitan_audit_last_processed", max_modified.astimezone(timezone.utc).isoformat())
         self.db.log_run_complete(
@@ -293,9 +330,12 @@ class ServiceTitanAuditService:
                 "sales_not_applicable": summary.sales_not_applicable,
                 "sales_alerts_sent": summary.sales_alerts_sent,
                 "sales_alerts_would_send": summary.sales_alerts_would_send,
+                "sales_alerts_skipped_limit": summary.sales_alerts_skipped_limit,
                 "alerts_sent": summary.alerts_sent,
                 "alerts_would_send": summary.alerts_would_send,
                 "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
+                "alerts_skipped_limit": summary.alerts_skipped_limit,
+                "alerts_failed": summary.alerts_failed,
                 "counts": counts,
                 "alert_destination_counts": summary.alert_destination_counts,
                 "insufficient_data_by_rule": summary.insufficient_data_by_rule,
@@ -331,9 +371,12 @@ class ServiceTitanAuditService:
                 "sales_not_applicable": summary.sales_not_applicable,
                 "sales_alerts_sent": summary.sales_alerts_sent,
                 "sales_alerts_would_send": summary.sales_alerts_would_send,
+                "sales_alerts_skipped_limit": summary.sales_alerts_skipped_limit,
                 "alerts_sent": summary.alerts_sent,
                 "alerts_would_send": summary.alerts_would_send,
                 "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
+                "alerts_skipped_limit": summary.alerts_skipped_limit,
+                "alerts_failed": summary.alerts_failed,
                 "errors": summary.errors,
                 "dry_run": summary.dry_run,
                 "backfill_alerts": summary.backfill_alerts,
@@ -341,6 +384,22 @@ class ServiceTitanAuditService:
                 "missing_data_category_counts": summary.missing_data_category_counts,
                 "not_applicable_by_rule": summary.not_applicable_by_rule,
                 **counts,
+            },
+        )
+        logger.info(
+            "servicetitan_audit_cycle_completed",
+            extra={
+                "jobs_scanned": summary.jobs_scanned,
+                "sales_jobs_scanned": summary.sales_jobs_scanned,
+                "sales_pass": summary.sales_pass,
+                "sales_fail": summary.sales_fail,
+                "sales_alerts_would_send": summary.sales_alerts_would_send,
+                "sales_alerts_sent": summary.sales_alerts_sent,
+                "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
+                "alerts_skipped_limit": summary.alerts_skipped_limit,
+                "alerts_failed": summary.alerts_failed,
+                "dry_run": summary.dry_run,
+                "backfill_alerts": summary.backfill_alerts,
             },
         )
         return summary
@@ -383,7 +442,7 @@ class ServiceTitanAuditService:
             },
         )
 
-    def _record_and_alert(self, job: ServiceTitanJob, result: RuleResult) -> str:
+    def _record_and_alert(self, job: ServiceTitanJob, result: RuleResult, *, alert_limit_reached: bool = False) -> str:
         metadata = {
             "explanation": result.explanation,
             "recommended_action": result.recommended_action,
@@ -427,7 +486,30 @@ class ServiceTitanAuditService:
             logger.info("servicetitan_duplicate_alert_suppressed", extra={"violation_key": result.violation_key, "rule_id": result.rule_id})
             return "deduped"
         logger.info("servicetitan_violation_recorded", extra={"violation_key": result.violation_key, "rule_id": result.rule_id, "severity": result.severity})
+        if alert_limit_reached:
+            logger.warning(
+                "servicetitan_alert_skipped_max_per_cycle",
+                extra={
+                    "violation_key": result.violation_key,
+                    "rule_id": result.rule_id,
+                    "severity": result.severity,
+                    "max_alerts_per_cycle": self.settings.service_titan_audit_max_alerts_per_cycle,
+                    "backfill_alerts": self.settings.service_titan_audit_backfill_alerts,
+                },
+            )
+            return "limited"
         channel = self.settings.slack_alert_channel_id or self.settings.slack_marketing_ops_channel_id
+        if self.settings.service_titan_audit_backfill_alerts:
+            logger.warning(
+                "servicetitan_controlled_backfill_alert_attempt",
+                extra={
+                    "violation_key": result.violation_key,
+                    "rule_id": result.rule_id,
+                    "severity": result.severity,
+                    "max_alerts_per_cycle": self.settings.service_titan_audit_max_alerts_per_cycle,
+                    "manual_validation": self._controlled_backfill_manual_validation(),
+                },
+            )
         ts = self.slack.post_message(channel, self._alert_text(job, result))
         if not ts:
             logger.warning("servicetitan_alert_slack_failed", extra={"violation_key": result.violation_key, "rule_id": result.rule_id})
@@ -435,6 +517,17 @@ class ServiceTitanAuditService:
         self.db.mark_service_titan_alert_sent(result.violation_key)
         logger.info("servicetitan_alert_sent", extra={"violation_key": result.violation_key, "rule_id": result.rule_id, "severity": result.severity})
         return "sent"
+
+    def _alert_limit_reached(self, alert_attempts: int) -> bool:
+        if self.settings.service_titan_audit_dry_run:
+            return False
+        return alert_attempts >= self.settings.service_titan_audit_max_alerts_per_cycle
+
+    def _controlled_backfill_manual_validation(self) -> bool:
+        return bool(
+            self.settings.service_titan_audit_backfill_alerts
+            and self.settings.service_titan_audit_max_alerts_per_cycle == 1
+        )
 
     def _alert_text(self, job: ServiceTitanJob, result: RuleResult) -> str:
         lines = [
@@ -445,7 +538,11 @@ class ServiceTitanAuditService:
             f"*Destination:* {result.recommended_alert_recipient}",
             f"*Delivery:* {result.delivery}",
         ]
-        if self.settings.service_titan_alert_include_customer_name and job.customer_name:
+        if (
+            self.settings.service_titan_alert_include_customer_name
+            and not self._controlled_backfill_manual_validation()
+            and job.customer_name
+        ):
             lines.append(f"*Customer:* {job.customer_name}")
         if job.technician_name:
             lines.append(f"*Technician:* {job.technician_name}")

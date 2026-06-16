@@ -109,6 +109,7 @@ class AgentApp:
         if self.settings.missing_service_titan_credentials():
             logger.warning("servicetitan_credentials_missing", extra={"missing": self.settings.missing_service_titan_credentials()})
         self._validate_timezone()
+        self._log_service_titan_startup_config()
 
         scheduler = Scheduler(self.settings, self.db)
         scheduler.register(ScheduledJob("monday_push", monday_8am, self.run_monday_push))
@@ -144,6 +145,29 @@ class AgentApp:
         http_server.shutdown()
         for thread in threads:
             thread.join(timeout=5)
+
+    def _log_service_titan_startup_config(self) -> None:
+        if not self.settings.service_titan_audit_enabled:
+            logger.info("servicetitan_continuous_audit_disabled")
+            return
+        rules = active_service_titan_rules(self.settings)
+        enabled_rulesets = sorted({rule.ruleset for rule in rules})
+        channel = self.settings.slack_alert_channel_id or self.settings.slack_marketing_ops_channel_id
+        logger.info(
+            "servicetitan_continuous_audit_enabled",
+            extra={
+                "dry_run": self.settings.service_titan_audit_dry_run,
+                "backfill_alerts": self.settings.service_titan_audit_backfill_alerts,
+                "poll_interval_seconds": self.settings.service_titan_audit_poll_interval_seconds,
+                "startup_delay_seconds": self.settings.service_titan_audit_startup_delay_seconds,
+                "lookback_minutes": self.settings.service_titan_audit_lookback_minutes,
+                "overlap_seconds": self.settings.service_titan_audit_overlap_seconds,
+                "max_alerts_per_cycle": self.settings.service_titan_audit_max_alerts_per_cycle,
+                "enabled_rulesets": enabled_rulesets,
+                "disabled_rules": self.settings.service_titan_disabled_rule_ids,
+                "slack_channel_configured": bool(channel),
+            },
+        )
 
     def poll_once(self) -> int:
         return self.processor.poll_once()
@@ -310,6 +334,7 @@ class AgentApp:
             f"  - SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS: {self.settings.service_titan_audit_startup_delay_seconds}",
             f"  - SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES: {self.settings.service_titan_audit_lookback_minutes}",
             f"  - SERVICE_TITAN_AUDIT_OVERLAP_SECONDS: {self.settings.service_titan_audit_overlap_seconds}",
+            f"  - SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE: {self.settings.service_titan_audit_max_alerts_per_cycle}",
             f"  - SALES_COMFORT_ADVISOR_AUDIT_ENABLED: {self.settings.sales_comfort_advisor_audit_enabled}",
             f"  - TECHNICIAN_COMPLIANCE_ENABLED: {self.settings.technician_compliance_enabled}",
             f"  - DISPATCHER_AUDIT_ENABLED: {self.settings.dispatcher_audit_enabled}",
@@ -320,6 +345,7 @@ class AgentApp:
             f"  - SLACK_BOT_TOKEN present: {bool(self.settings.slack_bot_token)}",
             f"  - SLACK_ALERT_CHANNEL_ID: {_mask_channel(self.settings.slack_alert_channel_id)}",
             f"  - effective Slack audit channel: {_mask_channel(channel)}",
+            f"  - continuous audit expected running: {self.settings.service_titan_audit_enabled and not self.settings.missing_service_titan_credentials()}",
             "- rules:",
             f"  - active ServiceTitan rules: {len(rules)}",
             f"  - active Sales rules: {', '.join(rule.rule_id for rule in sales_rules) if sales_rules else '<none>'}",
@@ -340,6 +366,7 @@ class AgentApp:
                     + f"dry_run={details.get('dry_run', '<unknown>')} jobs={details.get('jobs_seen', '<unknown>')} "
                     + f"sales_fail={details.get('sales_fail', '<unknown>')} alerts_sent={details.get('alerts_sent', '<unknown>')} "
                     + f"alerts_would_send={details.get('alerts_would_send', '<unknown>')} deduped={details.get('alerts_skipped_dedupe', '<unknown>')} "
+                    + f"limited={details.get('alerts_skipped_limit', '<unknown>')} failed={details.get('alerts_failed', '<unknown>')} "
                     + f"errors={details.get('errors', '<unknown>')}"
                 )
         else:

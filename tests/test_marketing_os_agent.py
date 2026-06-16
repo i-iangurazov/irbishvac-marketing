@@ -54,6 +54,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         service_titan_audit_overlap_seconds=300,
         service_titan_audit_max_pages=5,
         service_titan_audit_page_size=100,
+        service_titan_audit_max_alerts_per_cycle=25,
         service_titan_audit_timezone="UTC",
         service_titan_audit_dry_run=False,
         service_titan_audit_backfill_alerts=True,
@@ -256,6 +257,7 @@ def st_job(
     campaign_id: str = "",
     campaign_name: str = "",
     cancellation_reason: str = "",
+    customer_name: str = "",
     modified_on: datetime | None = None,
     clock_in_at: datetime | None = datetime(2026, 5, 15, 9, tzinfo=timezone.utc),
     clock_out_at: datetime | None = datetime(2026, 5, 15, 15, tzinfo=timezone.utc),
@@ -372,6 +374,7 @@ def st_job(
         campaign_id=campaign_id,
         campaign_name=campaign_name,
         cancellation_reason=cancellation_reason,
+        customer_name=customer_name,
         arrival_window_start=arrival_window_start,
         arrival_window_end=arrival_window_end,
         arrived_at=arrived_at,
@@ -1155,6 +1158,72 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(enabled.status, "completed")
         self.assertEqual(enabled.alerts_sent, 1)
         self.assertEqual(len(enabled_slack.messages), 1)
+
+    def test_service_titan_max_alerts_per_cycle_caps_live_sends_and_keeps_checkpoint_open(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_max_alerts_per_cycle=1,
+            sales_comfort_advisor_audit_enabled=False,
+            dispatcher_audit_enabled=False,
+            technician_compliance_enabled=True,
+        )
+        jobs = [
+            st_job("capped-1", clock_out_at=None),
+            st_job("capped-2", clock_out_at=None),
+        ]
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan(jobs), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.alerts_sent, 1)
+        self.assertEqual(summary.alerts_skipped_limit, 1)
+        self.assertEqual(len(self.h.slack.messages), 1)
+        first = self.h.db.get_service_titan_violation("servicetitan:capped-1:2001:tech_clock_out_missing:tech-1")
+        second = self.h.db.get_service_titan_violation("servicetitan:capped-2:2001:tech_clock_out_missing:tech-1")
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertIsNotNone(first["alert_sent_at"])
+        self.assertIsNone(second["alert_sent_at"])
+        self.assertIsNone(self.h.db.get_kv("servicetitan_audit_last_processed"))
+
+    def test_service_titan_max_alerts_per_cycle_does_not_cap_dry_run_would_send_count(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_dry_run=True,
+            service_titan_audit_max_alerts_per_cycle=1,
+            sales_comfort_advisor_audit_enabled=False,
+            dispatcher_audit_enabled=False,
+            technician_compliance_enabled=True,
+        )
+        jobs = [
+            st_job("dry-cap-1", clock_out_at=None),
+            st_job("dry-cap-2", clock_out_at=None),
+        ]
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan(jobs), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.alerts_sent, 0)
+        self.assertEqual(summary.alerts_would_send, 2)
+        self.assertEqual(summary.alerts_skipped_limit, 0)
+        self.assertEqual(self.h.slack.messages, [])
+        self.assertIsNone(self.h.db.get_service_titan_violation("servicetitan:dry-cap-1:2001:tech_clock_out_missing:tech-1"))
+
+    def test_controlled_one_alert_backfill_suppresses_customer_name_even_if_enabled(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_backfill_alerts=True,
+            service_titan_audit_max_alerts_per_cycle=1,
+            service_titan_alert_include_customer_name=True,
+            sales_comfort_advisor_audit_enabled=False,
+            dispatcher_audit_enabled=False,
+            technician_compliance_enabled=True,
+        )
+        job = st_job("manual-validation", clock_out_at=None, customer_name="Private Customer")
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([job]), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.alerts_sent, 1)
+        self.assertEqual(len(self.h.slack.messages), 1)
+        self.assertNotIn("Private Customer", self.h.slack.messages[0][1])
 
     def test_service_titan_pass_and_insufficient_results_do_not_alert(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)

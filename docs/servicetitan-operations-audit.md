@@ -259,6 +259,7 @@ SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES=240
 SERVICE_TITAN_AUDIT_OVERLAP_SECONDS=300
 SERVICE_TITAN_AUDIT_PAGE_SIZE=100
 SERVICE_TITAN_AUDIT_MAX_PAGES=5
+SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE=25
 SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true
 TECHNICIAN_COMPLIANCE_ENABLED=false
 DISPATCHER_AUDIT_ENABLED=false
@@ -432,6 +433,7 @@ Exact ServiceTitan alert timing:
 - Continuous polling waits `SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS` before the first startup cycle, so Render can finish boot and health checks before related ServiceTitan records are fetched.
 - On the first live run with no checkpoint, `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false` initializes a baseline checkpoint and sends no historical Slack alerts.
 - Set `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true` only when you intentionally want the first live run to evaluate and alert on the configured lookback window.
+- `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE` caps live Slack send attempts per cycle. Dry-run summaries are not capped, so backfill dry-runs can still show the full would-send count. Use `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE=1` for controlled one-real-alert validation.
 - Slack sends immediately when a rule returns `fail`, dry-run is false, Slack config is present, and the exact violation was not already successfully alerted.
 - There is no Friday-only or weekly-only ServiceTitan violation alert path.
 - The `delivery` field in the handbook matrix is metadata included in Slack text; ServiceTitan violation alerts are immediate because no ServiceTitan digest sender exists.
@@ -457,8 +459,9 @@ Runtime mode behavior:
 - `SERVICE_TITAN_AUDIT_DRY_RUN=true`: real ServiceTitan data may be fetched and rules may be evaluated, but Slack alerts, violation writes, dedupe writes, and checkpoint advancement are skipped. The CLI summary prints `dry_run: True`.
 - `SERVICE_TITAN_AUDIT_DRY_RUN=false` and `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false`: the first run with no checkpoint creates a baseline and sends nothing. Later cycles fetch updated jobs using the checkpoint plus overlap.
 - `SERVICE_TITAN_AUDIT_DRY_RUN=false` and `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true`: the first run uses `SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES` and can alert historical failures. Use only for explicit backfill.
+- Live backfill should always include `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE`. The initial production default is 25; set it to 1 for a one-alert validation run.
 - After a checkpoint exists, `fail` results create/open violations and immediately call Slack. `alert_sent_at` is set only after Slack returns a timestamp.
-- Slack failure does not crash the audit cycle and leaves `alert_sent_at=NULL`, so the same violation can retry later.
+- Slack failure does not crash the audit cycle and leaves `alert_sent_at=NULL`, so the same violation can retry later. If Slack fails or the per-cycle alert cap is reached, checkpoint advancement is skipped so pending alertable violations are not left behind.
 - `pass` and `not_applicable` can resolve an existing open violation for the same deterministic key.
 - `insufficient_data` is logged and counted in summaries but does not alert by default.
 - `not_applicable` is logged and counted in summaries but does not alert by default.
@@ -705,6 +708,20 @@ python3 -m marketing_os_agent run
 
 With `SERVICE_TITAN_AUDIT_ENABLED=true`, the long-lived service starts `ServiceTitanAuditLoop`. It waits `SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS`, then runs an audit cycle every `SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS`. Each cycle fetches recently updated jobs using the durable checkpoint plus `SERVICE_TITAN_AUDIT_OVERLAP_SECONDS`, evaluates scoped rules, and immediately sends Slack only for new real `fail` results. It does not batch ServiceTitan violations into daily, Friday, or weekly reports.
 
+Startup logs to confirm continuous mode:
+
+- `servicetitan_continuous_audit_enabled`: emitted by the main process before the ServiceTitan audit thread starts. Includes dry-run, backfill, poll interval, lookback, overlap, max-alert cap, enabled rulesets, disabled rules, and whether a Slack channel is configured.
+- `servicetitan_audit_loop_started`: emitted by the ServiceTitan audit thread when continuous polling starts.
+- `servicetitan_audit_startup_delay`: emitted when a startup delay is configured.
+
+Per-cycle logs:
+
+- `servicetitan_audit_cycle_started`: emitted before fetching ServiceTitan jobs. Includes dry-run, backfill, since timestamp, and max-alert cap.
+- `servicetitan_audit_cycle_completed`: compact per-cycle summary with jobs scanned, Sales jobs scanned, Sales pass/fail, Sales would-send, Sales sent, dedupe skipped, cap skipped, failed alerts, dry-run, and backfill.
+- `servicetitan_audit_completed`: detailed cycle summary with all related record counts and rule result counts.
+- `servicetitan_controlled_backfill_alert_attempt`: emitted before a live backfill Slack attempt. If `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE=1`, `manual_validation=true`.
+- `servicetitan_alert_skipped_max_per_cycle`: emitted when the live cap prevents an additional Slack send.
+
 ## Adding A Rule
 
 1. Add a `HandbookRuleDefinition` in `service_titan_handbook.py` when the rule comes from a handbook.
@@ -751,6 +768,54 @@ Review:
 
 Keep dry-run enabled until notification delivery and routing are separately verified.
 
+## Safe Historical Alert Validation
+
+Normal production mode avoids historical flood:
+
+```bash
+SERVICE_TITAN_AUDIT_ENABLED=true \
+SERVICE_TITAN_AUDIT_DRY_RUN=false \
+SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false \
+SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE=25 \
+SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true \
+TECHNICIAN_COMPLIANCE_ENABLED=false \
+DISPATCHER_AUDIT_ENABLED=false \
+SERVICE_TITAN_DISABLED_RULE_IDS_JSON='["sales_photos_missing"]' \
+python3 -m marketing_os_agent run
+```
+
+Safe one-real-historical-Sales-alert validation:
+
+```bash
+SERVICE_TITAN_AUDIT_ENABLED=false \
+SERVICE_TITAN_AUDIT_DRY_RUN=false \
+SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true \
+SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE=1 \
+SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME=false \
+SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true \
+TECHNICIAN_COMPLIANCE_ENABLED=false \
+DISPATCHER_AUDIT_ENABLED=false \
+SERVICE_TITAN_DISABLED_RULE_IDS_JSON='["sales_photos_missing"]' \
+python3 -m marketing_os_agent servicetitan-audit-once
+```
+
+This sends at most one real historical Sales alert to Slack. It respects `SERVICE_TITAN_DISABLED_RULE_IDS_JSON`, does not enable `sales_photos_missing`, and logs `servicetitan_controlled_backfill_alert_attempt` with `manual_validation=true`. If additional historical violations are found, they are recorded without `alert_sent_at`, the max-alert log is emitted, and checkpoint advancement is skipped so nothing is silently lost.
+
+Continuous loop verification:
+
+```bash
+python3 -m marketing_os_agent servicetitan-runtime-diagnostics
+```
+
+Then check Render logs for:
+
+```text
+servicetitan_continuous_audit_enabled
+servicetitan_audit_loop_started
+servicetitan_audit_cycle_started
+servicetitan_audit_cycle_completed
+```
+
 ## Manual QA Checklist
 
 1. Job with proper technician clock-in/out: no violation.
@@ -786,6 +851,7 @@ Keep dry-run enabled until notification delivery and routing are separately veri
 - Keep `SERVICE_TITAN_AUDIT_ENABLED=false` until credentials and Slack alert channel are ready.
 - Set `SERVICE_TITAN_AUDIT_DRY_RUN=true` for the first production validation run.
 - Keep `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false` unless you explicitly want historical first-run alerts.
+- Keep `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE` set. Use `1` only for controlled one-alert historical validation.
 - Set `SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true`.
 - Keep `TECHNICIAN_COMPLIANCE_ENABLED=false` and `DISPATCHER_AUDIT_ENABLED=false` during Sales-only validation.
 - Set `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}` until discovery confirms tenant-specific scope narrowing is needed.
@@ -793,7 +859,7 @@ Keep dry-run enabled until notification delivery and routing are separately veri
 - Run `python3 -m marketing_os_agent servicetitan-discover-scopes` to collect sanitized production scope names/IDs.
 - Configure `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` when the discovered business units/job types/statuses/tags need tenant-specific narrowing.
 - Run `SERVICE_TITAN_AUDIT_ENABLED=false SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-audit-once` with a short lookback for first validation.
-- Watch the command summary and logs for `servicetitan_audit_completed`, `servicetitan_rule_insufficient_data`, `servicetitan_alert_dry_run`, `servicetitan_duplicate_alert_suppressed`, and `servicetitan_alert_sent`.
+- Watch the command summary and logs for `servicetitan_continuous_audit_enabled`, `servicetitan_audit_loop_started`, `servicetitan_audit_cycle_started`, `servicetitan_audit_cycle_completed`, `servicetitan_audit_completed`, `servicetitan_rule_insufficient_data`, `servicetitan_alert_dry_run`, `servicetitan_duplicate_alert_suppressed`, `servicetitan_alert_skipped_max_per_cycle`, and `servicetitan_alert_sent`.
 - After dry-run results look correct, set `SERVICE_TITAN_AUDIT_DRY_RUN=false`, keep `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false`, confirm `SLACK_ALERT_CHANNEL_ID` or `SLACK_MARKETING_OPS_CHANNEL_ID`, then set `SERVICE_TITAN_AUDIT_ENABLED=true` to start continuous polling. The first live cycle establishes a baseline; later cycles alert only new/updated violations.
 
 Render-safe command checklist:
