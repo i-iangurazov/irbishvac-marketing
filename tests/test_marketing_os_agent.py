@@ -10,6 +10,7 @@ import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from logging import LogRecord
+from unittest.mock import patch
 
 from marketing_os_agent.clients.email_client import EmailClient
 from marketing_os_agent.clients.claude import ClaudeClient
@@ -19,6 +20,7 @@ from marketing_os_agent.clients.servicetitan import ServiceTitanApiError, Servic
 from marketing_os_agent.clients.slack import SlackClient
 from marketing_os_agent.config import Settings, load_dotenv
 from marketing_os_agent.app import AgentApp
+from marketing_os_agent.__main__ import _settings_error_diagnostics_text
 from marketing_os_agent.domain.campaign_health import CampaignHealthService
 from marketing_os_agent.domain.owner_mapping import OwnerResolver
 from marketing_os_agent.domain.reports import ReportService, month_bounds, select_campaigns_starting_between, week_bounds
@@ -1596,6 +1598,100 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.sales_alerts_sent, 0)
         self.assertEqual(self.h.slack.messages, [])
         self.assertIsNone(self.h.db.get_service_titan_violation("servicetitan:sales-dry-run:2001:sales_options_fewer_than_three:advisor-1"))
+
+    def test_service_titan_runtime_diagnostics_masks_config_and_shows_state(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_dry_run=False,
+            service_titan_audit_backfill_alerts=False,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_disabled_rule_ids=["sales_photos_missing"],
+            service_titan_rule_scope_config={
+                "rulesets": {
+                    "Sales / Comfort Advisor Audit": {
+                        "applies_to": {
+                            "business_unit_ids": ["fake-sales-bu-id"],
+                            "job_type_ids": ["fake-sales-job-type-id"],
+                            "workflows": None,
+                            "statuses": ["Completed"],
+                        }
+                    }
+                }
+            },
+            slack_bot_token="xoxb-secret-token",
+            slack_alert_channel_id="C123456789",
+        )
+        app = AgentApp(audit_settings)
+        app.initialize_storage()
+        app.db.set_kv("servicetitan_audit_last_processed", "2026-06-15T12:00:00+00:00")
+        run_id = app.db.log_run_start("servicetitan_audit")
+        app.db.log_run_complete(
+            run_id,
+            "completed",
+            {
+                "dry_run": False,
+                "jobs_seen": 3,
+                "sales_fail": 1,
+                "alerts_sent": 1,
+                "alerts_would_send": 0,
+                "alerts_skipped_dedupe": 0,
+                "errors": 0,
+            },
+        )
+        app.db.upsert_service_titan_violation(
+            violation_key="servicetitan:job-1:appt-1:sales_options_fewer_than_three:advisor-1",
+            service_titan_job_id="job-1",
+            appointment_id="appt-1",
+            technician_id="advisor-1",
+            technician_name="Advisor One",
+            dispatcher_id="",
+            dispatcher_name="",
+            rule_id="sales_options_fewer_than_three",
+            ruleset="Sales / Comfort Advisor Audit",
+            severity="high",
+            title="Closed Sales job has fewer than 3 options",
+            description="Closed Sales / Comfort Advisor jobs must show at least three options or estimates.",
+            recommended_action="Review the Sales job.",
+            metadata={},
+        )
+        app.db.mark_service_titan_alert_sent("servicetitan:job-1:appt-1:sales_options_fewer_than_three:advisor-1")
+        text = app.service_titan_runtime_diagnostics_text()
+        self.assertIn("SERVICE_TITAN_AUDIT_ENABLED: True", text)
+        self.assertIn("SLACK_BOT_TOKEN present: True", text)
+        self.assertIn("SLACK_ALERT_CHANNEL_ID: ***6789", text)
+        self.assertIn("sales_photos_missing active: False", text)
+        self.assertIn("servicetitan_audit_last_processed: 2026-06-15T12:00:00+00:00", text)
+        self.assertIn("sales_fail=1", text)
+        self.assertIn("alert_sent: 1", text)
+        self.assertNotIn("xoxb-secret-token", text)
+        self.assertNotIn("Advisor One", text)
+
+    def test_service_titan_runtime_diagnostics_reports_invalid_json_without_secrets(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SERVICE_TITAN_AUDIT_ENABLED": "true",
+                "SERVICE_TITAN_AUDIT_DRY_RUN": "false",
+                "SERVICE_TITAN_AUDIT_BACKFILL_ALERTS": "false",
+                "SALES_COMFORT_ADVISOR_AUDIT_ENABLED": "true",
+                "TECHNICIAN_COMPLIANCE_ENABLED": "false",
+                "DISPATCHER_AUDIT_ENABLED": "false",
+                "SERVICE_TITAN_DISABLED_RULE_IDS_JSON": "[",
+                "SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON": "{\"rulesets\":{}}",
+                "SLACK_BOT_TOKEN": "xoxb-secret-token",
+                "SLACK_ALERT_CHANNEL_ID": "C123456789",
+            },
+            clear=False,
+        ):
+            text = _settings_error_diagnostics_text("SERVICE_TITAN_DISABLED_RULE_IDS_JSON must be valid JSON")
+        self.assertIn("settings_error: SERVICE_TITAN_DISABLED_RULE_IDS_JSON must be valid JSON", text)
+        self.assertIn("SERVICE_TITAN_DISABLED_RULE_IDS_JSON valid list: False", text)
+        self.assertIn("SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON valid object: True", text)
+        self.assertIn("SLACK_BOT_TOKEN present: True", text)
+        self.assertIn("SLACK_ALERT_CHANNEL_ID: ***6789", text)
+        self.assertNotIn("xoxb-secret-token", text)
 
     def test_initial_sales_rollout_keeps_options_and_arrival_enabled_with_photos_disabled(self) -> None:
         audit_settings = settings(

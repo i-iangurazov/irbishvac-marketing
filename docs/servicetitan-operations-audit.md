@@ -800,11 +800,14 @@ Render-safe command checklist:
 
 ```bash
 python3 -m marketing_os_agent init-db
+python3 -m marketing_os_agent servicetitan-runtime-diagnostics
 python3 -m marketing_os_agent servicetitan-discover-scopes
 SERVICE_TITAN_AUDIT_ENABLED=false SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-audit-once
 python3 -m marketing_os_agent servicetitan-alert-test
 NOTIFICATIONS_TEST_SEND=true python3 -m marketing_os_agent servicetitan-alert-test
 ```
+
+The `servicetitan-runtime-diagnostics` command prints masked runtime config, JSON parsing status, rule enablement, checkpoint state, recent audit-cycle summaries, and durable violation/alert dedupe counts. It does not call ServiceTitan or Slack and does not print customer PII or secrets.
 
 The default `servicetitan-alert-test` validates configuration and formats a synthetic ServiceTitan alert without sending it. The `NOTIFICATIONS_TEST_SEND=true` variant sends only the synthetic alert to the configured Slack alert channel.
 

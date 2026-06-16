@@ -318,6 +318,19 @@ class Persistence:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def get_recent_run_logs(self, run_type: str, limit: int = 5) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM agent_run_logs
+                WHERE run_type = ?
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (run_type, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def increment_delay_count(self, task_id: str) -> int:
         return self._increment_counter(task_id, "delay_count")
 
@@ -540,6 +553,56 @@ class Persistence:
                 (violation_key,),
             ).fetchone()
             return dict(row) if row else None
+
+    def get_service_titan_violation_summary(self) -> dict[str, Any]:
+        with self._lock, self._connect() as conn:
+            totals = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_count,
+                    SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) AS resolved_count,
+                    SUM(CASE WHEN alert_sent_at IS NOT NULL THEN 1 ELSE 0 END) AS alert_sent_count,
+                    SUM(CASE WHEN status = 'open' AND alert_sent_at IS NULL THEN 1 ELSE 0 END) AS open_unsent_count
+                FROM service_titan_audit_violations
+                """
+            ).fetchone()
+            by_rule = conn.execute(
+                """
+                SELECT
+                    rule_id,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_count,
+                    SUM(CASE WHEN alert_sent_at IS NOT NULL THEN 1 ELSE 0 END) AS alert_sent_count,
+                    SUM(CASE WHEN status = 'open' AND alert_sent_at IS NULL THEN 1 ELSE 0 END) AS open_unsent_count,
+                    MAX(last_seen_at) AS last_seen_at
+                FROM service_titan_audit_violations
+                GROUP BY rule_id
+                ORDER BY last_seen_at DESC
+                """
+            ).fetchall()
+            latest = conn.execute(
+                """
+                SELECT
+                    violation_key,
+                    service_titan_job_id,
+                    appointment_id,
+                    rule_id,
+                    status,
+                    first_detected_at,
+                    last_seen_at,
+                    resolved_at,
+                    alert_sent_at
+                FROM service_titan_audit_violations
+                ORDER BY last_seen_at DESC
+                LIMIT 10
+                """
+            ).fetchall()
+        return {
+            "totals": dict(totals) if totals else {},
+            "by_rule": [dict(row) for row in by_rule],
+            "latest": [dict(row) for row in latest],
+        }
 
     def ping(self) -> bool:
         try:

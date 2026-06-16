@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -18,7 +19,7 @@ from .domain.formatting import format_friday_roundup_email
 from .domain.reports import ReportService, month_bounds, quarter_bounds, week_bounds
 from .domain.service_titan_audit import ServiceTitanAuditLoop, ServiceTitanAuditService, ServiceTitanAuditSummary
 from .domain.service_titan_discovery import ServiceTitanScopeDiscovery, ServiceTitanScopeDiscoverySummary
-from .domain.service_titan_rules import RESULT_FAIL, RuleResult
+from .domain.service_titan_rules import RESULT_FAIL, RULESET_SALES, RuleResult, active_service_titan_rules
 from .domain.task_processor import TaskProcessor
 from .http_server import AgentHttpServer
 from .models import ValidationReport
@@ -36,6 +37,38 @@ from .scheduler import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _mask_channel(value: str) -> str:
+    if not value:
+        return "<missing>"
+    suffix = value[-4:] if len(value) >= 4 else value
+    return f"***{suffix}"
+
+
+def _json_valid(raw: str, *, expected: str) -> bool:
+    raw = raw.strip()
+    if not raw:
+        return True
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if expected == "list":
+        return isinstance(parsed, list)
+    if expected == "object":
+        return isinstance(parsed, dict)
+    return True
+
+
+def _safe_json_dict(raw: object) -> dict[str, object]:
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 class AgentApp:
@@ -253,6 +286,102 @@ class AgentApp:
             return True, "\n".join(lines)
         lines.append("- Slack send: failed. Check bot token, channel ID, and whether the bot is invited to the channel.")
         return False, "\n".join(lines)
+
+    def service_titan_runtime_diagnostics_text(self) -> str:
+        rules = active_service_titan_rules(self.settings)
+        sales_rules = [rule for rule in rules if rule.ruleset == RULESET_SALES]
+        active_rule_ids = {rule.rule_id for rule in rules}
+        checkpoint = self.db.get_kv("servicetitan_audit_last_processed")
+        run_logs = self.db.get_recent_run_logs("servicetitan_audit", limit=5)
+        violations = self.db.get_service_titan_violation_summary()
+        disabled_raw = os.getenv("SERVICE_TITAN_DISABLED_RULE_IDS_JSON", "")
+        scope_raw = os.getenv("SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON", "")
+        channel = self.settings.slack_alert_channel_id or self.settings.slack_marketing_ops_channel_id
+
+        lines = [
+            "ServiceTitan runtime diagnostics",
+            "- sanitized: true",
+            "- customer names, addresses, phone numbers, emails, raw notes, client secrets, Slack tokens, and access tokens are not printed",
+            "- runtime config:",
+            f"  - SERVICE_TITAN_AUDIT_ENABLED: {self.settings.service_titan_audit_enabled}",
+            f"  - SERVICE_TITAN_AUDIT_DRY_RUN: {self.settings.service_titan_audit_dry_run}",
+            f"  - SERVICE_TITAN_AUDIT_BACKFILL_ALERTS: {self.settings.service_titan_audit_backfill_alerts}",
+            f"  - SERVICE_TITAN_AUDIT_POLL_INTERVAL_SECONDS: {self.settings.service_titan_audit_poll_interval_seconds}",
+            f"  - SERVICE_TITAN_AUDIT_STARTUP_DELAY_SECONDS: {self.settings.service_titan_audit_startup_delay_seconds}",
+            f"  - SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES: {self.settings.service_titan_audit_lookback_minutes}",
+            f"  - SERVICE_TITAN_AUDIT_OVERLAP_SECONDS: {self.settings.service_titan_audit_overlap_seconds}",
+            f"  - SALES_COMFORT_ADVISOR_AUDIT_ENABLED: {self.settings.sales_comfort_advisor_audit_enabled}",
+            f"  - TECHNICIAN_COMPLIANCE_ENABLED: {self.settings.technician_compliance_enabled}",
+            f"  - DISPATCHER_AUDIT_ENABLED: {self.settings.dispatcher_audit_enabled}",
+            f"  - SERVICE_TITAN_DISABLED_RULE_IDS_JSON valid: {_json_valid(disabled_raw, expected='list')}",
+            f"  - SERVICE_TITAN_DISABLED_RULE_IDS_JSON parsed: {json.dumps(self.settings.service_titan_disabled_rule_ids, sort_keys=True)}",
+            f"  - SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON valid: {_json_valid(scope_raw, expected='object')}",
+            f"  - SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON parsed: {json.dumps(self.settings.service_titan_rule_scope_config, sort_keys=True, separators=(',', ':'))}",
+            f"  - SLACK_BOT_TOKEN present: {bool(self.settings.slack_bot_token)}",
+            f"  - SLACK_ALERT_CHANNEL_ID: {_mask_channel(self.settings.slack_alert_channel_id)}",
+            f"  - effective Slack audit channel: {_mask_channel(channel)}",
+            "- rules:",
+            f"  - active ServiceTitan rules: {len(rules)}",
+            f"  - active Sales rules: {', '.join(rule.rule_id for rule in sales_rules) if sales_rules else '<none>'}",
+            f"  - sales_options_fewer_than_three active: {'sales_options_fewer_than_three' in active_rule_ids}",
+            f"  - sales_arrival_after_first_half active: {'sales_arrival_after_first_half' in active_rule_ids}",
+            f"  - sales_photos_missing active: {'sales_photos_missing' in active_rule_ids}",
+            "- checkpoint:",
+            f"  - servicetitan_audit_last_processed: {checkpoint or '<none>'}",
+            f"  - first-run baseline likely on next live cycle: {not checkpoint and not self.settings.service_titan_audit_dry_run and not self.settings.service_titan_audit_backfill_alerts}",
+            "- recent audit cycles:",
+        ]
+        if run_logs:
+            for row in run_logs:
+                details = _safe_json_dict(row.get("details_json"))
+                lines.append(
+                    "  - "
+                    + f"id={row.get('id')} status={row.get('status')} started_at={row.get('started_at')} completed_at={row.get('completed_at')} "
+                    + f"dry_run={details.get('dry_run', '<unknown>')} jobs={details.get('jobs_seen', '<unknown>')} "
+                    + f"sales_fail={details.get('sales_fail', '<unknown>')} alerts_sent={details.get('alerts_sent', '<unknown>')} "
+                    + f"alerts_would_send={details.get('alerts_would_send', '<unknown>')} deduped={details.get('alerts_skipped_dedupe', '<unknown>')} "
+                    + f"errors={details.get('errors', '<unknown>')}"
+                )
+        else:
+            lines.append("  - <none>")
+
+        totals = violations.get("totals", {})
+        lines.extend(
+            [
+                "- durable violation summary:",
+                f"  - total: {int(totals.get('total') or 0)}",
+                f"  - open: {int(totals.get('open_count') or 0)}",
+                f"  - resolved: {int(totals.get('resolved_count') or 0)}",
+                f"  - alert_sent: {int(totals.get('alert_sent_count') or 0)}",
+                f"  - open_unsent_retryable: {int(totals.get('open_unsent_count') or 0)}",
+                "  - by rule:",
+            ]
+        )
+        by_rule = violations.get("by_rule", [])
+        if by_rule:
+            for row in by_rule:
+                lines.append(
+                    "    - "
+                    + f"{row.get('rule_id')}: total={int(row.get('total') or 0)} open={int(row.get('open_count') or 0)} "
+                    + f"alert_sent={int(row.get('alert_sent_count') or 0)} open_unsent={int(row.get('open_unsent_count') or 0)} "
+                    + f"last_seen_at={row.get('last_seen_at') or '<none>'}"
+                )
+        else:
+            lines.append("    - <none>")
+        lines.append("  - latest:")
+        latest = violations.get("latest", [])
+        if latest:
+            for row in latest:
+                lines.append(
+                    "    - "
+                    + f"job_id={row.get('service_titan_job_id')} appointment_id={row.get('appointment_id') or '<none>'} "
+                    + f"rule_id={row.get('rule_id')} status={row.get('status')} "
+                    + f"first_detected_at={row.get('first_detected_at')} last_seen_at={row.get('last_seen_at')} "
+                    + f"alert_sent_at={row.get('alert_sent_at') or '<none>'}"
+                )
+        else:
+            lines.append("    - <none>")
+        return "\n".join(lines)
 
     def validate_notion(self) -> ValidationReport:
         return self.notion.validate_databases()

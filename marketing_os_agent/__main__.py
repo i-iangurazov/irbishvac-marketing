@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import signal
 import sys
 import threading
 
 from .app import AgentApp
-from .config import Settings
+from .config import Settings, load_dotenv
 from .logging_config import configure_logging
 
 
@@ -24,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("repost-missing-slack-updates", help="Retry transition Slack posts that previously failed before a Slack timestamp was stored")
     sub.add_parser("servicetitan-audit-once", help="Run one ServiceTitan operations audit cycle")
     sub.add_parser("servicetitan-discover-scopes", help="Print sanitized ServiceTitan scope values for rule configuration")
+    sub.add_parser("servicetitan-runtime-diagnostics", help="Print masked ServiceTitan runtime config and audit state")
     sub.add_parser("notifications-test", help="Validate notification configuration and optionally send a Slack test message")
     sub.add_parser("servicetitan-alert-test", help="Build a synthetic ServiceTitan alert and optionally send it to Slack")
     email_test = sub.add_parser("email-test", help="Validate SMTP configuration and optionally send a safe test email")
@@ -48,7 +51,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     command = args.command or "run"
 
-    settings = Settings.from_env()
+    try:
+        settings = Settings.from_env()
+    except ValueError as exc:
+        if command == "servicetitan-runtime-diagnostics":
+            load_dotenv()
+            configure_logging(os.getenv("LOG_LEVEL", "INFO"))
+            print(_settings_error_diagnostics_text(str(exc)))
+            return 1
+        raise
     configure_logging(settings.log_level)
     app = AgentApp(settings)
 
@@ -105,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
         summary = app.run_service_titan_scope_discovery()
         print("\n".join(summary.to_lines()))
         return 1 if summary.status in {"config_error", "api_error"} else 0
+
+    if command == "servicetitan-runtime-diagnostics":
+        app.initialize_storage()
+        print(app.service_titan_runtime_diagnostics_text())
+        return 0
 
     if command == "notifications-test":
         ok, text = app.notifications_test_text()
@@ -197,6 +213,50 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, handle_signal)
     app.run(stop_event)
     return 0
+
+
+def _settings_error_diagnostics_text(error: str) -> str:
+    disabled_raw = os.getenv("SERVICE_TITAN_DISABLED_RULE_IDS_JSON", "").strip()
+    scope_raw = os.getenv("SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON", "").strip()
+    channel = os.getenv("SLACK_ALERT_CHANNEL_ID", "")
+    return "\n".join(
+        [
+            "ServiceTitan runtime diagnostics",
+            "- sanitized: true",
+            f"- settings_error: {error}",
+            "- runtime config could not be fully parsed; fix the error above, then rerun diagnostics",
+            f"- SERVICE_TITAN_AUDIT_ENABLED raw: {os.getenv('SERVICE_TITAN_AUDIT_ENABLED', '<unset>')}",
+            f"- SERVICE_TITAN_AUDIT_DRY_RUN raw: {os.getenv('SERVICE_TITAN_AUDIT_DRY_RUN', '<unset>')}",
+            f"- SERVICE_TITAN_AUDIT_BACKFILL_ALERTS raw: {os.getenv('SERVICE_TITAN_AUDIT_BACKFILL_ALERTS', '<unset>')}",
+            f"- SALES_COMFORT_ADVISOR_AUDIT_ENABLED raw: {os.getenv('SALES_COMFORT_ADVISOR_AUDIT_ENABLED', '<unset>')}",
+            f"- TECHNICIAN_COMPLIANCE_ENABLED raw: {os.getenv('TECHNICIAN_COMPLIANCE_ENABLED', '<unset>')}",
+            f"- DISPATCHER_AUDIT_ENABLED raw: {os.getenv('DISPATCHER_AUDIT_ENABLED', '<unset>')}",
+            f"- SERVICE_TITAN_DISABLED_RULE_IDS_JSON valid list: {_raw_json_valid(disabled_raw, expected='list')}",
+            f"- SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON valid object: {_raw_json_valid(scope_raw, expected='object')}",
+            f"- SLACK_BOT_TOKEN present: {bool(os.getenv('SLACK_BOT_TOKEN'))}",
+            f"- SLACK_ALERT_CHANNEL_ID: {_mask_channel(channel)}",
+        ]
+    )
+
+
+def _raw_json_valid(raw: str, *, expected: str) -> bool:
+    if not raw:
+        return True
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if expected == "list":
+        return isinstance(parsed, list)
+    if expected == "object":
+        return isinstance(parsed, dict)
+    return True
+
+
+def _mask_channel(value: str) -> str:
+    if not value:
+        return "<missing>"
+    return f"***{value[-4:]}"
 
 
 if __name__ == "__main__":
