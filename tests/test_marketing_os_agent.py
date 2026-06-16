@@ -1251,6 +1251,79 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.alerts_skipped_limit, 1)
         self.assertEqual(self.h.db.get_kv("servicetitan_audit_last_processed"), "2026-06-16T07:55:00+00:00")
 
+    def test_sales_only_client_prefilter_uses_configured_scope_before_enrichment(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_rule_scope_config={
+                "rulesets": {
+                    "Sales / Comfort Advisor Audit": {
+                        "applies_to": {
+                            "business_unit_ids": ["1812"],
+                            "job_type_ids": ["1816"],
+                            "workflows": None,
+                            "statuses": ["Completed", "Closed"],
+                        }
+                    }
+                }
+            },
+        )
+        client = ServiceTitanClient(audit_settings)
+        records = [
+            {"id": 1, "status": "Completed", "businessUnitId": 1812, "jobTypeId": 1816},
+            {"id": 2, "status": "Rescheduled", "businessUnitId": 1812, "jobTypeId": 1816},
+            {"id": 3, "status": "Completed", "businessUnitId": 9999, "jobTypeId": 1816},
+        ]
+        filtered = client._prefilter_sales_only_records(records)
+        self.assertEqual([record["id"] for record in filtered], [1])
+
+    def test_sales_only_client_prefilter_is_disabled_without_scope_config(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_rule_scope_config={},
+        )
+        client = ServiceTitanClient(audit_settings)
+        records = [
+            {"id": 1, "status": "Completed", "businessUnitId": 1812, "jobTypeId": 1816},
+            {"id": 2, "status": "Rescheduled", "businessUnitId": 1812, "jobTypeId": 1816},
+        ]
+        self.assertEqual(client._prefilter_sales_only_records(records), records)
+
+    def test_sales_only_client_skips_unneeded_related_categories_when_photos_disabled(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_disabled_rule_ids=["sales_photos_missing"],
+        )
+        client = ServiceTitanClient(audit_settings)
+        self.assertTrue(client._should_fetch_related_category("appointments"))
+        self.assertTrue(client._should_fetch_related_category("appointment_assignments"))
+        self.assertTrue(client._should_fetch_related_category("estimates"))
+        self.assertTrue(client._should_fetch_related_category("opportunities"))
+        self.assertFalse(client._should_fetch_related_category("invoices"))
+        self.assertFalse(client._should_fetch_related_category("technician_time"))
+        self.assertFalse(client._should_fetch_related_category("attachments"))
+        self.assertFalse(client._should_fetch_related_category("forms"))
+
+    def test_sales_only_client_fetches_photo_sources_when_photos_rule_enabled(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_disabled_rule_ids=[],
+        )
+        client = ServiceTitanClient(audit_settings)
+        self.assertTrue(client._should_fetch_related_category("attachments"))
+        self.assertTrue(client._should_fetch_related_category("forms"))
+
     def test_service_titan_pass_and_insufficient_results_do_not_alert(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
         pass_audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([st_job("pass-job")]), self.h.slack)

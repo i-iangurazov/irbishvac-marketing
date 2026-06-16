@@ -149,7 +149,37 @@ class ServiceTitanClient:
                 "sort": "+ModifiedOn",
             },
         )
+        records = self._prefilter_sales_only_records(records)
         return [self._enrich_job(parse_service_titan_job(record, self.settings)) for record in records]
+
+    def _prefilter_sales_only_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not self._should_prefilter_sales_only():
+            return records
+        scope = _sales_ruleset_applies_to(self.settings)
+        if not scope:
+            return records
+        parsed = [parse_service_titan_job(record, self.settings) for record in records]
+        filtered = [record for record, job in zip(records, parsed) if _sales_scope_matches_job(job, scope)]
+        logger.info(
+            "servicetitan_sales_prefilter_applied",
+            extra={"records_seen": len(records), "records_kept": len(filtered)},
+        )
+        return filtered
+
+    def _should_prefilter_sales_only(self) -> bool:
+        return bool(
+            self.settings.sales_comfort_advisor_audit_enabled
+            and not self.settings.technician_compliance_enabled
+            and not self.settings.dispatcher_audit_enabled
+        )
+
+    def _should_fetch_related_category(self, category: str) -> bool:
+        if not self._should_prefilter_sales_only():
+            return True
+        allowed = {"appointments", "appointment_assignments", "estimates", "opportunities"}
+        if "sales_photos_missing" not in set(self.settings.service_titan_disabled_rule_ids):
+            allowed.update({"attachments", "forms"})
+        return category in allowed
 
     def _enrich_job(self, job: ServiceTitanJob) -> ServiceTitanJob:
         present_fields = set(job.present_fields)
@@ -672,6 +702,8 @@ class ServiceTitanClient:
         )
 
     def _related_records(self, category: str, path: str, params: dict[str, str]) -> tuple[list[dict[str, Any]], str | None]:
+        if not self._should_fetch_related_category(category):
+            return [], f"{category} skipped for Sales-only enabled rules"
         if category in self._disabled_related_categories:
             return [], self._disabled_related_reasons.get(category) or f"{category} endpoint unavailable earlier in this process"
         payload = {"pageSize": str(self.settings.service_titan_audit_page_size), "includeTotal": "true", **{k: v for k, v in params.items() if v}}
@@ -1518,6 +1550,91 @@ def _records_text(records: list[dict[str, Any]]) -> str:
     for record in records:
         visit(record)
     return " ".join(parts)
+
+
+def _sales_ruleset_applies_to(settings: Settings) -> dict[str, Any]:
+    config = settings.service_titan_rule_scope_config or {}
+    rulesets = config.get("rulesets")
+    if not isinstance(rulesets, dict):
+        return {}
+    sales = rulesets.get("Sales / Comfort Advisor Audit")
+    if not isinstance(sales, dict):
+        return {}
+    applies = sales.get("applies_to")
+    if not isinstance(applies, dict):
+        return {}
+    for key in (
+        "business_units",
+        "business_unit_ids",
+        "job_types",
+        "job_types_contains",
+        "job_type_ids",
+        "statuses",
+        "job_statuses",
+        "tags",
+        "tags_contains",
+        "tag_ids",
+        "campaigns",
+        "lead_sources",
+        "workflows",
+        "workflow_contains",
+    ):
+        value = applies.get(key)
+        if value is not None and _scope_patterns(value):
+            return applies
+    return {}
+
+
+def _sales_scope_matches_job(job: ServiceTitanJob, applies: dict[str, Any]) -> bool:
+    checks = (
+        (("business_units", "business_unit_ids"), [job.business_unit_id, job.business_unit_name]),
+        (("job_types", "job_types_contains", "job_type_ids"), [job.job_type_id, job.job_type_name]),
+        (("statuses", "job_statuses"), [job.status]),
+        (("tags", "tags_contains", "tag_ids"), [*job.tag_ids, *job.tag_names]),
+        (("campaigns", "lead_sources"), [job.campaign_id, job.campaign_name]),
+        (("workflows", "workflow_contains"), [job.workflow, job.job_type_name, job.business_unit_name, job.department, job.trade, *job.tag_names]),
+    )
+    for keys, values in checks:
+        patterns = _patterns_for_keys(applies, keys)
+        if patterns and not _values_match_patterns(values, patterns):
+            return False
+    return True
+
+
+def _patterns_for_keys(config: dict[str, Any], keys: tuple[str, ...]) -> tuple[str, ...]:
+    patterns: list[str] = []
+    for key in keys:
+        if key in config and config.get(key) is None:
+            continue
+        patterns.extend(_scope_patterns(config.get(key)))
+    return tuple(patterns)
+
+
+def _scope_patterns(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,) if value.strip() else ()
+    if isinstance(value, (int, float)):
+        return (str(value),)
+    if isinstance(value, list):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return ()
+
+
+def _values_match_patterns(values: list[str], patterns: tuple[str, ...]) -> bool:
+    normalized_values = [_normalize_scope_value(value) for value in values if value]
+    for pattern in patterns:
+        normalized_pattern = _normalize_scope_value(pattern)
+        if not normalized_pattern:
+            continue
+        if any(normalized_pattern in value or value in normalized_pattern for value in normalized_values):
+            return True
+    return False
+
+
+def _normalize_scope_value(value: str) -> str:
+    return " ".join(str(value).lower().replace("_", " ").replace("-", " ").split())
 
 
 def _has_keywords(text: str, keywords: tuple[str, ...] | list[str]) -> bool:
