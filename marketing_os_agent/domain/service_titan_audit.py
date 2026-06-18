@@ -51,6 +51,9 @@ class ServiceTitanAuditSummary:
     backfill_alerts: bool = False
     checkpoint_ignored: bool = False
     baseline_initialized: bool = False
+    raw_jobs_fetched: int = 0
+    jobs_skipped_before_enrichment: int = 0
+    jobs_enriched: int = 0
     jobs_scanned: int = 0
     appointments_scanned: int = 0
     invoices_scanned: int = 0
@@ -112,6 +115,7 @@ class ServiceTitanAuditSummary:
             f"- backfill_alerts: {self.backfill_alerts}",
             f"- checkpoint_ignored: {self.checkpoint_ignored}",
             f"- baseline_initialized: {self.baseline_initialized}",
+            f"ServiceTitan audit scope filter: raw={self.raw_jobs_fetched}, skipped_before_enrichment={self.jobs_skipped_before_enrichment}, enriched={self.jobs_enriched}",
             f"- jobs scanned: {self.jobs_scanned}",
             f"- appointments scanned: {self.appointments_scanned}",
             f"- invoices scanned: {self.invoices_scanned}",
@@ -536,6 +540,18 @@ class ServiceTitanAuditService:
             summary.errors = 1
             return summary
 
+        scope_filter_stats = getattr(self.client, "last_scope_filter_stats", {}) or {}
+        summary.raw_jobs_fetched = int(scope_filter_stats.get("raw_jobs_fetched") or len(jobs))
+        summary.jobs_skipped_before_enrichment = int(scope_filter_stats.get("jobs_skipped_before_enrichment") or 0)
+        summary.jobs_enriched = int(scope_filter_stats.get("jobs_enriched") or len(jobs))
+        logger.info(
+            "servicetitan_audit_scope_filter",
+            extra={
+                "raw_jobs_fetched": summary.raw_jobs_fetched,
+                "jobs_skipped_before_enrichment": summary.jobs_skipped_before_enrichment,
+                "jobs_enriched": summary.jobs_enriched,
+            },
+        )
         counts = {RESULT_PASS: 0, RESULT_FAIL: 0, RESULT_INSUFFICIENT: 0, RESULT_NOT_APPLICABLE: 0, RESULT_ERROR: 0}
         summary.jobs_scanned = len(jobs)
         summary.appointments_scanned = sum(job.related_counts.get("appointments", 0) for job in jobs)
@@ -698,6 +714,9 @@ class ServiceTitanAuditService:
             run_id,
             "completed",
             {
+                "raw_jobs_fetched": summary.raw_jobs_fetched,
+                "jobs_skipped_before_enrichment": summary.jobs_skipped_before_enrichment,
+                "jobs_enriched": summary.jobs_enriched,
                 "jobs_seen": len(jobs),
                 "appointments_seen": summary.appointments_scanned,
                 "invoices_seen": summary.invoices_scanned,
@@ -758,6 +777,9 @@ class ServiceTitanAuditService:
         logger.info(
             "servicetitan_audit_completed",
             extra={
+                "raw_jobs_fetched": summary.raw_jobs_fetched,
+                "jobs_skipped_before_enrichment": summary.jobs_skipped_before_enrichment,
+                "jobs_enriched": summary.jobs_enriched,
                 "jobs_seen": len(jobs),
                 "appointments_seen": summary.appointments_scanned,
                 "invoices_seen": summary.invoices_scanned,
@@ -816,6 +838,9 @@ class ServiceTitanAuditService:
         logger.info(
             "servicetitan_audit_cycle_completed",
             extra={
+                "raw_jobs_fetched": summary.raw_jobs_fetched,
+                "jobs_skipped_before_enrichment": summary.jobs_skipped_before_enrichment,
+                "jobs_enriched": summary.jobs_enriched,
                 "jobs_scanned": summary.jobs_scanned,
                 "sales_jobs_scanned": summary.sales_jobs_scanned,
                 "sales_pass": summary.sales_pass,

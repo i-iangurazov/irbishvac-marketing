@@ -128,6 +128,11 @@ class ServiceTitanClient:
         self._token_expires_at: datetime | None = None
         self._disabled_related_categories: set[str] = set()
         self._disabled_related_reasons: dict[str, str] = {}
+        self.last_scope_filter_stats: dict[str, int] = {
+            "raw_jobs_fetched": 0,
+            "jobs_skipped_before_enrichment": 0,
+            "jobs_enriched": 0,
+        }
 
     @property
     def available(self) -> bool:
@@ -149,9 +154,76 @@ class ServiceTitanClient:
                 "sort": "+ModifiedOn",
             },
         )
+        self.last_scope_filter_stats = {
+            "raw_jobs_fetched": len(records),
+            "jobs_skipped_before_enrichment": 0,
+            "jobs_enriched": len(records),
+        }
         if apply_ruleset_prefilter:
-            records = self._prefilter_sales_only_records(records)
-        return [self._enrich_job(parse_service_titan_job(record, self.settings)) for record in records]
+            records = self._prefilter_scope_records(records)
+        jobs = [self._enrich_job(parse_service_titan_job(record, self.settings)) for record in records]
+        self.last_scope_filter_stats["jobs_enriched"] = len(jobs)
+        return jobs
+
+    def _prefilter_scope_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        from ..domain.service_titan_rules import (
+            RESULT_INSUFFICIENT,
+            active_service_titan_rules,
+            _applicability_decision,
+            _effective_rule,
+        )
+
+        rules = active_service_titan_rules(self.settings)
+        if not rules:
+            self.last_scope_filter_stats = {
+                "raw_jobs_fetched": len(records),
+                "jobs_skipped_before_enrichment": len(records),
+                "jobs_enriched": 0,
+            }
+            logger.info(
+                "servicetitan_scope_prefilter_applied",
+                extra={
+                    "raw_jobs_fetched": len(records),
+                    "jobs_skipped_before_enrichment": len(records),
+                    "jobs_enriched": 0,
+                    "enabled_rulesets": [],
+                },
+            )
+            return []
+
+        filtered: list[dict[str, Any]] = []
+        rulesets = sorted({rule.ruleset for rule in rules})
+        for record in records:
+            job = parse_service_titan_job(record, self.settings)
+            keep = False
+            for rule in rules:
+                effective_rule = _effective_rule(rule, self.settings)
+                decision = _applicability_decision(job, effective_rule.scope)
+                if decision.status == "applies" or decision.status == RESULT_INSUFFICIENT:
+                    keep = True
+                    break
+                if _scope_filter_decision_is_uncertain(job, decision.metadata):
+                    keep = True
+                    break
+            if keep:
+                filtered.append(record)
+
+        skipped = len(records) - len(filtered)
+        self.last_scope_filter_stats = {
+            "raw_jobs_fetched": len(records),
+            "jobs_skipped_before_enrichment": skipped,
+            "jobs_enriched": len(filtered),
+        }
+        logger.info(
+            "servicetitan_scope_prefilter_applied",
+            extra={
+                "raw_jobs_fetched": len(records),
+                "jobs_skipped_before_enrichment": skipped,
+                "jobs_enriched": len(filtered),
+                "enabled_rulesets": rulesets,
+            },
+        )
+        return filtered
 
     def _prefilter_sales_only_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not self._should_prefilter_sales_only():
@@ -878,6 +950,57 @@ class ServiceTitanClient:
         self._access_token = str(response.data["access_token"])
         self._token_expires_at = now + timedelta(seconds=max(60, expires_in))
         return self._access_token
+
+
+def _scope_filter_decision_is_uncertain(job: ServiceTitanJob, metadata: dict[str, object]) -> bool:
+    if metadata.get("scope_decision") != "include_mismatch":
+        return False
+    field = str(metadata.get("field") or "")
+    raw_patterns = metadata.get("patterns")
+    patterns = [str(value) for value in raw_patterns] if isinstance(raw_patterns, list) else []
+    values = _scope_filter_context_values(job, field)
+    if not values:
+        return True
+    return bool(
+        patterns
+        and all(_looks_like_numeric_identifier(value) for value in values)
+        and any(not _looks_like_numeric_identifier(pattern) for pattern in patterns)
+    )
+
+
+def _scope_filter_context_values(job: ServiceTitanJob, field: str) -> list[str]:
+    if field == "status":
+        return [job.status] if job.status else []
+    if field == "job_type":
+        return [value for value in (job.job_type_id, job.job_type_name) if value]
+    if field == "business_unit":
+        return [value for value in (job.business_unit_id, job.business_unit_name) if value]
+    if field == "department":
+        return [job.department] if job.department else []
+    if field == "trade":
+        return [job.trade] if job.trade else []
+    if field == "workflow":
+        return [
+            value
+            for value in (
+                job.workflow,
+                job.job_type_name,
+                job.business_unit_name,
+                job.department,
+                job.trade,
+                *job.tag_names,
+            )
+            if value
+        ]
+    if field == "tags":
+        return [*job.tag_ids, *job.tag_names]
+    if field == "campaign":
+        return [value for value in (job.campaign_id, job.campaign_name) if value]
+    return []
+
+
+def _looks_like_numeric_identifier(value: str) -> bool:
+    return value.strip().isdigit()
 
 
 def parse_service_titan_job(payload: dict[str, Any], settings: Settings) -> ServiceTitanJob:

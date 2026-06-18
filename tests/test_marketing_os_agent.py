@@ -668,6 +668,20 @@ class FakeServiceTitan:
         return self.jobs
 
 
+class ScopeFilteringServiceTitan(ServiceTitanClient):
+    def __init__(self, settings: Settings, records: list[dict[str, object]]) -> None:
+        super().__init__(settings)
+        self.records = records
+        self.enriched_job_ids: list[str] = []
+
+    def _get_paginated(self, path: str, params: dict[str, str], *, related_category: str | None = None) -> list[dict[str, object]]:
+        return self.records
+
+    def _enrich_job(self, job: ServiceTitanJob) -> ServiceTitanJob:
+        self.enriched_job_ids.append(job.job_id)
+        return job
+
+
 def st_enrichment_http(
     *,
     job_payload: dict[str, object] | None = None,
@@ -1378,6 +1392,134 @@ class MarketingOsAgentTests(unittest.TestCase):
             {"id": 2, "status": "Rescheduled", "businessUnitId": 1812, "jobTypeId": 1816},
         ]
         self.assertEqual(client._prefilter_sales_only_records(records), records)
+
+    def test_scope_filter_skips_out_of_scope_jobs_before_enrichment(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        client = ScopeFilteringServiceTitan(
+            audit_settings,
+            [
+                {"id": "plumbing-match", "status": "Completed", "businessUnitId": "64315277", "jobTypeId": "112338076"},
+                {"id": "plumbing-sales", "status": "Completed", "businessUnitId": "64326403", "jobTypeId": "123562931"},
+                {"id": "hvac-service", "status": "Completed", "businessUnitId": "1810", "jobTypeId": "1933"},
+            ],
+        )
+        jobs = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))
+        self.assertEqual([job.job_id for job in jobs], ["plumbing-match"])
+        self.assertEqual(client.enriched_job_ids, ["plumbing-match"])
+        self.assertEqual(client.last_scope_filter_stats["raw_jobs_fetched"], 3)
+        self.assertEqual(client.last_scope_filter_stats["jobs_skipped_before_enrichment"], 2)
+        self.assertEqual(client.last_scope_filter_stats["jobs_enriched"], 1)
+
+    def test_scope_filter_keeps_sales_jobs_for_sales_ruleset(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=True,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=False,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_rule_scope_config={
+                "rulesets": {
+                    "Sales / Comfort Advisor Audit": {
+                        "applies_to": {
+                            "business_unit_ids": ["1812"],
+                            "job_type_ids": ["1816"],
+                            "workflows": None,
+                            "statuses": ["Completed", "Closed"],
+                        }
+                    }
+                }
+            },
+        )
+        client = ScopeFilteringServiceTitan(
+            audit_settings,
+            [
+                {"id": "sales-match", "status": "Completed", "businessUnitId": "1812", "jobTypeId": "1816"},
+                {"id": "sales-wrong-status", "status": "Rescheduled", "businessUnitId": "1812", "jobTypeId": "1816"},
+                {"id": "plumbing-service", "status": "Completed", "businessUnitId": "64315277", "jobTypeId": "112338076"},
+            ],
+        )
+        jobs = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))
+        self.assertEqual([job.job_id for job in jobs], ["sales-match"])
+        self.assertEqual(client.enriched_job_ids, ["sales-match"])
+
+    def test_scope_filter_keeps_hvac_jobs_when_hvac_enabled(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            plumbing_service_audit_enabled=False,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        client = ScopeFilteringServiceTitan(
+            audit_settings,
+            [
+                {
+                    "id": "hvac-match",
+                    "status": "Completed",
+                    "businessUnit": {"id": "1810", "name": "HVAC - Service"},
+                    "jobType": {"id": "1933", "name": "HVAC Diagnostic"},
+                },
+                {
+                    "id": "plumbing-service",
+                    "status": "Completed",
+                    "businessUnit": {"id": "64315277", "name": "Plumbing - Service"},
+                    "jobType": {"id": "112338076", "name": "Plumbing Diagnostic"},
+                },
+            ],
+        )
+        jobs = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))
+        self.assertEqual([job.job_id for job in jobs], ["hvac-match"])
+        self.assertEqual(client.enriched_job_ids, ["hvac-match"])
+
+    def test_scope_filter_disabled_rulesets_do_not_trigger_enrichment(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=False,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        client = ScopeFilteringServiceTitan(
+            audit_settings,
+            [{"id": "raw-job", "status": "Completed", "businessUnitId": "64315277", "jobTypeId": "112338076"}],
+        )
+        jobs = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))
+        self.assertEqual(jobs, [])
+        self.assertEqual(client.enriched_job_ids, [])
+        self.assertEqual(client.last_scope_filter_stats["jobs_skipped_before_enrichment"], 1)
+
+    def test_service_titan_audit_summary_includes_scope_filter_counts(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        client = FakeServiceTitan([])
+        client.last_scope_filter_stats = {"raw_jobs_fetched": 5, "jobs_skipped_before_enrichment": 4, "jobs_enriched": 1}
+        summary = ServiceTitanAuditService(audit_settings, self.h.db, client, self.h.slack).audit_once(
+            datetime(2026, 5, 15, 16, tzinfo=timezone.utc)
+        )
+        self.assertEqual(summary.raw_jobs_fetched, 5)
+        self.assertEqual(summary.jobs_skipped_before_enrichment, 4)
+        self.assertEqual(summary.jobs_enriched, 1)
+        self.assertIn(
+            "ServiceTitan audit scope filter: raw=5, skipped_before_enrichment=4, enriched=1",
+            summary.to_lines(),
+        )
 
     def test_scope_discovery_does_not_apply_sales_only_prefilter(self) -> None:
         audit_settings = settings(
