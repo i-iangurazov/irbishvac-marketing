@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from ..clients.servicetitan import ServiceTitanApiError, ServiceTitanClient, ServiceTitanJob
 from ..clients.slack import SlackClient
-from ..config import Settings
+from ..config import DEFAULT_SERVICE_TITAN_BUSINESS_UNIT_LABELS, Settings
 from ..models import parse_notion_datetime
 from ..persistence import Persistence
 from .service_titan_rules import (
@@ -61,6 +61,7 @@ class ServiceTitanAuditSummary:
     not_applicable_by_rule: dict[str, int] = field(default_factory=dict)
     missing_data_category_counts: dict[str, int] = field(default_factory=dict)
     alert_destination_counts: dict[str, int] = field(default_factory=dict)
+    alert_business_unit_counts: dict[str, int] = field(default_factory=dict)
     alerts_sent: int = 0
     alerts_would_send: int = 0
     alerts_skipped_dedupe: int = 0
@@ -130,6 +131,10 @@ class ServiceTitanAuditSummary:
             lines.append("- alert destinations:")
             for destination, count in sorted(self.alert_destination_counts.items()):
                 lines.append(f"  - {destination}: {count}")
+        if self.alert_business_unit_counts:
+            lines.append("- alert business units:")
+            for business_unit, count in sorted(self.alert_business_unit_counts.items()):
+                lines.append(f"  - {business_unit}: {count}")
         if self.config_errors:
             lines.append("- config errors:")
             lines.extend(f"  - {item}" for item in self.config_errors)
@@ -261,6 +266,8 @@ class ServiceTitanAuditService:
                         summary.violations_detected += 1
                         destination = result.recommended_alert_recipient or "slack audit channel"
                         summary.alert_destination_counts[destination] = summary.alert_destination_counts.get(destination, 0) + 1
+                        business_unit = self._business_unit_classification(job)
+                        summary.alert_business_unit_counts[business_unit["label"]] = summary.alert_business_unit_counts.get(business_unit["label"], 0) + 1
                         alert_status = self._record_and_alert(
                             job,
                             result,
@@ -482,6 +489,11 @@ class ServiceTitanAuditService:
             "appointment_id": job.appointment_id,
             "technician_name": job.technician_name,
             "dispatcher_name": job.dispatcher_name,
+            "business_unit_label": self._business_unit_classification(job)["label"],
+            "business_unit_id": job.business_unit_id,
+            "business_unit_name": job.business_unit_name,
+            "job_type_id": job.job_type_id,
+            "job_type_name": job.job_type_name,
             "alert_recipient": result.recommended_alert_recipient,
             "delivery": result.delivery,
             "handbook_source": result.handbook_source,
@@ -494,7 +506,17 @@ class ServiceTitanAuditService:
                 return "deduped"
             logger.info(
                 "servicetitan_alert_dry_run",
-                extra={"violation_key": result.violation_key, "rule_id": result.rule_id, "severity": result.severity, "job_id": job.job_id},
+                extra={
+                    "violation_key": result.violation_key,
+                    "rule_id": result.rule_id,
+                    "severity": result.severity,
+                    "job_id": job.job_id,
+                    "business_unit_label": self._business_unit_classification(job)["label"],
+                    "business_unit_id": job.business_unit_id,
+                    "business_unit_name": job.business_unit_name,
+                    "job_type_id": job.job_type_id,
+                    "job_type_name": job.job_type_name,
+                },
             )
             return "would_send"
         record = self.db.upsert_service_titan_violation(
@@ -529,7 +551,7 @@ class ServiceTitanAuditService:
                 },
             )
             return "limited"
-        channel = self.settings.slack_alert_channel_id or self.settings.slack_marketing_ops_channel_id
+        channel = self.settings.slack_alert_channel_id
         if self.settings.service_titan_audit_backfill_alerts:
             logger.warning(
                 "servicetitan_controlled_backfill_alert_attempt",
@@ -561,20 +583,21 @@ class ServiceTitanAuditService:
         )
 
     def _alert_text(self, job: ServiceTitanJob, result: RuleResult) -> str:
+        business_unit = self._business_unit_classification(job)
         lines = [
             f"*ServiceTitan Operations Audit* - {result.severity.upper()}",
+            f"*Business Unit:* {business_unit['label']}",
+            f"*BU ID:* {business_unit['id']}",
+            f"*BU Name:* {business_unit['name']}",
+            f"*Job Type:* {self._job_type_label(job)}",
             f"*Ruleset:* {result.ruleset}",
+            f"*Rule ID:* {result.rule_id}",
             f"*Rule:* {result.title}",
+            f"*Severity:* {result.severity}",
             f"*Job:* {job.job_number or job.job_id}",
             f"*Destination:* {result.recommended_alert_recipient}",
             f"*Delivery:* {result.delivery}",
         ]
-        if (
-            self.settings.service_titan_alert_include_customer_name
-            and not self._controlled_backfill_manual_validation()
-            and job.customer_name
-        ):
-            lines.append(f"*Customer:* {job.customer_name}")
         if job.technician_name:
             lines.append(f"*Technician:* {job.technician_name}")
         if job.dispatcher_name:
@@ -605,6 +628,30 @@ class ServiceTitanAuditService:
         if job.url:
             lines.append(f"*ServiceTitan:* {job.url}")
         return "\n".join(lines)
+
+    def _business_unit_classification(self, job: ServiceTitanJob) -> dict[str, str]:
+        business_unit_id = (job.business_unit_id or "").strip()
+        labels = {
+            **DEFAULT_SERVICE_TITAN_BUSINESS_UNIT_LABELS,
+            **self.settings.service_titan_business_unit_labels,
+        }
+        label = labels.get(business_unit_id) if business_unit_id else ""
+        return {
+            "label": label or "Unknown Business Unit",
+            "id": business_unit_id or "<missing>",
+            "name": (job.business_unit_name or "").strip() or "<missing>",
+        }
+
+    def _job_type_label(self, job: ServiceTitanJob) -> str:
+        job_type_id = (job.job_type_id or "").strip()
+        job_type_name = (job.job_type_name or "").strip()
+        if job_type_name and job_type_id:
+            return f"{job_type_name} ({job_type_id})"
+        if job_type_name:
+            return job_type_name
+        if job_type_id:
+            return job_type_id
+        return "Unknown Job Type"
 
     def _format_dt(self, value: datetime) -> str:
         return value.astimezone(ZoneInfo(self.settings.service_titan_audit_timezone)).isoformat()

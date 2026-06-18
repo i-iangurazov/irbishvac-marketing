@@ -240,7 +240,7 @@ SERVICETITAN_TENANT_ID=
 SERVICETITAN_APP_KEY=
 ```
 
-Slack alert routing is required only when alerts can be sent. If `SERVICE_TITAN_AUDIT_DRY_RUN=true`, no Slack channel is required. If dry-run is false, set `SLACK_ALERT_CHANNEL_ID` or let the agent fall back to `SLACK_MARKETING_OPS_CHANNEL_ID`.
+Slack alert routing is required only when alerts can be sent. If `SERVICE_TITAN_AUDIT_DRY_RUN=true`, no Slack channel is required. If dry-run is false, set `SLACK_ALERT_CHANNEL_ID`. ServiceTitan audit alerts do not fall back to `SLACK_MARKETING_OPS_CHANNEL_ID`.
 
 ## Optional Environment
 
@@ -416,7 +416,7 @@ Rule readiness interpretation:
 
 ## Slack Alerts
 
-Alerts go to `SLACK_ALERT_CHANNEL_ID` or, if blank, `SLACK_MARKETING_OPS_CHANNEL_ID`.
+Alerts go to `SLACK_ALERT_CHANNEL_ID` only. Business Unit labels are included in the message text for grouping, but they do not route alerts to separate channels.
 
 ### Production Double-Check
 
@@ -478,7 +478,7 @@ Required conditions for a live ServiceTitan Slack alert:
 2. The rule engine returns at least one `fail` result.
 3. `SERVICE_TITAN_AUDIT_DRY_RUN=false`.
 4. `SLACK_BOT_TOKEN` is configured.
-5. `SLACK_ALERT_CHANNEL_ID` is configured, or `SLACK_MARKETING_OPS_CHANNEL_ID` is configured as fallback.
+5. `SLACK_ALERT_CHANNEL_ID` is configured.
 6. The Slack bot is installed and has permission to post in the configured channel. For private channels, invite the bot to the channel.
 7. The deterministic violation key has not already been alerted with `alert_sent_at` set.
 
@@ -488,7 +488,7 @@ Conditions that prevent Slack alerting:
 - `violations_detected=0`.
 - `SERVICE_TITAN_AUDIT_DRY_RUN=true`.
 - `SLACK_BOT_TOKEN` is missing.
-- Both `SLACK_ALERT_CHANNEL_ID` and `SLACK_MARKETING_OPS_CHANNEL_ID` are missing.
+- `SLACK_ALERT_CHANNEL_ID` is missing.
 - Slack rejects the post, commonly because the bot is not in the channel, the token is invalid, or the channel ID is wrong.
 - A matching stored violation already has `alert_sent_at` set.
 
@@ -498,7 +498,7 @@ Important behavior:
 - `insufficient_data` and `not_applicable` do not alert by design. They appear in logs and the CLI summary to avoid production false positives.
 - Dry-run blocks Slack, violation writes, dedupe writes, and checkpoint advancement.
 - Dedupe suppresses only already-sent alerts. If Slack fails, `alert_sent_at` remains `NULL`, so the alert can retry later.
-- `SLACK_ALERT_CHANNEL_ID` is preferred. If blank, `SLACK_MARKETING_OPS_CHANNEL_ID` is used.
+- `SLACK_ALERT_CHANNEL_ID` is the only ServiceTitan alert channel.
 - `SLACK_BOT_TOKEN` is loaded from env through `Settings.from_env()`.
 - ServiceTitan audit email alerts are not implemented. The repo has SMTP email support for report emails and email test commands, but ServiceTitan audit does not call `EmailClient`.
 
@@ -522,7 +522,7 @@ Each alert includes:
 - Intended alert destination and delivery mode from the handbook matrix.
 - ServiceTitan link when `SERVICETITAN_JOB_URL_TEMPLATE` is configured.
 
-Customer names are omitted by default. Set `SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME=true` only if the alert channel is appropriate for that data.
+Customer names, addresses, phone numbers, emails, and raw notes are not included in ServiceTitan Slack alerts.
 
 ## Notification Test Commands
 
@@ -536,7 +536,7 @@ This prints:
 
 - `SERVICE_TITAN_AUDIT_DRY_RUN` status.
 - Slack token presence.
-- `SLACK_ALERT_CHANNEL_ID` and fallback channel presence.
+- `SLACK_ALERT_CHANNEL_ID` presence.
 - Effective Slack channel.
 - `auth.test` result when a token is present.
 - Whether a Slack test message would be sent.
@@ -591,10 +591,10 @@ SLACK_BOT_TOKEN=
 SLACK_ALERT_CHANNEL_ID=
 ```
 
-Fallback if no dedicated ServiceTitan alert channel is used:
+Optional alert labels for grouping in the same Slack channel:
 
 ```env
-SLACK_MARKETING_OPS_CHANNEL_ID=
+SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON={"1812":"HVAC Sales / Comfort Advisors","64326403":"Plumbing Sales","64315277":"Plumbing Service"}
 ```
 
 Optional and normally false:
@@ -872,7 +872,7 @@ servicetitan_audit_cycle_completed
 - Configure `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` when the discovered business units/job types/statuses/tags need tenant-specific narrowing.
 - Run `SERVICE_TITAN_AUDIT_ENABLED=false SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-audit-once` with a short lookback for first validation.
 - Watch the command summary and logs for `servicetitan_continuous_audit_enabled`, `servicetitan_audit_loop_started`, `servicetitan_audit_cycle_started`, `servicetitan_audit_cycle_completed`, `servicetitan_audit_completed`, `servicetitan_rule_insufficient_data`, `servicetitan_alert_dry_run`, `servicetitan_duplicate_alert_suppressed`, `servicetitan_alert_skipped_max_per_cycle`, and `servicetitan_alert_sent`.
-- After dry-run results look correct, set `SERVICE_TITAN_AUDIT_DRY_RUN=false`, keep `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false`, confirm `SLACK_ALERT_CHANNEL_ID` or `SLACK_MARKETING_OPS_CHANNEL_ID`, then set `SERVICE_TITAN_AUDIT_ENABLED=true` to start continuous polling. The first live cycle establishes a baseline; later cycles alert only new/updated violations.
+- After dry-run results look correct, set `SERVICE_TITAN_AUDIT_DRY_RUN=false`, keep `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false`, confirm `SLACK_ALERT_CHANNEL_ID`, then set `SERVICE_TITAN_AUDIT_ENABLED=true` to start continuous polling. The first live cycle establishes a baseline; later cycles alert only new/updated violations.
 
 Render-safe command checklist:
 

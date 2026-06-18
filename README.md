@@ -45,7 +45,7 @@ Required for full production operation:
 - `NOTION_WORKBOOKS_PAGE_ID`, `NOTION_WORKBOOKS_DATABASE_ID`
 - Optional but recommended for current Notion API: `NOTION_TASKS_DATA_SOURCE_ID`, `NOTION_MARKETING_CALENDAR_DATA_SOURCE_ID`, `NOTION_WORKBOOKS_DATA_SOURCE_ID`
 - `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_MARKETING_OPS_CHANNEL_ID`, `SLACK_TIM_USER_ID`
-- Optional for ServiceTitan audit alerts: `SLACK_ALERT_CHANNEL_ID`; not required while `SERVICE_TITAN_AUDIT_DRY_RUN=true`
+- Required for live ServiceTitan audit alerts: `SLACK_ALERT_CHANNEL_ID`; not required while `SERVICE_TITAN_AUDIT_DRY_RUN=true`
 - Required only when continuous ServiceTitan audit is enabled or when running `servicetitan-audit-once`: `SERVICETITAN_CLIENT_ID`, `SERVICETITAN_CLIENT_SECRET`, `SERVICETITAN_TENANT_ID`, `SERVICETITAN_APP_KEY`
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM`, `TIM_EMAIL`, `VADIM_EMAIL`
 - `OWNER_SLACK_MAP_JSON` only for fallback Slack routing exceptions; deadline reminders normally resolve users from Notion owner email via Slack lookup.
@@ -71,6 +71,7 @@ Defaults:
 - `TECHNICIAN_COMPLIANCE_ENABLED=false`
 - `DISPATCHER_AUDIT_ENABLED=false`
 - `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}`
+- `SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON={"1812":"HVAC Sales / Comfort Advisors","64326403":"Plumbing Sales","64315277":"Plumbing Service"}`
 - `BUDGET_OVERRUN_THRESHOLD_PERCENT=0`, which flags any actual spend at or over plan.
 - `CAMPAIGN_RISK_WINDOW_PERCENT=80`
 - `CAMPAIGN_RISK_TASK_COMPLETION_PERCENT=20`
@@ -172,6 +173,8 @@ The ServiceTitan Operations Audit Agent is disabled by default and runs in the s
 Rules return `pass`, `fail`, `insufficient_data`, `not_applicable`, or `error`. `insufficient_data` and `not_applicable` are logged and not alerted, so unavailable ServiceTitan fields and out-of-scope jobs do not create false positives.
 
 Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` for first production validation. Dry-run fetches real ServiceTitan jobs, evaluates rules, prints the one-time run summary, and skips Slack alerts and audit dedupe writes. The `servicetitan-audit-once` command runs one cycle and exits, even when continuous polling is still disabled. Set `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true` only when you need sanitized field availability logs for ServiceTitan payloads.
+
+ServiceTitan alerts use `SLACK_ALERT_CHANNEL_ID` only. Business Unit labels from `SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON` are included in the alert text for grouping; they do not route alerts to separate channels.
 
 Use `python3 -m marketing_os_agent servicetitan-runtime-diagnostics` on Render to confirm masked runtime config, parsed rule JSON, checkpoint state, recent audit cycles, and durable alert dedupe state. Live Slack sends are capped by `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE`; set it to `1` with `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true` and `SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE=true` only for controlled one-real-historical-alert validation.
 

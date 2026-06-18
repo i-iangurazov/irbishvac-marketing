@@ -152,7 +152,7 @@ class AgentApp:
             return
         rules = active_service_titan_rules(self.settings)
         enabled_rulesets = sorted({rule.ruleset for rule in rules})
-        channel = self.settings.slack_alert_channel_id or self.settings.slack_marketing_ops_channel_id
+        channel = self.settings.slack_alert_channel_id
         logger.info(
             "servicetitan_continuous_audit_enabled",
             extra={
@@ -257,7 +257,7 @@ class AgentApp:
 
     def service_titan_alert_test_text(self) -> tuple[bool, str]:
         send = self.settings.notifications_test_send
-        channel = self.settings.slack_alert_channel_id or self.settings.slack_marketing_ops_channel_id
+        channel = self.settings.slack_alert_channel_id
         job = ServiceTitanJob(
             job_id="synthetic-notification-test",
             job_number="TEST-SERVICETITAN-ALERT",

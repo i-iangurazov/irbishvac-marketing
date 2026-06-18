@@ -163,6 +163,11 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         service_titan_required_phases=["diagnosis", "estimate"],
         service_titan_required_operational_fields=["System Type"],
         service_titan_rule_scope_config={},
+        service_titan_business_unit_labels={
+            "1812": "HVAC Sales / Comfort Advisors",
+            "64326403": "Plumbing Sales",
+            "64315277": "Plumbing Service",
+        },
     )
     base.update(overrides)
     return Settings(**base)
@@ -1472,11 +1477,11 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(token_summary.status, "config_error")
         self.assertIn("SLACK_BOT_TOKEN", token_summary.config_errors)
 
-        missing_channel = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True, slack_alert_channel_id="", slack_marketing_ops_channel_id="")
+        missing_channel = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True, slack_alert_channel_id="", slack_marketing_ops_channel_id="COPS")
         channel_audit = ServiceTitanAuditService(missing_channel, self.h.db, FakeServiceTitan([st_job(clock_out_at=None)]), self.h.slack)
         channel_summary = channel_audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
         self.assertEqual(channel_summary.status, "config_error")
-        self.assertIn("SLACK_ALERT_CHANNEL_ID or SLACK_MARKETING_OPS_CHANNEL_ID", channel_summary.config_errors)
+        self.assertIn("SLACK_ALERT_CHANNEL_ID", channel_summary.config_errors)
 
     def test_service_titan_cli_force_can_validate_when_continuous_polling_disabled(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=False, service_titan_audit_dry_run=True)
@@ -1727,14 +1732,30 @@ class MarketingOsAgentTests(unittest.TestCase):
             technician_compliance_enabled=False,
             dispatcher_audit_enabled=False,
         )
-        job = sales_job("sales-fail", estimate_count=2, photo_count=1, arrived_at=datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc))
+        job = sales_job(
+            "sales-fail",
+            business_unit_id="1812",
+            business_unit_name="HVAC - Sales",
+            job_type_id="1816",
+            job_type_name="HVAC Estimate",
+            estimate_count=2,
+            photo_count=1,
+            arrived_at=datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc),
+        )
         audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([job]), self.h.slack)
         summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
         self.assertEqual(summary.sales_fail, 1)
         self.assertEqual(summary.sales_alerts_sent, 1)
         self.assertEqual(len(self.h.slack.messages), 1)
+        self.assertEqual(self.h.slack.messages[0][0], "CST")
         alert_text = self.h.slack.messages[0][1]
+        self.assertIn("*Business Unit:* HVAC Sales / Comfort Advisors", alert_text)
+        self.assertIn("*BU ID:* 1812", alert_text)
+        self.assertIn("*BU Name:* HVAC - Sales", alert_text)
+        self.assertIn("*Job Type:* HVAC Estimate (1816)", alert_text)
         self.assertIn("*Ruleset:* Sales / Comfort Advisor Audit", alert_text)
+        self.assertIn("*Rule ID:* sales_options_fewer_than_three", alert_text)
+        self.assertIn("*Severity:* high", alert_text)
         self.assertIn("*Options count:* 2 / required 3", alert_text)
         self.assertIn("*ServiceTitan:*", alert_text)
 
@@ -1749,6 +1770,64 @@ class MarketingOsAgentTests(unittest.TestCase):
             datetime(2026, 5, 15, 16, tzinfo=timezone.utc)
         )
         self.assertEqual(missing_summary.status, "config_error")
+
+    def test_servicetitan_alert_business_unit_labels(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([]), self.h.slack)
+        rule = _st_rule(audit_settings, "sales_options_fewer_than_three")
+        cases = [
+            ("1812", "HVAC - Sales", "1816", "HVAC Estimate", "HVAC Sales / Comfort Advisors"),
+            ("64326403", "Plumbing - Sales", "54086644", "Water Heater Estimate", "Plumbing Sales"),
+            ("64315277", "Plumbing - Service", "112338076", "Plumbing Diagnostic", "Plumbing Service"),
+            ("999999", "Other", "other-type", "Other Type", "Unknown Business Unit"),
+            ("", "", "", "", "Unknown Business Unit"),
+        ]
+        for business_unit_id, business_unit_name, job_type_id, job_type_name, expected_label in cases:
+            with self.subTest(business_unit_id=business_unit_id or "<missing>"):
+                job = sales_job(
+                    f"sales-label-{business_unit_id or 'missing'}",
+                    business_unit_id=business_unit_id,
+                    business_unit_name=business_unit_name,
+                    job_type_id=job_type_id,
+                    job_type_name=job_type_name,
+                    estimate_count=2,
+                    photo_count=1,
+                )
+                result = rule.run(job, audit_settings)
+                text = audit._alert_text(job, result)
+                self.assertIn(f"*Business Unit:* {expected_label}", text)
+                self.assertIn(f"*BU ID:* {business_unit_id or '<missing>'}", text)
+                self.assertIn(f"*BU Name:* {business_unit_name or '<missing>'}", text)
+
+    def test_sales_dry_run_summary_includes_business_unit_label_without_slack(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_dry_run=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        job = sales_job(
+            "sales-dry-run-bu",
+            business_unit_id="64326403",
+            business_unit_name="Plumbing - Sales",
+            job_type_id="54086644",
+            job_type_name="Water Heater Estimate",
+            estimate_count=2,
+            photo_count=1,
+        )
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([job]), self.h.slack)
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(summary.sales_alerts_would_send, 1)
+        self.assertEqual(summary.sales_alerts_sent, 0)
+        self.assertEqual(summary.alert_business_unit_counts, {"Plumbing Sales": 1})
+        self.assertIn("  - Plumbing Sales: 1", "\n".join(summary.to_lines()))
+        self.assertEqual(self.h.slack.messages, [])
 
     def test_sales_dry_run_sends_no_slack_and_writes_no_violation(self) -> None:
         audit_settings = settings(

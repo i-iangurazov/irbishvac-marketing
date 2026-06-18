@@ -105,6 +105,13 @@ def _json_object_env(name: str, default: dict[str, Any] | None = None) -> dict[s
     return parsed
 
 
+DEFAULT_SERVICE_TITAN_BUSINESS_UNIT_LABELS = {
+    "1812": "HVAC Sales / Comfort Advisors",
+    "64326403": "Plumbing Sales",
+    "64315277": "Plumbing Service",
+}
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str
@@ -232,6 +239,7 @@ class Settings:
     service_titan_required_phases: list[str] = field(default_factory=list)
     service_titan_required_operational_fields: list[str] = field(default_factory=list)
     service_titan_rule_scope_config: dict[str, Any] = field(default_factory=dict)
+    service_titan_business_unit_labels: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -402,6 +410,10 @@ class Settings:
             service_titan_required_phases=_json_list_env("SERVICE_TITAN_REQUIRED_PHASES_JSON"),
             service_titan_required_operational_fields=_json_list_env("SERVICE_TITAN_REQUIRED_OPERATIONAL_FIELDS_JSON"),
             service_titan_rule_scope_config=_json_object_env("SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON"),
+            service_titan_business_unit_labels={
+                **DEFAULT_SERVICE_TITAN_BUSINESS_UNIT_LABELS,
+                **_json_map_env("SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON"),
+            },
         )
 
     @property
@@ -442,7 +454,7 @@ class Settings:
         }
         if not self.service_titan_audit_dry_run:
             required["SLACK_BOT_TOKEN"] = self.slack_bot_token
-            required["SLACK_ALERT_CHANNEL_ID or SLACK_MARKETING_OPS_CHANNEL_ID"] = self.slack_alert_channel_id or self.slack_marketing_ops_channel_id
+            required["SLACK_ALERT_CHANNEL_ID"] = self.slack_alert_channel_id
         return [key for key, value in required.items() if not value]
 
 
