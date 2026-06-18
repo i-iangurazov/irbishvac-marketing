@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("servicetitan-audit-once", help="Run one ServiceTitan operations audit cycle")
     sub.add_parser("servicetitan-discover-scopes", help="Print sanitized ServiceTitan scope values for rule configuration")
     sub.add_parser("servicetitan-runtime-diagnostics", help="Print masked ServiceTitan runtime config and audit state")
+    sub.add_parser("servicetitan-weekly-summary-once", help="Build and optionally send one ServiceTitan weekly violation summary")
     sub.add_parser("notifications-test", help="Validate notification configuration and optionally send a Slack test message")
     sub.add_parser("servicetitan-alert-test", help="Build a synthetic ServiceTitan alert and optionally send it to Slack")
     email_test = sub.add_parser("email-test", help="Validate SMTP configuration and optionally send a safe test email")
@@ -121,6 +122,12 @@ def main(argv: list[str] | None = None) -> int:
         app.initialize_storage()
         print(app.service_titan_runtime_diagnostics_text())
         return 0
+
+    if command == "servicetitan-weekly-summary-once":
+        app.initialize_storage()
+        summary = app.run_service_titan_weekly_summary(force=True)
+        print(summary.to_text())
+        return 1 if summary.status in {"config_error", "slack_error"} else 0
 
     if command == "notifications-test":
         ok, text = app.notifications_test_text()
@@ -230,6 +237,10 @@ def _settings_error_diagnostics_text(error: str) -> str:
             f"- SERVICE_TITAN_AUDIT_BACKFILL_ALERTS raw: {os.getenv('SERVICE_TITAN_AUDIT_BACKFILL_ALERTS', '<unset>')}",
             f"- SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE raw: {os.getenv('SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE', '<unset>')}",
             f"- SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE raw: {os.getenv('SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE', '<unset>')}",
+            f"- SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED raw: {os.getenv('SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED', '<unset>')}",
+            f"- SERVICE_TITAN_WEEKLY_SUMMARY_DAY raw: {os.getenv('SERVICE_TITAN_WEEKLY_SUMMARY_DAY', '<unset>')}",
+            f"- SERVICE_TITAN_WEEKLY_SUMMARY_HOUR raw: {os.getenv('SERVICE_TITAN_WEEKLY_SUMMARY_HOUR', '<unset>')}",
+            f"- SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS raw: {os.getenv('SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS', '<unset>')}",
             f"- SALES_COMFORT_ADVISOR_AUDIT_ENABLED raw: {os.getenv('SALES_COMFORT_ADVISOR_AUDIT_ENABLED', '<unset>')}",
             f"- TECHNICIAN_COMPLIANCE_ENABLED raw: {os.getenv('TECHNICIAN_COMPLIANCE_ENABLED', '<unset>')}",
             f"- DISPATCHER_AUDIT_ENABLED raw: {os.getenv('DISPATCHER_AUDIT_ENABLED', '<unset>')}",

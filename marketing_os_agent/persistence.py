@@ -604,6 +604,30 @@ class Persistence:
             "latest": [dict(row) for row in latest],
         }
 
+    def get_service_titan_violations_between(self, start_iso: str, end_iso: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    violation_key,
+                    service_titan_job_id,
+                    rule_id,
+                    ruleset,
+                    severity,
+                    status,
+                    first_detected_at,
+                    last_seen_at,
+                    resolved_at,
+                    alert_sent_at,
+                    metadata_json
+                FROM service_titan_audit_violations
+                WHERE first_detected_at >= ? AND first_detected_at < ?
+                ORDER BY first_detected_at ASC, ruleset ASC, rule_id ASC
+                """,
+                (start_iso, end_iso),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def ping(self) -> bool:
         try:
             with self._lock, self._connect() as conn:

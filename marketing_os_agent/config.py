@@ -79,6 +79,21 @@ def _bool_env(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean")
 
 
+def _weekday_env(name: str, default: str) -> str:
+    value = _env(name, default).strip().upper()
+    valid = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
+    if value not in valid:
+        raise ValueError(f"{name} must be one of {', '.join(sorted(valid))}")
+    return value
+
+
+def _hour_env(name: str, default: int) -> int:
+    value = _int_env(name, default)
+    if value < 0 or value > 23:
+        raise ValueError(f"{name} must be an hour from 0 to 23")
+    return value
+
+
 def _json_list_env(name: str, default: list[str] | None = None) -> list[str]:
     raw = _env(name, "").strip()
     if not raw:
@@ -136,6 +151,10 @@ class Settings:
     service_titan_audit_backfill_alerts: bool
     service_titan_audit_ignore_checkpoint_once: bool
     service_titan_audit_debug_fields: bool
+    service_titan_weekly_summary_enabled: bool
+    service_titan_weekly_summary_day: str
+    service_titan_weekly_summary_hour: int
+    service_titan_weekly_summary_lookback_days: int
     notifications_test_send: bool
 
     anthropic_api_key: str
@@ -280,6 +299,10 @@ class Settings:
             service_titan_audit_backfill_alerts=_bool_env("SERVICE_TITAN_AUDIT_BACKFILL_ALERTS", False),
             service_titan_audit_ignore_checkpoint_once=_bool_env("SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE", False),
             service_titan_audit_debug_fields=_bool_env("SERVICE_TITAN_AUDIT_DEBUG_FIELDS", False),
+            service_titan_weekly_summary_enabled=_bool_env("SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED", False),
+            service_titan_weekly_summary_day=_weekday_env("SERVICE_TITAN_WEEKLY_SUMMARY_DAY", "MON"),
+            service_titan_weekly_summary_hour=_hour_env("SERVICE_TITAN_WEEKLY_SUMMARY_HOUR", 8),
+            service_titan_weekly_summary_lookback_days=max(1, _int_env("SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS", 7)),
             notifications_test_send=_bool_env("NOTIFICATIONS_TEST_SEND", False),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
             claude_model=_env("CLAUDE_MODEL", "claude-sonnet-4-20250514"),

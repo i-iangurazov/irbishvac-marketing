@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import threading
 import time
 from dataclasses import dataclass, field
@@ -25,6 +26,20 @@ from .service_titan_rules import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def service_titan_business_unit_classification(settings: Settings, business_unit_id: str, business_unit_name: str = "") -> dict[str, str]:
+    clean_id = (business_unit_id or "").strip()
+    labels = {
+        **DEFAULT_SERVICE_TITAN_BUSINESS_UNIT_LABELS,
+        **settings.service_titan_business_unit_labels,
+    }
+    label = labels.get(clean_id) if clean_id else ""
+    return {
+        "label": label or "Unknown Business Unit",
+        "id": clean_id or "<missing>",
+        "name": (business_unit_name or "").strip() or "<missing>",
+    }
 
 
 @dataclass
@@ -139,6 +154,265 @@ class ServiceTitanAuditSummary:
             lines.append("- config errors:")
             lines.extend(f"  - {item}" for item in self.config_errors)
         return lines
+
+
+@dataclass
+class ServiceTitanWeeklySummary:
+    status: str = "completed"
+    dry_run: bool = False
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    lookback_days: int = 7
+    total_violations: int = 0
+    severity_counts: dict[str, int] = field(default_factory=dict)
+    status_counts: dict[str, int] = field(default_factory=dict)
+    business_unit_counts: dict[str, int] = field(default_factory=dict)
+    grouped_counts: list[dict[str, str | int]] = field(default_factory=list)
+    slack_sent: bool = False
+    slack_skipped_duplicate: bool = False
+    slack_skipped_disabled: bool = False
+    slack_skipped_dry_run: bool = False
+    slack_failed: bool = False
+    config_errors: list[str] = field(default_factory=list)
+
+    def to_text(self) -> str:
+        lines = [
+            f"ServiceTitan weekly summary: {self.status}",
+            f"- dry_run: {self.dry_run}",
+            f"- lookback_days: {self.lookback_days}",
+            f"- period_start: {self.period_start.isoformat() if self.period_start else '<unknown>'}",
+            f"- period_end: {self.period_end.isoformat() if self.period_end else '<unknown>'}",
+            f"- total violations: {self.total_violations}",
+            f"- slack sent: {self.slack_sent}",
+            f"- slack skipped duplicate: {self.slack_skipped_duplicate}",
+            f"- slack skipped disabled: {self.slack_skipped_disabled}",
+            f"- slack skipped dry_run: {self.slack_skipped_dry_run}",
+            f"- slack failed: {self.slack_failed}",
+        ]
+        if self.business_unit_counts:
+            lines.append("- business unit counts:")
+            for label, count in sorted(self.business_unit_counts.items()):
+                lines.append(f"  - {label}: {count}")
+        if self.severity_counts:
+            lines.append("- severity counts:")
+            for severity, count in sorted(self.severity_counts.items()):
+                lines.append(f"  - {severity}: {count}")
+        if self.status_counts:
+            lines.append("- status counts:")
+            for status, count in sorted(self.status_counts.items()):
+                lines.append(f"  - {status}: {count}")
+        if self.config_errors:
+            lines.append("- config errors:")
+            lines.extend(f"  - {item}" for item in self.config_errors)
+        lines.extend(["", self.message_text()])
+        return "\n".join(lines)
+
+    def message_text(self) -> str:
+        start = self.period_start.astimezone(timezone.utc).date().isoformat() if self.period_start else "<unknown>"
+        end = self.period_end.astimezone(timezone.utc).date().isoformat() if self.period_end else "<unknown>"
+        lines = [
+            "ServiceTitan Weekly Audit Summary",
+            f"Period: {start} -> {end}",
+            "",
+        ]
+        if not self.grouped_counts:
+            lines.append("No ServiceTitan audit violations were recorded for this period.")
+        else:
+            current_business_unit: tuple[str, str, str] | None = None
+            current_ruleset: str | None = None
+            for row in self.grouped_counts:
+                business_unit = (str(row["business_unit_label"]), str(row["business_unit_id"]), str(row["business_unit_name"]))
+                if business_unit != current_business_unit:
+                    if current_business_unit is not None:
+                        lines.append("")
+                    lines.append(str(row["business_unit_label"]))
+                    lines.append(f"BU ID: {row['business_unit_id']}")
+                    lines.append(f"BU Name: {row['business_unit_name']}")
+                    current_business_unit = business_unit
+                    current_ruleset = None
+                ruleset = str(row["ruleset"])
+                if ruleset != current_ruleset:
+                    lines.append(f"Ruleset: {ruleset}")
+                    current_ruleset = ruleset
+                lines.append(f"- {row['rule_id']} [{row['severity']}] {row['status']}: {row['count']}")
+        lines.extend(["", "Totals:", f"- Violations: {self.total_violations}"])
+        for severity, count in sorted(self.severity_counts.items()):
+            lines.append(f"- {severity.title()}: {count}")
+        for status, count in sorted(self.status_counts.items()):
+            lines.append(f"- {status}: {count}")
+        return "\n".join(lines)
+
+
+class ServiceTitanWeeklySummaryService:
+    def __init__(self, settings: Settings, db: Persistence, slack: SlackClient) -> None:
+        self.settings = settings
+        self.db = db
+        self.slack = slack
+
+    def run_once(self, now: datetime | None = None, *, require_enabled: bool = True) -> ServiceTitanWeeklySummary:
+        now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        period_start = now_utc - timedelta(days=self.settings.service_titan_weekly_summary_lookback_days)
+        summary = self.build_summary(period_start, now_utc)
+        if require_enabled and not self.settings.service_titan_weekly_summary_enabled:
+            summary.status = "disabled"
+            summary.slack_skipped_disabled = True
+            logger.info("servicetitan_weekly_summary_skipped_disabled")
+            return summary
+
+        logger.info(
+            "servicetitan_weekly_summary_started",
+            extra={
+                "period_start": period_start.isoformat(),
+                "period_end": now_utc.isoformat(),
+                "lookback_days": self.settings.service_titan_weekly_summary_lookback_days,
+                "dry_run": summary.dry_run,
+            },
+        )
+        if self.settings.service_titan_audit_dry_run:
+            summary.slack_skipped_dry_run = True
+            logger.info(
+                "servicetitan_weekly_summary_dry_run",
+                extra={
+                    "period_start": period_start.isoformat(),
+                    "period_end": now_utc.isoformat(),
+                    "total_violations": summary.total_violations,
+                    "business_unit_counts": summary.business_unit_counts,
+                },
+            )
+            return summary
+
+        missing = self._missing_slack_config()
+        if missing:
+            summary.status = "config_error"
+            summary.config_errors = missing
+            logger.warning("servicetitan_weekly_summary_skipped_missing_config", extra={"missing": missing})
+            return summary
+
+        dedupe_key = self._dedupe_key(summary)
+        if self.db.has_dedupe(dedupe_key):
+            summary.slack_skipped_duplicate = True
+            logger.info(
+                "servicetitan_weekly_summary_duplicate_suppressed",
+                extra={
+                    "dedupe_key": dedupe_key,
+                    "period_start": period_start.isoformat(),
+                    "period_end": now_utc.isoformat(),
+                },
+            )
+            return summary
+
+        ts = self.slack.post_message(self.settings.slack_alert_channel_id, summary.message_text())
+        if not ts:
+            summary.status = "slack_error"
+            summary.slack_failed = True
+            logger.warning(
+                "servicetitan_weekly_summary_slack_failed",
+                extra={"period_start": period_start.isoformat(), "period_end": now_utc.isoformat()},
+            )
+            return summary
+        self.db.mark_dedupe(dedupe_key, "servicetitan_weekly_summary")
+        summary.slack_sent = True
+        logger.info(
+            "servicetitan_weekly_summary_sent",
+            extra={
+                "period_start": period_start.isoformat(),
+                "period_end": now_utc.isoformat(),
+                "total_violations": summary.total_violations,
+                "business_unit_counts": summary.business_unit_counts,
+            },
+        )
+        return summary
+
+    def build_summary(self, period_start: datetime, period_end: datetime) -> ServiceTitanWeeklySummary:
+        rows = self.db.get_service_titan_violations_between(
+            period_start.astimezone(timezone.utc).isoformat(),
+            period_end.astimezone(timezone.utc).isoformat(),
+        )
+        grouped: dict[tuple[str, str, str, str, str, str, str], int] = {}
+        severity_counts: dict[str, int] = {}
+        status_counts: dict[str, int] = {}
+        business_unit_counts: dict[str, int] = {}
+        for row in rows:
+            metadata = _json_dict(row.get("metadata_json"))
+            business_unit_id = str(metadata.get("business_unit_id") or "")
+            business_unit_name = str(metadata.get("business_unit_name") or "")
+            business_unit = service_titan_business_unit_classification(self.settings, business_unit_id, business_unit_name)
+            ruleset = str(row.get("ruleset") or "Unknown Ruleset")
+            rule_id = str(row.get("rule_id") or "unknown_rule")
+            severity = str(row.get("severity") or "unknown").lower()
+            status = str(row.get("status") or "unknown").lower()
+            key = (
+                business_unit["label"],
+                business_unit["id"],
+                business_unit["name"],
+                ruleset,
+                rule_id,
+                severity,
+                status,
+            )
+            grouped[key] = grouped.get(key, 0) + 1
+            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+            status_counts[status] = status_counts.get(status, 0) + 1
+            business_unit_counts[business_unit["label"]] = business_unit_counts.get(business_unit["label"], 0) + 1
+        grouped_counts = [
+            {
+                "business_unit_label": key[0],
+                "business_unit_id": key[1],
+                "business_unit_name": key[2],
+                "ruleset": key[3],
+                "rule_id": key[4],
+                "severity": key[5],
+                "status": key[6],
+                "count": count,
+            }
+            for key, count in sorted(grouped.items())
+        ]
+        summary = ServiceTitanWeeklySummary(
+            dry_run=self.settings.service_titan_audit_dry_run,
+            period_start=period_start.astimezone(timezone.utc),
+            period_end=period_end.astimezone(timezone.utc),
+            lookback_days=self.settings.service_titan_weekly_summary_lookback_days,
+            total_violations=len(rows),
+            severity_counts=severity_counts,
+            status_counts=status_counts,
+            business_unit_counts=business_unit_counts,
+            grouped_counts=grouped_counts,
+        )
+        logger.info(
+            "servicetitan_weekly_summary_built",
+            extra={
+                "period_start": summary.period_start.isoformat(),
+                "period_end": summary.period_end.isoformat(),
+                "total_violations": summary.total_violations,
+                "business_unit_counts": summary.business_unit_counts,
+                "severity_counts": summary.severity_counts,
+                "status_counts": summary.status_counts,
+            },
+        )
+        return summary
+
+    def should_run_at(self, now: datetime) -> bool:
+        if not self.settings.service_titan_weekly_summary_enabled:
+            return False
+        day_index = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
+        return (
+            now.weekday() == day_index[self.settings.service_titan_weekly_summary_day]
+            and now.hour == self.settings.service_titan_weekly_summary_hour
+            and now.minute == 0
+        )
+
+    def _missing_slack_config(self) -> list[str]:
+        missing = []
+        if not self.settings.slack_bot_token:
+            missing.append("SLACK_BOT_TOKEN")
+        if not self.settings.slack_alert_channel_id:
+            missing.append("SLACK_ALERT_CHANNEL_ID")
+        return missing
+
+    def _dedupe_key(self, summary: ServiceTitanWeeklySummary) -> str:
+        start = summary.period_start.date().isoformat() if summary.period_start else "unknown"
+        end = summary.period_end.date().isoformat() if summary.period_end else "unknown"
+        return f"servicetitan_weekly_summary:{start}:{end}:{summary.lookback_days}"
 
 
 class ServiceTitanAuditService:
@@ -630,17 +904,7 @@ class ServiceTitanAuditService:
         return "\n".join(lines)
 
     def _business_unit_classification(self, job: ServiceTitanJob) -> dict[str, str]:
-        business_unit_id = (job.business_unit_id or "").strip()
-        labels = {
-            **DEFAULT_SERVICE_TITAN_BUSINESS_UNIT_LABELS,
-            **self.settings.service_titan_business_unit_labels,
-        }
-        label = labels.get(business_unit_id) if business_unit_id else ""
-        return {
-            "label": label or "Unknown Business Unit",
-            "id": business_unit_id or "<missing>",
-            "name": (job.business_unit_name or "").strip() or "<missing>",
-        }
+        return service_titan_business_unit_classification(self.settings, job.business_unit_id, job.business_unit_name)
 
     def _job_type_label(self, job: ServiceTitanJob) -> str:
         job_type_id = (job.job_type_id or "").strip()
@@ -720,3 +984,15 @@ class ServiceTitanAuditLoop:
 
     def _wait_seconds_after_cycle(self, elapsed_seconds: float) -> float:
         return max(1, self.settings.service_titan_audit_poll_interval_seconds - elapsed_seconds)
+
+
+def _json_dict(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}

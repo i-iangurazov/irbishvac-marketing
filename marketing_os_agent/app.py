@@ -17,7 +17,13 @@ from .domain.campaign_health import CampaignHealthService
 from .domain.owner_mapping import OwnerResolver
 from .domain.formatting import format_friday_roundup_email
 from .domain.reports import ReportService, month_bounds, quarter_bounds, week_bounds
-from .domain.service_titan_audit import ServiceTitanAuditLoop, ServiceTitanAuditService, ServiceTitanAuditSummary
+from .domain.service_titan_audit import (
+    ServiceTitanAuditLoop,
+    ServiceTitanAuditService,
+    ServiceTitanAuditSummary,
+    ServiceTitanWeeklySummary,
+    ServiceTitanWeeklySummaryService,
+)
 from .domain.service_titan_discovery import ServiceTitanScopeDiscovery, ServiceTitanScopeDiscoverySummary
 from .domain.service_titan_rules import RESULT_FAIL, RULESET_SALES, RuleResult, active_service_titan_rules
 from .domain.task_processor import TaskProcessor
@@ -93,6 +99,7 @@ class AgentApp:
         )
         self.reports = ReportService(settings, self.db, self.slack, self.claude, self.email, self.owner_resolver)
         self.service_titan_audit = ServiceTitanAuditService(settings, self.db, self.service_titan, self.slack)
+        self.service_titan_weekly_summary = ServiceTitanWeeklySummaryService(settings, self.db, self.slack)
         self.service_titan_scope_discovery = ServiceTitanScopeDiscovery(settings, self.service_titan)
 
     def initialize_storage(self) -> None:
@@ -110,6 +117,7 @@ class AgentApp:
             logger.warning("servicetitan_credentials_missing", extra={"missing": self.settings.missing_service_titan_credentials()})
         self._validate_timezone()
         self._log_service_titan_startup_config()
+        self._log_service_titan_weekly_summary_config()
 
         scheduler = Scheduler(self.settings, self.db)
         scheduler.register(ScheduledJob("monday_push", monday_8am, self.run_monday_push))
@@ -117,6 +125,14 @@ class AgentApp:
         scheduler.register(ScheduledJob("monthly_kickoff", first_day_9am, self.run_monthly_kickoff))
         scheduler.register(ScheduledJob("quarterly_kickoff", first_day_quarter_9am, self.run_quarterly_kickoff))
         scheduler.register(ScheduledJob("campaign_health_scan", daily_7am, self.run_campaign_health_scan))
+        if self.settings.service_titan_weekly_summary_enabled:
+            scheduler.register(
+                ScheduledJob(
+                    "servicetitan_weekly_summary",
+                    self.service_titan_weekly_summary.should_run_at,
+                    self.run_service_titan_weekly_summary,
+                )
+            )
 
         http_server = AgentHttpServer(
             "0.0.0.0",
@@ -169,6 +185,21 @@ class AgentApp:
             },
         )
 
+    def _log_service_titan_weekly_summary_config(self) -> None:
+        if not self.settings.service_titan_weekly_summary_enabled:
+            logger.info("servicetitan_weekly_summary_disabled")
+            return
+        logger.info(
+            "servicetitan_weekly_summary_enabled",
+            extra={
+                "day": self.settings.service_titan_weekly_summary_day,
+                "hour": self.settings.service_titan_weekly_summary_hour,
+                "lookback_days": self.settings.service_titan_weekly_summary_lookback_days,
+                "dry_run": self.settings.service_titan_audit_dry_run,
+                "slack_channel_configured": bool(self.settings.slack_alert_channel_id),
+            },
+        )
+
     def poll_once(self) -> int:
         return self.processor.poll_once()
 
@@ -186,6 +217,9 @@ class AgentApp:
 
     def run_service_titan_scope_discovery(self) -> ServiceTitanScopeDiscoverySummary:
         return self.service_titan_scope_discovery.run_once()
+
+    def run_service_titan_weekly_summary(self, now: datetime | None = None, *, force: bool = False) -> ServiceTitanWeeklySummary:
+        return self.service_titan_weekly_summary.run_once(now, require_enabled=not force)
 
     def notifications_test_text(self) -> tuple[bool, str]:
         send = self.settings.notifications_test_send
@@ -336,6 +370,10 @@ class AgentApp:
             f"  - SERVICE_TITAN_AUDIT_LOOKBACK_MINUTES: {self.settings.service_titan_audit_lookback_minutes}",
             f"  - SERVICE_TITAN_AUDIT_OVERLAP_SECONDS: {self.settings.service_titan_audit_overlap_seconds}",
             f"  - SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE: {self.settings.service_titan_audit_max_alerts_per_cycle}",
+            f"  - SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED: {self.settings.service_titan_weekly_summary_enabled}",
+            f"  - SERVICE_TITAN_WEEKLY_SUMMARY_DAY: {self.settings.service_titan_weekly_summary_day}",
+            f"  - SERVICE_TITAN_WEEKLY_SUMMARY_HOUR: {self.settings.service_titan_weekly_summary_hour}",
+            f"  - SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS: {self.settings.service_titan_weekly_summary_lookback_days}",
             f"  - SALES_COMFORT_ADVISOR_AUDIT_ENABLED: {self.settings.sales_comfort_advisor_audit_enabled}",
             f"  - TECHNICIAN_COMPLIANCE_ENABLED: {self.settings.technician_compliance_enabled}",
             f"  - DISPATCHER_AUDIT_ENABLED: {self.settings.dispatcher_audit_enabled}",

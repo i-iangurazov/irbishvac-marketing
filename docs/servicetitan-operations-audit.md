@@ -55,6 +55,65 @@ Sales alerts are immediate per audit cycle when all of these are true:
 
 Sales alerts are not Friday-only or weekly-only. Email alerts are not implemented for ServiceTitan audits.
 
+## Weekly Violation Summary
+
+The weekly ServiceTitan violation summary is separate from immediate operational alerts. Immediate alerts still send during each audit polling cycle when a new real `fail` violation is detected. The weekly summary is an additional rollup of already persisted audit violations.
+
+The weekly summary:
+
+- Is disabled by default.
+- Reads existing `service_titan_audit_violations` SQLite records.
+- Does not call ServiceTitan.
+- Does not re-run the audit rules.
+- Posts only to `SLACK_ALERT_CHANNEL_ID`.
+- Groups counts by Business Unit label, Business Unit ID/name, ruleset, rule ID, severity, and violation status.
+- Does not include customer names, addresses, phone numbers, emails, or raw notes.
+- Uses a durable dedupe key for the period so the same weekly period is not sent repeatedly.
+
+Configure it with:
+
+```env
+SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED=false
+SERVICE_TITAN_WEEKLY_SUMMARY_DAY=MON
+SERVICE_TITAN_WEEKLY_SUMMARY_HOUR=8
+SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS=7
+```
+
+Manual dry-run test:
+
+```bash
+SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-weekly-summary-once
+```
+
+The manual command prints the summary. When `SERVICE_TITAN_AUDIT_DRY_RUN=true`, it does not send Slack and does not mark the weekly summary as sent. When dry-run is false and weekly summary sending is enabled or the command is forced manually, Slack delivery uses the same `SLACK_ALERT_CHANNEL_ID` as immediate ServiceTitan alerts.
+
+Example summary:
+
+```text
+ServiceTitan Weekly Audit Summary
+Period: 2026-06-10 -> 2026-06-17
+
+HVAC Sales / Comfort Advisors
+BU ID: 1812
+BU Name: HVAC - Sales
+Ruleset: Sales / Comfort Advisor Audit
+- sales_options_fewer_than_three [high] open: 12
+- sales_arrival_after_first_half [medium] open: 3
+
+Plumbing Sales
+BU ID: 64326403
+BU Name: Plumbing - Sales
+Ruleset: Sales / Comfort Advisor Audit
+- sales_options_fewer_than_three [high] open: 8
+- sales_arrival_after_first_half [medium] open: 2
+
+Totals:
+- Violations: 25
+- High: 20
+- Medium: 5
+- open: 25
+```
+
 ## Current-State Report
 
 Current data flow:
@@ -261,6 +320,10 @@ SERVICE_TITAN_AUDIT_OVERLAP_SECONDS=300
 SERVICE_TITAN_AUDIT_PAGE_SIZE=100
 SERVICE_TITAN_AUDIT_MAX_PAGES=5
 SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE=25
+SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED=false
+SERVICE_TITAN_WEEKLY_SUMMARY_DAY=MON
+SERVICE_TITAN_WEEKLY_SUMMARY_HOUR=8
+SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS=7
 SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true
 TECHNICIAN_COMPLIANCE_ENABLED=false
 DISPATCHER_AUDIT_ENABLED=false
@@ -602,7 +665,10 @@ Optional and normally false:
 ```env
 NOTIFICATIONS_TEST_SEND=false
 SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME=false
+SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED=false
 ```
+
+When `SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED=true`, the weekly report still uses `SLACK_ALERT_CHANNEL_ID`; no separate Slack channel is required.
 
 Required only for SMTP email/report delivery, not ServiceTitan audit alerts:
 

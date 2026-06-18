@@ -24,7 +24,12 @@ from marketing_os_agent.__main__ import _settings_error_diagnostics_text
 from marketing_os_agent.domain.campaign_health import CampaignHealthService
 from marketing_os_agent.domain.owner_mapping import OwnerResolver
 from marketing_os_agent.domain.reports import ReportService, month_bounds, select_campaigns_starting_between, week_bounds
-from marketing_os_agent.domain.service_titan_audit import ServiceTitanAuditLoop, ServiceTitanAuditService, ServiceTitanAuditSummary
+from marketing_os_agent.domain.service_titan_audit import (
+    ServiceTitanAuditLoop,
+    ServiceTitanAuditService,
+    ServiceTitanAuditSummary,
+    ServiceTitanWeeklySummaryService,
+)
 from marketing_os_agent.domain.service_titan_handbook import handbook_rule_matrix
 from marketing_os_agent.domain.service_titan_discovery import ServiceTitanScopeDiscovery
 from marketing_os_agent.domain.service_titan_rules import RESULT_FAIL, RESULT_INSUFFICIENT, RESULT_NOT_APPLICABLE, RESULT_PASS, active_service_titan_rules
@@ -60,6 +65,10 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         service_titan_audit_backfill_alerts=True,
         service_titan_audit_ignore_checkpoint_once=False,
         service_titan_audit_debug_fields=False,
+        service_titan_weekly_summary_enabled=False,
+        service_titan_weekly_summary_day="MON",
+        service_titan_weekly_summary_hour=8,
+        service_titan_weekly_summary_lookback_days=7,
         notifications_test_send=False,
         anthropic_api_key="",
         claude_model="claude-test",
@@ -756,6 +765,36 @@ def _st_rule(audit_settings: Settings, rule_id: str):
         if rule.rule_id == rule_id:
             return rule
     raise AssertionError(f"Rule not found: {rule_id}")
+
+
+def _insert_service_titan_violation(
+    db: Persistence,
+    *,
+    violation_key: str,
+    rule_id: str = "sales_options_fewer_than_three",
+    ruleset: str = "Sales / Comfort Advisor Audit",
+    severity: str = "high",
+    metadata: dict[str, object] | None = None,
+    resolve: bool = False,
+) -> None:
+    db.upsert_service_titan_violation(
+        violation_key=violation_key,
+        service_titan_job_id=f"job-{violation_key}",
+        appointment_id="appt-1",
+        technician_id="advisor-1",
+        technician_name="Private Advisor",
+        dispatcher_id="",
+        dispatcher_name="",
+        rule_id=rule_id,
+        ruleset=ruleset,
+        severity=severity,
+        title="Synthetic audit violation",
+        description="Synthetic persisted violation for summary testing.",
+        recommended_action="Review the job.",
+        metadata=metadata or {},
+    )
+    if resolve:
+        db.resolve_service_titan_violation(violation_key)
 
 
 class MarketingOsAgentTests(unittest.TestCase):
@@ -1845,6 +1884,134 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.sales_alerts_sent, 0)
         self.assertEqual(self.h.slack.messages, [])
         self.assertIsNone(self.h.db.get_service_titan_violation("servicetitan:sales-dry-run:2001:sales_options_fewer_than_three:advisor-1"))
+
+    def test_service_titan_weekly_summary_groups_by_business_unit_rule_severity_and_status(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path)
+        _insert_service_titan_violation(
+            self.h.db,
+            violation_key="weekly-hvac-open",
+            rule_id="sales_options_fewer_than_three",
+            severity="high",
+            metadata={
+                "business_unit_id": "1812",
+                "business_unit_name": "HVAC - Sales",
+                "job_type_id": "1816",
+                "job_type_name": "HVAC Estimate",
+            },
+        )
+        _insert_service_titan_violation(
+            self.h.db,
+            violation_key="weekly-hvac-resolved",
+            rule_id="sales_arrival_after_first_half",
+            severity="medium",
+            metadata={
+                "business_unit_id": "1812",
+                "business_unit_name": "HVAC - Sales",
+                "customer_name": "Private Customer",
+                "address": "123 Secret St",
+                "email": "private@example.com",
+                "raw_notes": "Private raw note",
+            },
+            resolve=True,
+        )
+        _insert_service_titan_violation(
+            self.h.db,
+            violation_key="weekly-unknown-open",
+            rule_id="sales_options_fewer_than_three",
+            severity="high",
+            metadata={},
+        )
+        service = ServiceTitanWeeklySummaryService(audit_settings, self.h.db, self.h.slack)
+        summary = service.build_summary(datetime(2020, 1, 1, tzinfo=timezone.utc), datetime(2030, 1, 1, tzinfo=timezone.utc))
+        text = summary.message_text()
+
+        self.assertEqual(summary.total_violations, 3)
+        self.assertEqual(summary.business_unit_counts["HVAC Sales / Comfort Advisors"], 2)
+        self.assertEqual(summary.business_unit_counts["Unknown Business Unit"], 1)
+        self.assertEqual(summary.severity_counts, {"high": 2, "medium": 1})
+        self.assertEqual(summary.status_counts, {"open": 2, "resolved": 1})
+        self.assertIn("HVAC Sales / Comfort Advisors", text)
+        self.assertIn("BU ID: 1812", text)
+        self.assertIn("sales_options_fewer_than_three [high] open: 1", text)
+        self.assertIn("sales_arrival_after_first_half [medium] resolved: 1", text)
+        self.assertIn("Unknown Business Unit", text)
+        self.assertNotIn("Private Customer", text)
+        self.assertNotIn("123 Secret St", text)
+        self.assertNotIn("private@example.com", text)
+        self.assertNotIn("Private raw note", text)
+        self.assertNotIn("Private Advisor", text)
+
+    def test_service_titan_weekly_summary_dry_run_builds_summary_without_slack(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_dry_run=True,
+            service_titan_weekly_summary_enabled=True,
+        )
+        _insert_service_titan_violation(
+            self.h.db,
+            violation_key="weekly-dry-run",
+            metadata={"business_unit_id": "64326403", "business_unit_name": "Plumbing - Sales"},
+        )
+        service = ServiceTitanWeeklySummaryService(audit_settings, self.h.db, self.h.slack)
+        summary = service.run_once(datetime.now(timezone.utc))
+        text = summary.to_text()
+
+        self.assertTrue(summary.dry_run)
+        self.assertTrue(summary.slack_skipped_dry_run)
+        self.assertFalse(summary.slack_sent)
+        self.assertEqual(self.h.slack.messages, [])
+        self.assertIn("Plumbing Sales", text)
+        self.assertIn("sales_options_fewer_than_three [high] open: 1", text)
+
+    def test_service_titan_weekly_summary_uses_slack_alert_channel_and_dedupes_period(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_weekly_summary_enabled=True,
+            service_titan_weekly_summary_lookback_days=7,
+        )
+        _insert_service_titan_violation(
+            self.h.db,
+            violation_key="weekly-send",
+            metadata={"business_unit_id": "1812", "business_unit_name": "HVAC - Sales"},
+        )
+        service = ServiceTitanWeeklySummaryService(audit_settings, self.h.db, self.h.slack)
+        now = datetime.now(timezone.utc)
+        first = service.run_once(now)
+        second = service.run_once(now)
+
+        self.assertTrue(first.slack_sent)
+        self.assertEqual(len(self.h.slack.messages), 1)
+        self.assertEqual(self.h.slack.messages[0][0], "CST")
+        self.assertIn("ServiceTitan Weekly Audit Summary", self.h.slack.messages[0][1])
+        self.assertTrue(second.slack_skipped_duplicate)
+        self.assertEqual(len(self.h.slack.messages), 1)
+
+    def test_service_titan_weekly_summary_disabled_does_nothing_automatically(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_weekly_summary_enabled=False,
+        )
+        _insert_service_titan_violation(self.h.db, violation_key="weekly-disabled")
+        service = ServiceTitanWeeklySummaryService(audit_settings, self.h.db, self.h.slack)
+        summary = service.run_once(datetime.now(timezone.utc))
+
+        self.assertEqual(summary.status, "disabled")
+        self.assertTrue(summary.slack_skipped_disabled)
+        self.assertEqual(self.h.slack.messages, [])
+        self.assertFalse(service.should_run_at(datetime(2026, 6, 22, 8, 0, tzinfo=timezone.utc)))
+
+    def test_service_titan_weekly_summary_schedule_uses_configured_day_and_hour(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_weekly_summary_enabled=True,
+            service_titan_weekly_summary_day="MON",
+            service_titan_weekly_summary_hour=8,
+        )
+        service = ServiceTitanWeeklySummaryService(audit_settings, self.h.db, self.h.slack)
+
+        self.assertTrue(service.should_run_at(datetime(2026, 6, 22, 8, 0, tzinfo=timezone.utc)))
+        self.assertFalse(service.should_run_at(datetime(2026, 6, 22, 8, 1, tzinfo=timezone.utc)))
+        self.assertFalse(service.should_run_at(datetime(2026, 6, 23, 8, 0, tzinfo=timezone.utc)))
 
     def test_service_titan_runtime_diagnostics_masks_config_and_shows_state(self) -> None:
         audit_settings = settings(
