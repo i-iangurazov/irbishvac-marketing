@@ -60,6 +60,7 @@ HVAC_SERVICE_WORKFLOW_KEYWORDS = (
 )
 PLUMBING_SERVICE_BUSINESS_UNIT_IDS = ("64315277",)
 PLUMBING_SERVICE_JOB_TYPE_IDS = ("57804592", "64569478", "112338076")
+PLUMBING_OPTIONS_EXCLUDED_JOB_TYPES = ("57804592", "Water Heater Maintenance")
 CLOSED_STATUS_KEYWORDS = ("complete", "completed", "closed", "done")
 ACTIVE_OR_CLOSED_STATUS_KEYWORDS = (
     "scheduled",
@@ -356,6 +357,18 @@ def _plumbing_scope(*, required_data_fields: tuple[str, ...], statuses: tuple[st
     )
 
 
+def _plumbing_options_scope(
+    *,
+    required_data_fields: tuple[str, ...],
+    statuses: tuple[str, ...] = ("Completed", "Closed"),
+) -> RuleScope:
+    base = _plumbing_scope(required_data_fields=required_data_fields, statuses=statuses)
+    return replace(
+        base,
+        excludes_job_types=base.excludes_job_types + PLUMBING_OPTIONS_EXCLUDED_JOB_TYPES,
+    )
+
+
 def _scope_for_handbook_rule(definition: HandbookRuleDefinition) -> RuleScope:
     if definition.ruleset == RULESET_PLY_MATERIALS:
         return _ply_material_scope(definition)
@@ -500,7 +513,7 @@ def plumbing_service_rules() -> list[AuditRule]:
             ("status", "estimates"),
             "Review the Plumbing Service job and confirm Good / Better / Best options were presented or documented.",
             _plumbing_three_options,
-            scope=_plumbing_scope(required_data_fields=("status", "estimates")),
+            scope=_plumbing_options_scope(required_data_fields=("status", "estimates")),
         ),
         AuditRule(
             "plumbing_payment_missing_on_completed_job",
@@ -1351,10 +1364,45 @@ def _plumbing_three_options(job: ServiceTitanJob, settings: Settings, rule: Audi
     closed = _closed_or_pass(job, rule)
     if closed:
         return closed
+    has_no_charge_signal = job.invoice_total == 0 and job.invoice_balance == 0
+    has_charge_signal = (
+        (job.invoice_total is not None and job.invoice_total > 0)
+        or (job.payment_total is not None and job.payment_total > 0)
+        or ("paid" in job.invoice_status.lower())
+    )
+    billing_metadata = {
+        "invoice_total": job.invoice_total,
+        "invoice_balance": job.invoice_balance,
+        "payment_total": job.payment_total,
+        "payments_count": job.payments_count,
+        "invoice_status": job.invoice_status,
+        "billing_no_charge_signal": has_no_charge_signal,
+        "billing_charge_signal": has_charge_signal,
+    }
+    if has_no_charge_signal:
+        return rule.result(
+            job,
+            RESULT_NOT_APPLICABLE,
+            "Structured invoice data shows a zero-dollar no-charge job; Plumbing options rule does not apply.",
+            rule.action,
+            billing_metadata,
+        )
+    if not has_charge_signal:
+        return rule.result(
+            job,
+            RESULT_INSUFFICIENT,
+            _field_unavailable(
+                job,
+                "payments",
+                "Structured billing context was not available or did not show a positive charge; skipping Plumbing options failure to avoid false positives.",
+            ),
+            rule.action,
+            billing_metadata,
+        )
     if "estimates" not in job.present_fields or job.estimate_count is None:
         return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "estimates", "Estimate/option records were not available from ServiceTitan."), rule.action)
     required_count = max(3, settings.service_titan_min_repair_options)
-    metadata = {"options_count": job.estimate_count, "required_options_count": required_count}
+    metadata = {"options_count": job.estimate_count, "required_options_count": required_count, **billing_metadata}
     if job.estimate_count < required_count:
         return rule.result(
             job,

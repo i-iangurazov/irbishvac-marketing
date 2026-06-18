@@ -192,7 +192,10 @@ class ServiceTitanClient:
             return category in allowed
         if self._should_fetch_plumbing_only():
             allowed = {"appointments", "appointment_assignments", "estimates", "opportunities"}
-            if "plumbing_payment_missing_on_completed_job" not in disabled_rules:
+            if (
+                "plumbing_options_fewer_than_three" not in disabled_rules
+                or "plumbing_payment_missing_on_completed_job" not in disabled_rules
+            ):
                 allowed.add("invoices")
             if "plumbing_required_photos_missing" not in disabled_rules:
                 allowed.update({"attachments", "forms"})

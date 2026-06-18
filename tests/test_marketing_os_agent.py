@@ -2666,6 +2666,8 @@ class MarketingOsAgentTests(unittest.TestCase):
         rule = _st_rule(audit_settings, "plumbing_options_fewer_than_three")
         self.assertEqual(rule.scope.applies_to_business_units, ("64315277",))
         self.assertEqual(rule.scope.applies_to_job_types, ("57804592", "64569478", "112338076"))
+        self.assertIn("57804592", rule.scope.excludes_job_types)
+        self.assertIn("Water Heater Maintenance", rule.scope.excludes_job_types)
         self.assertIn("30209", rule.scope.excludes_job_types)
         self.assertIn("111922608", rule.scope.excludes_job_types)
         self.assertIn("112630828", rule.scope.excludes_job_types)
@@ -2686,6 +2688,31 @@ class MarketingOsAgentTests(unittest.TestCase):
         fail = rule.run(plumbing_job(estimate_count=2), audit_settings)
         self.assertEqual(fail.status, RESULT_FAIL)
         self.assertEqual(fail.metadata["options_count"], 2)
+        self.assertEqual(fail.metadata["invoice_total"], 300.0)
+
+        no_charge = rule.run(
+            plumbing_job(
+                estimate_count=0,
+                invoice_total=0.0,
+                invoice_balance=0.0,
+                payment_total=0.0,
+                payments_count=0,
+                invoice_status="",
+            ),
+            audit_settings,
+        )
+        self.assertEqual(no_charge.status, RESULT_NOT_APPLICABLE)
+        self.assertIn("zero-dollar", no_charge.explanation)
+
+        maintenance = rule.run(
+            plumbing_job(
+                estimate_count=1,
+                job_type_id="57804592",
+                job_type_name="Water Heater Maintenance",
+            ),
+            audit_settings,
+        )
+        self.assertEqual(maintenance.status, RESULT_NOT_APPLICABLE)
 
         insufficient = rule.run(
             plumbing_job(
@@ -2705,6 +2732,21 @@ class MarketingOsAgentTests(unittest.TestCase):
             audit_settings,
         )
         self.assertEqual(insufficient.status, RESULT_INSUFFICIENT)
+
+        missing_billing = rule.run(
+            plumbing_job(
+                estimate_count=1,
+                invoice_total=None,
+                invoice_balance=None,
+                payment_total=None,
+                payments_count=None,
+                invoice_status="",
+                present_fields={"status", "business_unit", "job_type", "estimates"},
+            ),
+            audit_settings,
+        )
+        self.assertEqual(missing_billing.status, RESULT_INSUFFICIENT)
+        self.assertIn("billing context", missing_billing.explanation)
 
         not_applicable = rule.run(plumbing_job(status="Scheduled"), audit_settings)
         self.assertEqual(not_applicable.status, RESULT_NOT_APPLICABLE)
@@ -2749,11 +2791,29 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertTrue(client._should_fetch_related_category("appointment_assignments"))
         self.assertTrue(client._should_fetch_related_category("estimates"))
         self.assertTrue(client._should_fetch_related_category("opportunities"))
-        self.assertFalse(client._should_fetch_related_category("invoices"))
+        self.assertTrue(client._should_fetch_related_category("invoices"))
         self.assertFalse(client._should_fetch_related_category("attachments"))
         self.assertFalse(client._should_fetch_related_category("forms"))
         self.assertFalse(client._should_fetch_related_category("technician_time"))
         self.assertEqual(client._related_skip_reason("forms"), "forms skipped for Plumbing-only enabled rules")
+
+        fully_disabled_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_disabled_rule_ids=[
+                "plumbing_options_fewer_than_three",
+                "plumbing_payment_missing_on_completed_job",
+                "plumbing_required_photos_missing",
+                "plumbing_diagnosis_form_missing",
+                "plumbing_arrival_outside_window",
+            ],
+        )
+        fully_disabled_client = ServiceTitanClient(fully_disabled_settings)
+        self.assertFalse(fully_disabled_client._should_fetch_related_category("invoices"))
 
     def test_plumbing_slack_payload_excludes_customer_pii(self) -> None:
         audit_settings = settings(
