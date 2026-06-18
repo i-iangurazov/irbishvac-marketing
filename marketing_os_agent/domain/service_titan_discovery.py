@@ -63,7 +63,7 @@ class ServiceTitanScopeDiscovery:
         now = now or datetime.now(timezone.utc)
         since = now.astimezone(timezone.utc) - timedelta(minutes=self.settings.service_titan_audit_lookback_minutes)
         try:
-            jobs = self.client.query_recent_jobs(since)
+            jobs = self.client.query_recent_jobs(since, apply_ruleset_prefilter=False)
         except ServiceTitanApiError as exc:
             summary.status = "api_error"
             summary.errors = 1

@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from logging import LogRecord
@@ -151,6 +152,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         service_titan_po_reconcile_within_hours=24,
         service_titan_alert_include_customer_name=False,
         sales_comfort_advisor_audit_enabled=True,
+        hvac_service_audit_enabled=False,
         technician_compliance_enabled=True,
         dispatcher_audit_enabled=True,
         owner_slack_map={"Emil": "UEMIL", "Vadim": "UVADIM"},
@@ -460,6 +462,25 @@ def sales_job(job_id: str = "sales-1001", **overrides: object) -> ServiceTitanJo
         workflow="Sales Consultation",
         technician_id="advisor-1",
         technician_name="Advisor One",
+        dispatcher_id="",
+        dispatcher_name="",
+        status="Completed",
+    )
+    base.update(overrides)
+    return st_job(job_id, **base)
+
+
+def hvac_job(job_id: str = "hvac-1001", **overrides: object) -> ServiceTitanJob:
+    base = dict(
+        business_unit_id="bu-hvac",
+        business_unit_name="HVAC Service",
+        job_type_id="jt-hvac-diagnostic",
+        job_type_name="HVAC Diagnostic Service",
+        department="Service",
+        trade="HVAC",
+        workflow="HVAC Service",
+        technician_id="tech-hvac-1",
+        technician_name="HVAC Tech One",
         dispatcher_id="",
         dispatcher_name="",
         status="Completed",
@@ -1338,6 +1359,44 @@ class MarketingOsAgentTests(unittest.TestCase):
         ]
         self.assertEqual(client._prefilter_sales_only_records(records), records)
 
+    def test_scope_discovery_does_not_apply_sales_only_prefilter(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_rule_scope_config={
+                "rulesets": {
+                    "Sales / Comfort Advisor Audit": {
+                        "applies_to": {
+                            "business_unit_ids": ["1812"],
+                            "job_type_ids": ["1816"],
+                            "workflows": None,
+                            "statuses": ["Completed"],
+                        }
+                    }
+                }
+            },
+        )
+        http = st_enrichment_http(
+            job_payload={
+                "id": "hvac-discovery",
+                "jobNumber": "J-hvac-discovery",
+                "status": "Completed",
+                "modifiedOn": "2026-05-15T16:00:00Z",
+                "businessUnitId": "9999",
+                "businessUnit": {"id": "9999", "name": "HVAC Service"},
+                "jobTypeId": "2000",
+                "jobType": {"id": "2000", "name": "HVAC Diagnostic"},
+                "trade": "HVAC",
+                "workflow": "HVAC Service",
+            }
+        )
+        discovery = ServiceTitanScopeDiscovery(audit_settings, ServiceTitanClient(audit_settings, http))
+        summary = discovery.run_once(datetime(2026, 5, 15, 17, tzinfo=timezone.utc))
+        self.assertEqual(summary.jobs_scanned, 1)
+        self.assertIn("HVAC Service", summary.value_counts["business_units"])
+
     def test_sales_only_client_skips_unneeded_related_categories_when_photos_disabled(self) -> None:
         audit_settings = settings(
             self.h.settings.sqlite_path,
@@ -1367,6 +1426,28 @@ class MarketingOsAgentTests(unittest.TestCase):
         client = ServiceTitanClient(audit_settings)
         self.assertTrue(client._should_fetch_related_category("attachments"))
         self.assertTrue(client._should_fetch_related_category("forms"))
+
+    def test_hvac_only_client_skips_unneeded_related_categories_when_photo_and_form_rules_disabled(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_disabled_rule_ids=["hvac_required_photos_missing", "hvac_diagnosis_form_missing"],
+        )
+        client = ServiceTitanClient(audit_settings)
+        self.assertTrue(client._should_fetch_related_category("appointments"))
+        self.assertTrue(client._should_fetch_related_category("appointment_assignments"))
+        self.assertTrue(client._should_fetch_related_category("invoices"))
+        self.assertTrue(client._should_fetch_related_category("estimates"))
+        self.assertTrue(client._should_fetch_related_category("opportunities"))
+        self.assertFalse(client._should_fetch_related_category("invoice_items"))
+        self.assertFalse(client._should_fetch_related_category("technician_time"))
+        self.assertFalse(client._should_fetch_related_category("attachments"))
+        self.assertFalse(client._should_fetch_related_category("forms"))
+        self.assertFalse(client._should_fetch_related_category("notes"))
+        self.assertEqual(client._related_skip_reason("forms"), "forms skipped for HVAC-only enabled rules")
 
     def test_service_titan_pass_and_insufficient_results_do_not_alert(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
@@ -2156,6 +2237,375 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.sales_rules_evaluated, 2)
         self.assertEqual(summary.sales_fail, 0)
         self.assertEqual(summary.sales_alerts_sent, 0)
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_hvac_rules_return_not_applicable_for_non_hvac_job(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        job = sales_job()
+        for rule_id in (
+            "hvac_options_fewer_than_three",
+            "hvac_payment_missing_on_completed_job",
+            "hvac_diagnosis_form_missing",
+            "hvac_required_photos_missing",
+            "hvac_arrival_outside_window",
+        ):
+            self.assertEqual(_st_rule(audit_settings, rule_id).run(job, audit_settings).status, RESULT_NOT_APPLICABLE)
+
+    def test_hvac_options_rule_passes_fails_and_handles_missing_data(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        rule = _st_rule(audit_settings, "hvac_options_fewer_than_three")
+        self.assertEqual(rule.run(hvac_job(estimate_count=3), audit_settings).status, RESULT_PASS)
+
+        fail = rule.run(hvac_job(estimate_count=2), audit_settings)
+        self.assertEqual(fail.status, RESULT_FAIL)
+        self.assertEqual(fail.metadata["options_count"], 2)
+
+        insufficient = rule.run(
+            hvac_job(
+                estimate_count=None,
+                present_fields={
+                    "status",
+                    "business_unit",
+                    "job_type",
+                    "department",
+                    "trade",
+                    "workflow",
+                    "payments",
+                    "forms",
+                    "hhr",
+                    "photos",
+                    "arrival_window",
+                    "arrived_at",
+                },
+            ),
+            audit_settings,
+        )
+        self.assertEqual(insufficient.status, RESULT_INSUFFICIENT)
+
+    def test_hvac_payment_rule_passes_fails_and_handles_missing_data(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        rule = _st_rule(audit_settings, "hvac_payment_missing_on_completed_job")
+        self.assertEqual(rule.run(hvac_job(payment_total=300, invoice_balance=0, invoice_status="Paid"), audit_settings).status, RESULT_PASS)
+
+        fail = rule.run(hvac_job(payment_total=0, payments_count=0, invoice_balance=300, invoice_status="Open"), audit_settings)
+        self.assertEqual(fail.status, RESULT_FAIL)
+        self.assertEqual(fail.metadata["payment_total"], 0)
+        self.assertEqual(fail.metadata["invoice_balance"], 300)
+
+        insufficient = rule.run(
+            hvac_job(
+                payment_total=None,
+                payments_count=None,
+                invoice_balance=None,
+                invoice_status="",
+                invoice_total=300,
+                present_fields={
+                    "status",
+                    "business_unit",
+                    "job_type",
+                    "department",
+                    "trade",
+                    "workflow",
+                    "estimates",
+                    "forms",
+                    "hhr",
+                    "photos",
+                    "arrival_window",
+                    "arrived_at",
+                },
+            ),
+            audit_settings,
+        )
+        self.assertEqual(insufficient.status, RESULT_INSUFFICIENT)
+
+    def test_hvac_diagnosis_form_requires_job_scoped_forms(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        rule = _st_rule(audit_settings, "hvac_diagnosis_form_missing")
+        self.assertEqual(rule.run(hvac_job(forms_count=1, hhr_completed=True), audit_settings).status, RESULT_PASS)
+
+        fail = rule.run(hvac_job(forms_count=0, hhr_completed=False), audit_settings)
+        self.assertEqual(fail.status, RESULT_FAIL)
+        self.assertEqual(fail.metadata["forms_count"], 0)
+
+        unscoped = replace(
+            hvac_job(
+                forms_count=None,
+                hhr_completed=None,
+                present_fields={
+                    "status",
+                    "business_unit",
+                    "job_type",
+                    "department",
+                    "trade",
+                    "workflow",
+                    "estimates",
+                    "payments",
+                    "photos",
+                    "arrival_window",
+                    "arrived_at",
+                },
+            ),
+            missing_data={"forms": "forms/v2 submissions returned an unscoped page"},
+        )
+        result = rule.run(unscoped, audit_settings)
+        self.assertEqual(result.status, RESULT_INSUFFICIENT)
+        self.assertIn("unscoped", result.explanation)
+
+    def test_hvac_photos_rule_can_fail_or_stay_insufficient_when_source_unavailable(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        rule = _st_rule(audit_settings, "hvac_required_photos_missing")
+        self.assertEqual(rule.run(hvac_job(photo_count=1), audit_settings).status, RESULT_PASS)
+
+        fail = rule.run(hvac_job(photo_count=0), audit_settings)
+        self.assertEqual(fail.status, RESULT_FAIL)
+        self.assertEqual(fail.metadata["photos_count"], 0)
+
+        unavailable = replace(
+            hvac_job(
+                photo_count=None,
+                present_fields={
+                    "status",
+                    "business_unit",
+                    "job_type",
+                    "department",
+                    "trade",
+                    "workflow",
+                    "estimates",
+                    "payments",
+                    "forms",
+                    "hhr",
+                    "arrival_window",
+                    "arrived_at",
+                },
+            ),
+            missing_data={"photos": "jpm job attachments endpoint returned HTTP 404"},
+        )
+        result = rule.run(unavailable, audit_settings)
+        self.assertEqual(result.status, RESULT_INSUFFICIENT)
+        self.assertIn("HTTP 404", result.explanation)
+
+    def test_hvac_arrival_rule_passes_fails_and_handles_missing_data(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        rule = _st_rule(audit_settings, "hvac_arrival_outside_window")
+        window_start = datetime(2026, 5, 15, 10, tzinfo=timezone.utc)
+        window_end = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            rule.run(hvac_job(arrival_window_start=window_start, arrival_window_end=window_end, arrived_at=datetime(2026, 5, 15, 10, 20, tzinfo=timezone.utc)), audit_settings).status,
+            RESULT_PASS,
+        )
+
+        late = rule.run(
+            hvac_job(arrival_window_start=window_start, arrival_window_end=window_end, arrived_at=datetime(2026, 5, 15, 10, 45, tzinfo=timezone.utc)),
+            audit_settings,
+        )
+        self.assertEqual(late.status, RESULT_FAIL)
+
+        missing = rule.run(
+            hvac_job(
+                arrival_window_start=window_start,
+                arrival_window_end=window_end,
+                arrived_at=None,
+                present_fields={
+                    "status",
+                    "business_unit",
+                    "job_type",
+                    "department",
+                    "trade",
+                    "workflow",
+                    "estimates",
+                    "payments",
+                    "forms",
+                    "hhr",
+                    "photos",
+                    "arrival_window",
+                },
+            ),
+            audit_settings,
+        )
+        self.assertEqual(missing.status, RESULT_INSUFFICIENT)
+
+    def test_hvac_scope_config_handles_numeric_ids_and_workflows_null(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_rule_scope_config={
+                "rulesets": {
+                    "HVAC Service Audit": {
+                        "applies_to": {
+                            "business_unit_ids": ["bu-hvac-numeric"],
+                            "job_type_ids": ["jt-hvac-numeric"],
+                            "workflows": None,
+                            "statuses": ["Completed", "Closed"],
+                        }
+                    }
+                }
+            },
+        )
+        job = hvac_job(
+            business_unit_id="bu-hvac-numeric",
+            business_unit_name="",
+            job_type_id="jt-hvac-numeric",
+            job_type_name="",
+            department="",
+            trade="",
+            workflow="",
+            estimate_count=3,
+            present_fields={
+                "status",
+                "business_unit",
+                "job_type",
+                "estimates",
+                "payments",
+                "forms",
+                "hhr",
+                "photos",
+                "arrival_window",
+                "arrived_at",
+            },
+        )
+        self.assertEqual(_st_rule(audit_settings, "hvac_options_fewer_than_three").run(job, audit_settings).status, RESULT_PASS)
+
+    def test_empty_hvac_scope_config_does_not_guess_from_numeric_ids(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        job = hvac_job(
+            business_unit_id="bu-hvac-numeric",
+            business_unit_name="",
+            job_type_id="jt-hvac-numeric",
+            job_type_name="",
+            department="",
+            trade="",
+            workflow="",
+            present_fields={
+                "status",
+                "business_unit",
+                "job_type",
+                "estimates",
+                "payments",
+                "forms",
+                "hhr",
+                "photos",
+                "arrival_window",
+                "arrived_at",
+            },
+        )
+        result = _st_rule(audit_settings, "hvac_options_fewer_than_three").run(job, audit_settings)
+        self.assertEqual(result.status, RESULT_INSUFFICIENT)
+        self.assertIn("workflow", result.explanation)
+
+    def test_disabled_hvac_photo_rule_does_not_send_alert(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_disabled_rule_ids=["hvac_required_photos_missing"],
+        )
+        job = hvac_job("hvac-photo-disabled", estimate_count=3, photo_count=0)
+        summary = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([job]), self.h.slack).audit_once(
+            datetime(2026, 5, 15, 16, tzinfo=timezone.utc)
+        )
+        self.assertEqual(summary.hvac_rules_evaluated, 4)
+        self.assertEqual(summary.hvac_fail, 0)
+        self.assertEqual(summary.hvac_alerts_sent, 0)
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_hvac_dry_run_and_non_fail_results_do_not_send_slack(self) -> None:
+        dry_run_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_dry_run=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        dry_run = ServiceTitanAuditService(dry_run_settings, self.h.db, FakeServiceTitan([hvac_job("hvac-dry", estimate_count=2)]), self.h.slack).audit_once(
+            datetime(2026, 5, 15, 16, tzinfo=timezone.utc)
+        )
+        self.assertEqual(dry_run.hvac_alerts_would_send, 1)
+        self.assertEqual(dry_run.hvac_alerts_sent, 0)
+        self.assertEqual(self.h.slack.messages, [])
+
+        live_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        non_hvac = ServiceTitanAuditService(live_settings, self.h.db, FakeServiceTitan([sales_job("non-hvac")]), self.h.slack).audit_once(
+            datetime(2026, 5, 15, 17, tzinfo=timezone.utc)
+        )
+        self.assertEqual(non_hvac.hvac_not_applicable, 5)
+        insufficient = replace(
+            hvac_job(
+                "hvac-insufficient",
+                estimate_count=None,
+                present_fields={"status", "business_unit", "job_type", "department", "trade", "workflow"},
+            ),
+            missing_data={"estimates": "sales/v2 estimates endpoint returned HTTP 403"},
+        )
+        insufficient_summary = ServiceTitanAuditService(live_settings, self.h.db, FakeServiceTitan([insufficient]), self.h.slack).audit_once(
+            datetime(2026, 5, 15, 18, tzinfo=timezone.utc)
+        )
+        self.assertGreaterEqual(insufficient_summary.hvac_insufficient_data, 1)
         self.assertEqual(self.h.slack.messages, [])
 
     def test_sales_enrichment_with_three_estimates_passes_options_rule(self) -> None:

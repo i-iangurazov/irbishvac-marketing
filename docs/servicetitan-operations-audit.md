@@ -11,7 +11,7 @@ The audit architecture is moving away from one large generic dispatcher audit th
 - Plumbing Service Audit.
 - Project Management / Install Audit.
 
-Only the Sales / Comfort Advisor Audit is implemented for this phase. The previous Technician Compliance, Dispatcher / Job Quality, and handbook-backed rule families remain available behind explicit flags for continued testing, but they should stay disabled during Sales-only production validation unless the scope has been reviewed.
+Sales / Comfort Advisor Audit is implemented for initial production monitoring. HVAC Service Audit is implemented as the next scoped ruleset for dry-run validation and reviewed rollout. The previous Technician Compliance, Dispatcher / Job Quality, and handbook-backed rule families remain available behind explicit flags for continued testing, but they should stay disabled during Sales-only or HVAC-only production validation unless the scope has been reviewed.
 
 ## Architecture
 
@@ -114,6 +114,47 @@ Totals:
 - open: 25
 ```
 
+## HVAC Service Audit
+
+The HVAC Service Audit applies only to jobs that match HVAC Service scope. It is controlled by `HVAC_SERVICE_AUDIT_ENABLED`, which defaults to `false`.
+
+The default HVAC scope uses visible HVAC/service workflow context such as `hvac`, `heating`, `cooling`, `air conditioning`, `service`, `diagnostic`, `repair`, `maintenance`, and `tune up`. Production tenants should run scope discovery and configure exact business unit, job type, tag, department, trade, or workflow values in `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON`.
+
+If a tenant exposes only numeric `businessUnitId` / `jobTypeId` values and no workflow or name context, HVAC rules intentionally stay `insufficient_data` until reviewed HVAC IDs are configured and `"workflows": null` is set. This prevents the agent from guessing which numeric jobs are HVAC Service.
+
+HVAC rules:
+
+- `hvac_options_fewer_than_three`: closed HVAC Service jobs must show at least three estimate/option records. If estimate data is unavailable, the result is `insufficient_data`.
+- `hvac_payment_missing_on_completed_job`: closed HVAC Service jobs with a positive invoice total must show payment, paid invoice status, or zero balance. If invoice/payment data is unavailable, the result is `insufficient_data`.
+- `hvac_diagnosis_form_missing`: closed HVAC Service jobs must include a completed diagnosis/service form only when job-scoped form submission data is available. Unscoped tenant-level form pages stay `insufficient_data`.
+- `hvac_required_photos_missing`: closed HVAC Service jobs must include required photos only when job-scoped photos/attachments are available. This rule should stay disabled until dry-run proves the tenant exposes scoped job photos.
+- `hvac_arrival_outside_window`: HVAC Service appointments should arrive within the configured first-window threshold. If arrival-window or actual-arrival data is unavailable, the result is `insufficient_data`.
+
+HVAC data mapping:
+
+- Options use the same safe ServiceTitan option sources as Sales: `/sales/v2/tenant/{tenant}/estimates`, `/sales/v2/tenant/{tenant}/opportunities`, or job-level `estimateIds`.
+- Payment uses invoice/payment fields from `/accounting/v2/tenant/{tenant}/invoices`. It passes when payment is visible, invoice balance is zero or less, or invoice status indicates paid.
+- Diagnosis forms use `/forms/v2/tenant/{tenant}/submissions?jobId=...` only when the response is safely job-scoped. Broad or unscoped form pages are not treated as evidence.
+- Photos use `/jpm/v2/tenant/{tenant}/jobs/{job}/attachments` or scoped form image attachments only when those sources are available and job-scoped.
+- Arrival uses `/jpm/v2/tenant/{tenant}/appointments` and `/dispatch/v2/tenant/{tenant}/appointment-assignments` when those endpoints expose arrival timestamps. Payroll timesheets remain a generic enrichment source outside HVAC-only optimized validation, but HVAC-only mode does not depend on them.
+- With `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true`, HVAC jobs log sanitized `servicetitan_hvac_field_availability` entries with job ID/job number, scope labels, related-record counts, availability booleans, payment/form/photo counts, and per-rule `insufficient_data` reasons. Customer names, addresses, phone numbers, emails, raw notes, secrets, and tokens are not logged.
+
+HVAC Service validation found this strict candidate scope in this tenant:
+
+```env
+SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rulesets":{"HVAC Service Audit":{"applies_to":{"business_unit_ids":["1810"],"job_type_ids":["1933","6807409","7020890","7131342"],"workflows":null,"statuses":["Completed","Closed"]}}}}
+```
+
+Those IDs mean `1810 / HVAC - Service` with `1933 / HVAC Diagnostic`, `6807409 / Tune Up`, `7020890 / HVAC Repair`, and `7131342 / Diagnostics Members`. Keep `1812 / 1816` HVAC Sales, `1809 / 1815` HVAC Install, `64326403 / 54086644 / 123562931` Plumbing Sales, and `64315277 / 112338076` Plumbing Service excluded from HVAC Service scope.
+
+This is future dry-run configuration, not live activation. Keep live HVAC alerts disabled until the business confirms whether those four HVAC Service job types require three options and whether the payment rule is acceptable for live alerts. If HVAC dry-run testing is enabled, keep these rules disabled:
+
+```env
+SERVICE_TITAN_DISABLED_RULE_IDS_JSON=["sales_photos_missing","hvac_required_photos_missing","hvac_diagnosis_form_missing","hvac_arrival_outside_window"]
+```
+
+Enable `hvac_required_photos_missing` later only after dry-run proves scoped job photos are available. Enable `hvac_diagnosis_form_missing` later only after dry-run proves scoped job forms are available. Enable `hvac_arrival_outside_window` later only after ServiceTitan exposes a reliable job/appointment arrival timestamp; the targeted sample had appointment windows but no `arrived_at` values.
+
 ## Current-State Report
 
 Current data flow:
@@ -201,6 +242,20 @@ This leaves `sales_options_fewer_than_three` and `sales_arrival_after_first_half
 
 Enable `sales_photos_missing` later by removing it from `SERVICE_TITAN_DISABLED_RULE_IDS_JSON` only after dry-run proves that ServiceTitan exposes scoped job photos or scoped form image attachments. Broad tenant-level form pages and unavailable attachment endpoints must remain `insufficient_data` and should not be used as photo evidence.
 
+Initial HVAC Service validation should use reviewed HVAC IDs and keep form/photo/arrival rules disabled until the tenant exposes scoped sources and reliable arrival timestamps. This is a future dry-run setup only; do not use it for live alerts until business review is complete:
+
+```env
+HVAC_SERVICE_AUDIT_ENABLED=true
+SALES_COMFORT_ADVISOR_AUDIT_ENABLED=false
+TECHNICIAN_COMPLIANCE_ENABLED=false
+DISPATCHER_AUDIT_ENABLED=false
+SERVICE_TITAN_AUDIT_DRY_RUN=true
+SERVICE_TITAN_DISABLED_RULE_IDS_JSON=["sales_photos_missing","hvac_required_photos_missing","hvac_diagnosis_form_missing","hvac_arrival_outside_window"]
+SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rulesets":{"HVAC Service Audit":{"applies_to":{"business_unit_ids":["1810"],"job_type_ids":["1933","6807409","7020890","7131342"],"workflows":null,"statuses":["Completed","Closed"]}}}}
+```
+
+This leaves `hvac_options_fewer_than_three` and `hvac_payment_missing_on_completed_job` available for dry-run validation while suppressing photo/form/arrival false positives. In the targeted sample, `hvac_options_fewer_than_three` failed 14 of 20 matched jobs and needs business confirmation before live alerts. `hvac_payment_missing_on_completed_job` mostly evaluated cleanly but the single fail should be reviewed before live alerts.
+
 Per-rule overrides still work. Example:
 
 ```env
@@ -229,6 +284,14 @@ Sales / Comfort Advisor Audit:
 - Closed Sales job has fewer than 3 options.
 - Closed Sales job is missing required photos.
 - Sales advisor arrived after the first half of the appointment window.
+
+HVAC Service Audit:
+
+- Closed HVAC Service job has fewer than 3 options.
+- Closed HVAC Service job is missing payment.
+- Closed HVAC Service job is missing diagnosis/service form.
+- Closed HVAC Service job is missing required photos.
+- HVAC Service arrival is outside the configured window threshold.
 
 Legacy Technician Compliance, disabled by default for the Sales-first phase:
 
@@ -325,6 +388,7 @@ SERVICE_TITAN_WEEKLY_SUMMARY_DAY=MON
 SERVICE_TITAN_WEEKLY_SUMMARY_HOUR=8
 SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS=7
 SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true
+HVAC_SERVICE_AUDIT_ENABLED=false
 TECHNICIAN_COMPLIANCE_ENABLED=false
 DISPATCHER_AUDIT_ENABLED=false
 SERVICE_TITAN_FIRST_CALL_GRACE_MINUTES=0
@@ -828,6 +892,10 @@ Review:
 - Sales rules evaluated.
 - Sales pass/fail/insufficient_data/not_applicable counts.
 - Sales alerts that would have been sent and Sales alerts sent.
+- HVAC jobs scanned.
+- HVAC rules evaluated.
+- HVAC pass/fail/insufficient_data/not_applicable counts.
+- HVAC alerts that would have been sent and HVAC alerts sent.
 - `insufficient_data by rule`.
 - `not_applicable by rule`.
 - Missing data category counts.
@@ -931,6 +999,7 @@ servicetitan_audit_cycle_completed
 - Keep `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false` unless you explicitly want historical first-run alerts.
 - Keep `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE` set. Use `1` only for controlled one-alert historical validation.
 - Set `SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true`.
+- Set `HVAC_SERVICE_AUDIT_ENABLED=true` only for HVAC dry-run validation or reviewed HVAC rollout.
 - Keep `TECHNICIAN_COMPLIANCE_ENABLED=false` and `DISPATCHER_AUDIT_ENABLED=false` during Sales-only validation.
 - Set `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}` until discovery confirms tenant-specific scope narrowing is needed.
 - Run `python3 -m marketing_os_agent init-db` after deploy if the SQLite file is new.

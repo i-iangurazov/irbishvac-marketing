@@ -243,6 +243,7 @@ class Settings:
     service_titan_po_reconcile_within_hours: int
     service_titan_alert_include_customer_name: bool
     sales_comfort_advisor_audit_enabled: bool
+    hvac_service_audit_enabled: bool
     technician_compliance_enabled: bool
     dispatcher_audit_enabled: bool
 
@@ -385,6 +386,7 @@ class Settings:
             service_titan_po_reconcile_within_hours=_int_env("SERVICE_TITAN_PO_RECONCILE_WITHIN_HOURS", 24),
             service_titan_alert_include_customer_name=_bool_env("SERVICE_TITAN_ALERT_INCLUDE_CUSTOMER_NAME", False),
             sales_comfort_advisor_audit_enabled=_bool_env("SALES_COMFORT_ADVISOR_AUDIT_ENABLED", True),
+            hvac_service_audit_enabled=_bool_env("HVAC_SERVICE_AUDIT_ENABLED", False),
             technician_compliance_enabled=_bool_env("TECHNICIAN_COMPLIANCE_ENABLED", False),
             dispatcher_audit_enabled=_bool_env("DISPATCHER_AUDIT_ENABLED", False),
             owner_slack_map=_json_map_env("OWNER_SLACK_MAP_JSON"),

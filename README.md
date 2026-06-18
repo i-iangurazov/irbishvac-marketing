@@ -68,6 +68,7 @@ Defaults:
 - `SERVICE_TITAN_AUDIT_OVERLAP_SECONDS=300`
 - `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE=25`
 - `SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true`
+- `HVAC_SERVICE_AUDIT_ENABLED=false`
 - `TECHNICIAN_COMPLIANCE_ENABLED=false`
 - `DISPATCHER_AUDIT_ENABLED=false`
 - `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}`
@@ -165,10 +166,11 @@ The importer needs Emil’s real campaign data. It does not invent campaign entr
 
 ## ServiceTitan Operations Audit
 
-The ServiceTitan Operations Audit Agent is disabled by default and runs in the same process as the Task Dispatcher when `SERVICE_TITAN_AUDIT_ENABLED=true`. It uses one shared ServiceTitan client, one shared SQLite store, and one Slack alert path for two independent rulesets:
+The ServiceTitan Operations Audit Agent is disabled by default and runs in the same process as the Task Dispatcher when `SERVICE_TITAN_AUDIT_ENABLED=true`. It uses one shared ServiceTitan client, one shared SQLite store, and one Slack alert path for independently enabled scoped rulesets:
 
-- Technician Compliance: clock-in, clock-out, lunch break, diagnostic fee, required phases, and required operational data.
-- Dispatcher / Job Quality Audit: arrival inside the first 30 minutes of the arrival window, diagnostic fee reflected, options presented, notes, photos, and supporting evidence.
+- Sales / Comfort Advisor Audit: three options, Sales photos when scoped photos are available, and first-half appointment-window arrival.
+- HVAC Service Audit: three options, payment on completed jobs, diagnosis/service form, photos when scoped photos are available, and arrival-window checks.
+- Legacy Technician Compliance and Dispatcher / Job Quality Audit remain behind explicit flags and should stay disabled until reviewed.
 
 Rules return `pass`, `fail`, `insufficient_data`, `not_applicable`, or `error`. `insufficient_data` and `not_applicable` are logged and not alerted, so unavailable ServiceTitan fields and out-of-scope jobs do not create false positives.
 

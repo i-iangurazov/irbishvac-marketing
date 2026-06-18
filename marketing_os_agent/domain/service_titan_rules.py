@@ -18,6 +18,7 @@ RESULT_ERROR = "error"
 RULESET_TECHNICIAN = "Technician Compliance"
 RULESET_DISPATCHER = "Dispatcher / Job Quality Audit"
 RULESET_SALES = "Sales / Comfort Advisor Audit"
+RULESET_HVAC = "HVAC Service Audit"
 RULESET_SERVICE_CALL = "Service Call Handbook Audit"
 RULESET_PLY_MATERIALS = "Ply / PO Materials Audit"
 RULESET_FOLLOW_UP = "Follow-up / Escalation Audit"
@@ -42,6 +43,19 @@ SALES_WORKFLOW_KEYWORDS = (
     "estimate",
     "consultation",
     "replacement",
+)
+HVAC_SERVICE_WORKFLOW_KEYWORDS = (
+    "hvac",
+    "heating",
+    "cooling",
+    "air conditioning",
+    "service",
+    "diagnostic",
+    "diagnosis",
+    "repair",
+    "maintenance",
+    "tune up",
+    "tune-up",
 )
 CLOSED_STATUS_KEYWORDS = ("complete", "completed", "closed", "done")
 ACTIVE_OR_CLOSED_STATUS_KEYWORDS = (
@@ -179,6 +193,8 @@ def active_service_titan_rules(settings: Settings) -> list[AuditRule]:
     rules: list[AuditRule] = []
     if settings.sales_comfort_advisor_audit_enabled:
         rules.extend(sales_comfort_advisor_rules())
+    if settings.hvac_service_audit_enabled:
+        rules.extend(hvac_service_rules())
     if settings.technician_compliance_enabled:
         rules.extend(technician_compliance_rules())
     if settings.dispatcher_audit_enabled:
@@ -262,6 +278,41 @@ def _sales_scope(*, required_data_fields: tuple[str, ...], statuses: tuple[str, 
     )
 
 
+def _hvac_scope(*, required_data_fields: tuple[str, ...], statuses: tuple[str, ...] = CLOSED_STATUS_KEYWORDS) -> RuleScope:
+    return RuleScope(
+        handbook_source="HVAC Service audit configuration",
+        applies_to_job_statuses=statuses,
+        applies_to_workflows=HVAC_SERVICE_WORKFLOW_KEYWORDS,
+        excludes_job_types=(
+            "admin",
+            "internal",
+            "material only",
+            "warehouse only",
+            "install",
+            "project",
+            "sales",
+            "comfort advisor",
+            "plumbing",
+        ),
+        excludes_statuses=EXCLUDED_STATUS_KEYWORDS,
+        excludes_tags=(
+            "admin",
+            "internal",
+            "install",
+            "project management",
+            "sales",
+            "comfort advisor",
+            "plumbing",
+            "canceled",
+            "cancelled",
+            "no access",
+        ),
+        required_context_fields=("status",),
+        required_data_fields=required_data_fields,
+        alert_routing="hvac service audit channel",
+    )
+
+
 def _scope_for_handbook_rule(definition: HandbookRuleDefinition) -> RuleScope:
     if definition.ruleset == RULESET_PLY_MATERIALS:
         return _ply_material_scope(definition)
@@ -325,6 +376,69 @@ def sales_comfort_advisor_rules() -> list[AuditRule]:
             "Review advisor dispatch timing and coach the arrival process if needed.",
             _sales_arrival_first_half,
             scope=_sales_scope(
+                required_data_fields=("arrival_window", "arrived_at"),
+                statuses=ACTIVE_OR_CLOSED_STATUS_KEYWORDS,
+            ),
+        ),
+    ]
+
+
+def hvac_service_rules() -> list[AuditRule]:
+    return [
+        AuditRule(
+            "hvac_options_fewer_than_three",
+            RULESET_HVAC,
+            "high",
+            "Closed HVAC Service job has fewer than 3 options",
+            "Closed HVAC Service jobs must show at least three options or estimates.",
+            ("status", "estimates"),
+            "Review the HVAC Service job and confirm Good / Better / Best options were presented or documented.",
+            _hvac_three_options,
+            scope=_hvac_scope(required_data_fields=("status", "estimates")),
+        ),
+        AuditRule(
+            "hvac_payment_missing_on_completed_job",
+            RULESET_HVAC,
+            "high",
+            "Closed HVAC Service job is missing payment",
+            "Closed HVAC Service jobs with a positive invoice total must show payment, paid status, or zero balance.",
+            ("status", "payments"),
+            "Review the invoice/payment record and collect or correct payment documentation.",
+            _hvac_payment_on_completed_job,
+            scope=_hvac_scope(required_data_fields=("status", "payments")),
+        ),
+        AuditRule(
+            "hvac_diagnosis_form_missing",
+            RULESET_HVAC,
+            "medium",
+            "Closed HVAC Service job is missing diagnosis/service form",
+            "Closed HVAC Service jobs must include a completed diagnosis or equivalent service form when job-scoped form data is available.",
+            ("status", "forms"),
+            "Complete the diagnosis/service form or document why it was not required.",
+            _hvac_diagnosis_form,
+            scope=_hvac_scope(required_data_fields=("status", "forms")),
+        ),
+        AuditRule(
+            "hvac_required_photos_missing",
+            RULESET_HVAC,
+            "medium",
+            "Closed HVAC Service job is missing required photos",
+            "Closed HVAC Service jobs must include required photos or attachments when job-scoped photo data is available.",
+            ("status", "photos"),
+            "Upload the required HVAC Service photos or document why photos were not required.",
+            _hvac_photos,
+            scope=_hvac_scope(required_data_fields=("status", "photos")),
+        ),
+        AuditRule(
+            "hvac_arrival_outside_window",
+            RULESET_HVAC,
+            "medium",
+            "HVAC Service arrival is outside the configured window threshold",
+            "HVAC Service appointments should arrive within the configured first-window threshold.",
+            ("arrival_window", "arrived_at"),
+            "Review dispatch timing and coach the arrival process if needed.",
+            _arrival_window,
+            scope=_hvac_scope(
                 required_data_fields=("arrival_window", "arrived_at"),
                 statuses=ACTIVE_OR_CLOSED_STATUS_KEYWORDS,
             ),
@@ -1067,6 +1181,64 @@ def _sales_arrival_first_half(job: ServiceTitanJob, _settings: Settings, rule: A
             metadata,
         )
     return rule.result(job, RESULT_PASS, "Advisor arrived before the first half of the appointment window ended.", rule.action, metadata)
+
+
+def _hvac_three_options(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "estimates" not in job.present_fields or job.estimate_count is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "estimates", "Estimate/option records were not available from ServiceTitan."), rule.action)
+    required_count = max(3, settings.service_titan_min_repair_options)
+    metadata = {"options_count": job.estimate_count, "required_options_count": required_count}
+    if job.estimate_count < required_count:
+        return rule.result(
+            job,
+            RESULT_FAIL,
+            f"Only {job.estimate_count} option/estimate record(s) were found; required minimum is {required_count}.",
+            rule.action,
+            metadata,
+        )
+    return rule.result(job, RESULT_PASS, "Required HVAC Service option count is satisfied.", rule.action, metadata)
+
+
+def _hvac_payment_on_completed_job(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:
+    result = _payment_on_completed_job(job, settings, rule)
+    metadata = {
+        **result.metadata,
+        "payment_total": job.payment_total,
+        "payments_count": job.payments_count,
+        "invoice_balance": job.invoice_balance,
+        "invoice_status": job.invoice_status,
+    }
+    return replace(result, metadata=metadata)
+
+
+def _hvac_diagnosis_form(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "forms" not in job.present_fields or job.forms_count is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "forms", "Job-scoped form submissions were not available from ServiceTitan."), rule.action)
+    metadata = {
+        "forms_count": job.forms_count,
+        "diagnosis_form_present": bool(job.hhr_completed or job.forms_count > 0),
+    }
+    if job.hhr_completed is False or job.forms_count <= 0:
+        return rule.result(job, RESULT_FAIL, "Closed HVAC Service job has no completed job-scoped diagnosis/service form.", rule.action, metadata)
+    return rule.result(job, RESULT_PASS, "Job-scoped diagnosis/service form evidence is present.", rule.action, metadata)
+
+
+def _hvac_photos(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "photos" not in job.present_fields or job.photo_count is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "photos", "Job-scoped photo/attachment records were not available from ServiceTitan."), rule.action)
+    metadata = {"photos_count": job.photo_count}
+    if job.photo_count <= 0:
+        return rule.result(job, RESULT_FAIL, "Closed HVAC Service job has no uploaded photos or image attachments.", rule.action, metadata)
+    return rule.result(job, RESULT_PASS, "Required HVAC Service photos are present.", rule.action, metadata)
 
 
 def _options_presented(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:

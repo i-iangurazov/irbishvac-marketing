@@ -19,6 +19,7 @@ from .service_titan_rules import (
     RESULT_INSUFFICIENT,
     RESULT_NOT_APPLICABLE,
     RESULT_PASS,
+    RULESET_HVAC,
     RULESET_SALES,
     RuleResult,
     active_service_titan_rules,
@@ -71,6 +72,15 @@ class ServiceTitanAuditSummary:
     sales_alerts_sent: int = 0
     sales_alerts_would_send: int = 0
     sales_alerts_skipped_limit: int = 0
+    hvac_jobs_scanned: int = 0
+    hvac_rules_evaluated: int = 0
+    hvac_pass: int = 0
+    hvac_fail: int = 0
+    hvac_insufficient_data: int = 0
+    hvac_not_applicable: int = 0
+    hvac_alerts_sent: int = 0
+    hvac_alerts_would_send: int = 0
+    hvac_alerts_skipped_limit: int = 0
     result_counts: dict[str, int] = field(default_factory=dict)
     insufficient_data_by_rule: dict[str, int] = field(default_factory=dict)
     not_applicable_by_rule: dict[str, int] = field(default_factory=dict)
@@ -114,6 +124,15 @@ class ServiceTitanAuditSummary:
             f"- sales alerts that would have been sent: {self.sales_alerts_would_send}",
             f"- sales alerts sent: {self.sales_alerts_sent}",
             f"- sales alerts skipped due to max alert limit: {self.sales_alerts_skipped_limit}",
+            f"- hvac jobs scanned: {self.hvac_jobs_scanned}",
+            f"- hvac rules evaluated: {self.hvac_rules_evaluated}",
+            f"- hvac pass: {self.hvac_pass}",
+            f"- hvac fail: {self.hvac_fail}",
+            f"- hvac insufficient_data: {self.hvac_insufficient_data}",
+            f"- hvac not_applicable: {self.hvac_not_applicable}",
+            f"- hvac alerts that would have been sent: {self.hvac_alerts_would_send}",
+            f"- hvac alerts sent: {self.hvac_alerts_sent}",
+            f"- hvac alerts skipped due to max alert limit: {self.hvac_alerts_skipped_limit}",
             f"- alerts sent: {self.alerts_sent}",
             f"- alerts that would have been sent: {self.alerts_would_send}",
             f"- alerts skipped due to dedupe: {self.alerts_skipped_dedupe}",
@@ -514,12 +533,14 @@ class ServiceTitanAuditService:
             for category in job.missing_data:
                 summary.missing_data_category_counts[category] = summary.missing_data_category_counts.get(category, 0) + 1
         sales_job_ids: set[str] = set()
+        hvac_job_ids: set[str] = set()
         alert_attempts = 0
         for job in jobs:
             try:
                 results = self._evaluate_job(job)
                 if self.settings.service_titan_audit_debug_fields:
                     self._log_sales_debug(job, results)
+                    self._log_hvac_debug(job, results)
                 for result in results:
                     summary.rules_evaluated += 1
                     counts[result.status] = counts.get(result.status, 0) + 1
@@ -536,6 +557,18 @@ class ServiceTitanAuditService:
                             summary.sales_insufficient_data += 1
                         elif result.status == RESULT_NOT_APPLICABLE:
                             summary.sales_not_applicable += 1
+                    if result.ruleset == RULESET_HVAC:
+                        summary.hvac_rules_evaluated += 1
+                        if result.status != RESULT_NOT_APPLICABLE:
+                            hvac_job_ids.add(job.job_id)
+                        if result.status == RESULT_PASS:
+                            summary.hvac_pass += 1
+                        elif result.status == RESULT_FAIL:
+                            summary.hvac_fail += 1
+                        elif result.status == RESULT_INSUFFICIENT:
+                            summary.hvac_insufficient_data += 1
+                        elif result.status == RESULT_NOT_APPLICABLE:
+                            summary.hvac_not_applicable += 1
                     if result.status == RESULT_FAIL:
                         summary.violations_detected += 1
                         destination = result.recommended_alert_recipient or "slack audit channel"
@@ -552,6 +585,8 @@ class ServiceTitanAuditService:
                             summary.alerts_sent += 1
                             if result.ruleset == RULESET_SALES:
                                 summary.sales_alerts_sent += 1
+                            if result.ruleset == RULESET_HVAC:
+                                summary.hvac_alerts_sent += 1
                         elif alert_status == "failed":
                             alert_attempts += 1
                             summary.alerts_failed += 1
@@ -559,12 +594,16 @@ class ServiceTitanAuditService:
                             summary.alerts_would_send += 1
                             if result.ruleset == RULESET_SALES:
                                 summary.sales_alerts_would_send += 1
+                            if result.ruleset == RULESET_HVAC:
+                                summary.hvac_alerts_would_send += 1
                         elif alert_status == "deduped":
                             summary.alerts_skipped_dedupe += 1
                         elif alert_status == "limited":
                             summary.alerts_skipped_limit += 1
                             if result.ruleset == RULESET_SALES:
                                 summary.sales_alerts_skipped_limit += 1
+                            if result.ruleset == RULESET_HVAC:
+                                summary.hvac_alerts_skipped_limit += 1
                     elif result.status == RESULT_PASS:
                         if not summary.dry_run and self.db.resolve_service_titan_violation(result.violation_key):
                             logger.info("servicetitan_violation_resolved", extra={"violation_key": result.violation_key, "rule_id": result.rule_id})
@@ -590,6 +629,7 @@ class ServiceTitanAuditService:
                 summary.errors += 1
                 logger.warning("servicetitan_job_audit_failed", exc_info=True, extra={"job_id": job.job_id, "error": str(exc)})
         summary.sales_jobs_scanned = len(sales_job_ids)
+        summary.hvac_jobs_scanned = len(hvac_job_ids)
 
         max_modified = max((job.modified_on for job in jobs if job.modified_on), default=now)
         if summary.dry_run:
@@ -640,6 +680,15 @@ class ServiceTitanAuditService:
                 "sales_alerts_sent": summary.sales_alerts_sent,
                 "sales_alerts_would_send": summary.sales_alerts_would_send,
                 "sales_alerts_skipped_limit": summary.sales_alerts_skipped_limit,
+                "hvac_jobs_seen": summary.hvac_jobs_scanned,
+                "hvac_rules_evaluated": summary.hvac_rules_evaluated,
+                "hvac_pass": summary.hvac_pass,
+                "hvac_fail": summary.hvac_fail,
+                "hvac_insufficient_data": summary.hvac_insufficient_data,
+                "hvac_not_applicable": summary.hvac_not_applicable,
+                "hvac_alerts_sent": summary.hvac_alerts_sent,
+                "hvac_alerts_would_send": summary.hvac_alerts_would_send,
+                "hvac_alerts_skipped_limit": summary.hvac_alerts_skipped_limit,
                 "alerts_sent": summary.alerts_sent,
                 "alerts_would_send": summary.alerts_would_send,
                 "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
@@ -682,6 +731,15 @@ class ServiceTitanAuditService:
                 "sales_alerts_sent": summary.sales_alerts_sent,
                 "sales_alerts_would_send": summary.sales_alerts_would_send,
                 "sales_alerts_skipped_limit": summary.sales_alerts_skipped_limit,
+                "hvac_jobs_seen": summary.hvac_jobs_scanned,
+                "hvac_rules_evaluated": summary.hvac_rules_evaluated,
+                "hvac_pass": summary.hvac_pass,
+                "hvac_fail": summary.hvac_fail,
+                "hvac_insufficient_data": summary.hvac_insufficient_data,
+                "hvac_not_applicable": summary.hvac_not_applicable,
+                "hvac_alerts_sent": summary.hvac_alerts_sent,
+                "hvac_alerts_would_send": summary.hvac_alerts_would_send,
+                "hvac_alerts_skipped_limit": summary.hvac_alerts_skipped_limit,
                 "alerts_sent": summary.alerts_sent,
                 "alerts_would_send": summary.alerts_would_send,
                 "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
@@ -706,6 +764,11 @@ class ServiceTitanAuditService:
                 "sales_fail": summary.sales_fail,
                 "sales_alerts_would_send": summary.sales_alerts_would_send,
                 "sales_alerts_sent": summary.sales_alerts_sent,
+                "hvac_jobs_scanned": summary.hvac_jobs_scanned,
+                "hvac_pass": summary.hvac_pass,
+                "hvac_fail": summary.hvac_fail,
+                "hvac_alerts_would_send": summary.hvac_alerts_would_send,
+                "hvac_alerts_sent": summary.hvac_alerts_sent,
                 "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
                 "alerts_skipped_limit": summary.alerts_skipped_limit,
                 "alerts_failed": summary.alerts_failed,
@@ -750,6 +813,44 @@ class ServiceTitanAuditService:
                     for result in sales_results
                 },
                 "sales_rule_insufficient_reasons": insufficient,
+                "missing_data_fields": sorted(job.missing_data),
+            },
+        )
+
+    def _log_hvac_debug(self, job: ServiceTitanJob, results: list[RuleResult]) -> None:
+        hvac_results = [result for result in results if result.ruleset == RULESET_HVAC]
+        if not hvac_results or all(result.status == RESULT_NOT_APPLICABLE for result in hvac_results):
+            return
+        insufficient = {
+            result.rule_id: result.explanation
+            for result in hvac_results
+            if result.status == RESULT_INSUFFICIENT
+        }
+        logger.info(
+            "servicetitan_hvac_field_availability",
+            extra={
+                "job_id": job.job_id,
+                "job_number": job.job_number,
+                "business_unit": job.business_unit_name or job.business_unit_id,
+                "job_type": job.job_type_name or job.job_type_id,
+                "status": job.status,
+                "has_appointment_window": bool(job.arrival_window_start and job.arrival_window_end),
+                "has_arrival_time": bool(job.arrived_at),
+                "estimates_count": job.related_counts.get("estimates", 0),
+                "opportunities_count": job.related_counts.get("opportunities", 0),
+                "options_count": job.estimate_count,
+                "invoices_count": job.related_counts.get("invoices", 0),
+                "payments_count": job.payments_count,
+                "invoice_status": job.invoice_status,
+                "attachments_count": job.related_counts.get("attachments", 0),
+                "photos_count": job.photo_count,
+                "forms_count": job.related_counts.get("forms", 0),
+                "hvac_rule_statuses": {result.rule_id: result.status for result in hvac_results},
+                "hvac_scope_decisions": {
+                    result.rule_id: result.metadata.get("scope_decision", "")
+                    for result in hvac_results
+                },
+                "hvac_rule_insufficient_reasons": insufficient,
                 "missing_data_fields": sorted(job.missing_data),
             },
         )
@@ -891,6 +992,16 @@ class ServiceTitanAuditService:
             lines.append(f"*Options count:* {result.metadata['options_count']}{suffix}")
         if "photos_count" in result.metadata:
             lines.append(f"*Photos count:* {result.metadata['photos_count']}")
+        if "payment_total" in result.metadata:
+            lines.append(f"*Payment total:* {result.metadata['payment_total']}")
+        if "invoice_balance" in result.metadata:
+            lines.append(f"*Invoice balance:* {result.metadata['invoice_balance']}")
+        if "invoice_status" in result.metadata and result.metadata.get("invoice_status"):
+            lines.append(f"*Invoice status:* {result.metadata['invoice_status']}")
+        if "forms_count" in result.metadata:
+            lines.append(f"*Forms count:* {result.metadata['forms_count']}")
+        if "diagnosis_form_present" in result.metadata:
+            lines.append(f"*Diagnosis form present:* {result.metadata['diagnosis_form_present']}")
         if "arrival_first_half_cutoff" in result.metadata:
             lines.append(f"*First-half cutoff:* {result.metadata['arrival_first_half_cutoff']}")
         lines.extend(

@@ -138,7 +138,7 @@ class ServiceTitanClient:
             and self.settings.servicetitan_app_key
         )
 
-    def query_recent_jobs(self, modified_on_or_after: datetime) -> list[ServiceTitanJob]:
+    def query_recent_jobs(self, modified_on_or_after: datetime, *, apply_ruleset_prefilter: bool = True) -> list[ServiceTitanJob]:
         since = modified_on_or_after.astimezone(timezone.utc).replace(microsecond=0).isoformat()
         records = self._get_paginated(
             f"/jpm/v2/tenant/{self.settings.servicetitan_tenant_id}/jobs",
@@ -149,7 +149,8 @@ class ServiceTitanClient:
                 "sort": "+ModifiedOn",
             },
         )
-        records = self._prefilter_sales_only_records(records)
+        if apply_ruleset_prefilter:
+            records = self._prefilter_sales_only_records(records)
         return [self._enrich_job(parse_service_titan_job(record, self.settings)) for record in records]
 
     def _prefilter_sales_only_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -169,17 +170,34 @@ class ServiceTitanClient:
     def _should_prefilter_sales_only(self) -> bool:
         return bool(
             self.settings.sales_comfort_advisor_audit_enabled
+            and not self.settings.hvac_service_audit_enabled
             and not self.settings.technician_compliance_enabled
             and not self.settings.dispatcher_audit_enabled
         )
 
     def _should_fetch_related_category(self, category: str) -> bool:
-        if not self._should_prefilter_sales_only():
-            return True
-        allowed = {"appointments", "appointment_assignments", "estimates", "opportunities"}
-        if "sales_photos_missing" not in set(self.settings.service_titan_disabled_rule_ids):
-            allowed.update({"attachments", "forms"})
-        return category in allowed
+        disabled_rules = set(self.settings.service_titan_disabled_rule_ids)
+        if self._should_prefilter_sales_only():
+            allowed = {"appointments", "appointment_assignments", "estimates", "opportunities"}
+            if "sales_photos_missing" not in disabled_rules:
+                allowed.update({"attachments", "forms"})
+            return category in allowed
+        if self._should_fetch_hvac_only():
+            allowed = {"appointments", "appointment_assignments", "invoices", "estimates", "opportunities"}
+            if "hvac_required_photos_missing" not in disabled_rules:
+                allowed.update({"attachments", "forms"})
+            if "hvac_diagnosis_form_missing" not in disabled_rules:
+                allowed.add("forms")
+            return category in allowed
+        return True
+
+    def _should_fetch_hvac_only(self) -> bool:
+        return bool(
+            self.settings.hvac_service_audit_enabled
+            and not self.settings.sales_comfort_advisor_audit_enabled
+            and not self.settings.technician_compliance_enabled
+            and not self.settings.dispatcher_audit_enabled
+        )
 
     def _enrich_job(self, job: ServiceTitanJob) -> ServiceTitanJob:
         present_fields = set(job.present_fields)
@@ -703,7 +721,7 @@ class ServiceTitanClient:
 
     def _related_records(self, category: str, path: str, params: dict[str, str]) -> tuple[list[dict[str, Any]], str | None]:
         if not self._should_fetch_related_category(category):
-            return [], f"{category} skipped for Sales-only enabled rules"
+            return [], self._related_skip_reason(category)
         if category in self._disabled_related_categories:
             return [], self._disabled_related_reasons.get(category) or f"{category} endpoint unavailable earlier in this process"
         payload = {"pageSize": str(self.settings.service_titan_audit_page_size), "includeTotal": "true", **{k: v for k, v in params.items() if v}}
@@ -724,6 +742,13 @@ class ServiceTitanClient:
         except Exception as exc:
             logger.warning("servicetitan_related_fetch_failed", extra={"category": category, "path": path, "error": str(exc)})
             return [], f"{path} request failed"
+
+    def _related_skip_reason(self, category: str) -> str:
+        if self._should_prefilter_sales_only():
+            return f"{category} skipped for Sales-only enabled rules"
+        if self._should_fetch_hvac_only():
+            return f"{category} skipped for HVAC-only enabled rules"
+        return f"{category} skipped by active ruleset configuration"
 
     def _tenant_path(self, api: str, suffix: str) -> str:
         return f"/{api}/v2/tenant/{self.settings.servicetitan_tenant_id}/{suffix.lstrip('/')}"
