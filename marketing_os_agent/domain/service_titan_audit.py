@@ -20,6 +20,7 @@ from .service_titan_rules import (
     RESULT_NOT_APPLICABLE,
     RESULT_PASS,
     RULESET_HVAC,
+    RULESET_PLUMBING,
     RULESET_SALES,
     RuleResult,
     active_service_titan_rules,
@@ -81,6 +82,15 @@ class ServiceTitanAuditSummary:
     hvac_alerts_sent: int = 0
     hvac_alerts_would_send: int = 0
     hvac_alerts_skipped_limit: int = 0
+    plumbing_jobs_scanned: int = 0
+    plumbing_rules_evaluated: int = 0
+    plumbing_pass: int = 0
+    plumbing_fail: int = 0
+    plumbing_insufficient_data: int = 0
+    plumbing_not_applicable: int = 0
+    plumbing_alerts_sent: int = 0
+    plumbing_alerts_would_send: int = 0
+    plumbing_alerts_skipped_limit: int = 0
     result_counts: dict[str, int] = field(default_factory=dict)
     insufficient_data_by_rule: dict[str, int] = field(default_factory=dict)
     not_applicable_by_rule: dict[str, int] = field(default_factory=dict)
@@ -133,6 +143,15 @@ class ServiceTitanAuditSummary:
             f"- hvac alerts that would have been sent: {self.hvac_alerts_would_send}",
             f"- hvac alerts sent: {self.hvac_alerts_sent}",
             f"- hvac alerts skipped due to max alert limit: {self.hvac_alerts_skipped_limit}",
+            f"- plumbing jobs scanned: {self.plumbing_jobs_scanned}",
+            f"- plumbing rules evaluated: {self.plumbing_rules_evaluated}",
+            f"- plumbing pass: {self.plumbing_pass}",
+            f"- plumbing fail: {self.plumbing_fail}",
+            f"- plumbing insufficient_data: {self.plumbing_insufficient_data}",
+            f"- plumbing not_applicable: {self.plumbing_not_applicable}",
+            f"- plumbing alerts that would have been sent: {self.plumbing_alerts_would_send}",
+            f"- plumbing alerts sent: {self.plumbing_alerts_sent}",
+            f"- plumbing alerts skipped due to max alert limit: {self.plumbing_alerts_skipped_limit}",
             f"- alerts sent: {self.alerts_sent}",
             f"- alerts that would have been sent: {self.alerts_would_send}",
             f"- alerts skipped due to dedupe: {self.alerts_skipped_dedupe}",
@@ -534,6 +553,7 @@ class ServiceTitanAuditService:
                 summary.missing_data_category_counts[category] = summary.missing_data_category_counts.get(category, 0) + 1
         sales_job_ids: set[str] = set()
         hvac_job_ids: set[str] = set()
+        plumbing_job_ids: set[str] = set()
         alert_attempts = 0
         for job in jobs:
             try:
@@ -541,6 +561,7 @@ class ServiceTitanAuditService:
                 if self.settings.service_titan_audit_debug_fields:
                     self._log_sales_debug(job, results)
                     self._log_hvac_debug(job, results)
+                    self._log_plumbing_debug(job, results)
                 for result in results:
                     summary.rules_evaluated += 1
                     counts[result.status] = counts.get(result.status, 0) + 1
@@ -569,6 +590,18 @@ class ServiceTitanAuditService:
                             summary.hvac_insufficient_data += 1
                         elif result.status == RESULT_NOT_APPLICABLE:
                             summary.hvac_not_applicable += 1
+                    if result.ruleset == RULESET_PLUMBING:
+                        summary.plumbing_rules_evaluated += 1
+                        if result.status != RESULT_NOT_APPLICABLE:
+                            plumbing_job_ids.add(job.job_id)
+                        if result.status == RESULT_PASS:
+                            summary.plumbing_pass += 1
+                        elif result.status == RESULT_FAIL:
+                            summary.plumbing_fail += 1
+                        elif result.status == RESULT_INSUFFICIENT:
+                            summary.plumbing_insufficient_data += 1
+                        elif result.status == RESULT_NOT_APPLICABLE:
+                            summary.plumbing_not_applicable += 1
                     if result.status == RESULT_FAIL:
                         summary.violations_detected += 1
                         destination = result.recommended_alert_recipient or "slack audit channel"
@@ -587,6 +620,8 @@ class ServiceTitanAuditService:
                                 summary.sales_alerts_sent += 1
                             if result.ruleset == RULESET_HVAC:
                                 summary.hvac_alerts_sent += 1
+                            if result.ruleset == RULESET_PLUMBING:
+                                summary.plumbing_alerts_sent += 1
                         elif alert_status == "failed":
                             alert_attempts += 1
                             summary.alerts_failed += 1
@@ -596,6 +631,8 @@ class ServiceTitanAuditService:
                                 summary.sales_alerts_would_send += 1
                             if result.ruleset == RULESET_HVAC:
                                 summary.hvac_alerts_would_send += 1
+                            if result.ruleset == RULESET_PLUMBING:
+                                summary.plumbing_alerts_would_send += 1
                         elif alert_status == "deduped":
                             summary.alerts_skipped_dedupe += 1
                         elif alert_status == "limited":
@@ -604,6 +641,8 @@ class ServiceTitanAuditService:
                                 summary.sales_alerts_skipped_limit += 1
                             if result.ruleset == RULESET_HVAC:
                                 summary.hvac_alerts_skipped_limit += 1
+                            if result.ruleset == RULESET_PLUMBING:
+                                summary.plumbing_alerts_skipped_limit += 1
                     elif result.status == RESULT_PASS:
                         if not summary.dry_run and self.db.resolve_service_titan_violation(result.violation_key):
                             logger.info("servicetitan_violation_resolved", extra={"violation_key": result.violation_key, "rule_id": result.rule_id})
@@ -630,6 +669,7 @@ class ServiceTitanAuditService:
                 logger.warning("servicetitan_job_audit_failed", exc_info=True, extra={"job_id": job.job_id, "error": str(exc)})
         summary.sales_jobs_scanned = len(sales_job_ids)
         summary.hvac_jobs_scanned = len(hvac_job_ids)
+        summary.plumbing_jobs_scanned = len(plumbing_job_ids)
 
         max_modified = max((job.modified_on for job in jobs if job.modified_on), default=now)
         if summary.dry_run:
@@ -689,6 +729,15 @@ class ServiceTitanAuditService:
                 "hvac_alerts_sent": summary.hvac_alerts_sent,
                 "hvac_alerts_would_send": summary.hvac_alerts_would_send,
                 "hvac_alerts_skipped_limit": summary.hvac_alerts_skipped_limit,
+                "plumbing_jobs_seen": summary.plumbing_jobs_scanned,
+                "plumbing_rules_evaluated": summary.plumbing_rules_evaluated,
+                "plumbing_pass": summary.plumbing_pass,
+                "plumbing_fail": summary.plumbing_fail,
+                "plumbing_insufficient_data": summary.plumbing_insufficient_data,
+                "plumbing_not_applicable": summary.plumbing_not_applicable,
+                "plumbing_alerts_sent": summary.plumbing_alerts_sent,
+                "plumbing_alerts_would_send": summary.plumbing_alerts_would_send,
+                "plumbing_alerts_skipped_limit": summary.plumbing_alerts_skipped_limit,
                 "alerts_sent": summary.alerts_sent,
                 "alerts_would_send": summary.alerts_would_send,
                 "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
@@ -740,6 +789,15 @@ class ServiceTitanAuditService:
                 "hvac_alerts_sent": summary.hvac_alerts_sent,
                 "hvac_alerts_would_send": summary.hvac_alerts_would_send,
                 "hvac_alerts_skipped_limit": summary.hvac_alerts_skipped_limit,
+                "plumbing_jobs_seen": summary.plumbing_jobs_scanned,
+                "plumbing_rules_evaluated": summary.plumbing_rules_evaluated,
+                "plumbing_pass": summary.plumbing_pass,
+                "plumbing_fail": summary.plumbing_fail,
+                "plumbing_insufficient_data": summary.plumbing_insufficient_data,
+                "plumbing_not_applicable": summary.plumbing_not_applicable,
+                "plumbing_alerts_sent": summary.plumbing_alerts_sent,
+                "plumbing_alerts_would_send": summary.plumbing_alerts_would_send,
+                "plumbing_alerts_skipped_limit": summary.plumbing_alerts_skipped_limit,
                 "alerts_sent": summary.alerts_sent,
                 "alerts_would_send": summary.alerts_would_send,
                 "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
@@ -769,6 +827,11 @@ class ServiceTitanAuditService:
                 "hvac_fail": summary.hvac_fail,
                 "hvac_alerts_would_send": summary.hvac_alerts_would_send,
                 "hvac_alerts_sent": summary.hvac_alerts_sent,
+                "plumbing_jobs_scanned": summary.plumbing_jobs_scanned,
+                "plumbing_pass": summary.plumbing_pass,
+                "plumbing_fail": summary.plumbing_fail,
+                "plumbing_alerts_would_send": summary.plumbing_alerts_would_send,
+                "plumbing_alerts_sent": summary.plumbing_alerts_sent,
                 "alerts_skipped_dedupe": summary.alerts_skipped_dedupe,
                 "alerts_skipped_limit": summary.alerts_skipped_limit,
                 "alerts_failed": summary.alerts_failed,
@@ -851,6 +914,44 @@ class ServiceTitanAuditService:
                     for result in hvac_results
                 },
                 "hvac_rule_insufficient_reasons": insufficient,
+                "missing_data_fields": sorted(job.missing_data),
+            },
+        )
+
+    def _log_plumbing_debug(self, job: ServiceTitanJob, results: list[RuleResult]) -> None:
+        plumbing_results = [result for result in results if result.ruleset == RULESET_PLUMBING]
+        if not plumbing_results or all(result.status == RESULT_NOT_APPLICABLE for result in plumbing_results):
+            return
+        insufficient = {
+            result.rule_id: result.explanation
+            for result in plumbing_results
+            if result.status == RESULT_INSUFFICIENT
+        }
+        logger.info(
+            "servicetitan_plumbing_field_availability",
+            extra={
+                "job_id": job.job_id,
+                "job_number": job.job_number,
+                "business_unit": job.business_unit_name or job.business_unit_id,
+                "job_type": job.job_type_name or job.job_type_id,
+                "status": job.status,
+                "has_appointment_window": bool(job.arrival_window_start and job.arrival_window_end),
+                "has_arrival_time": bool(job.arrived_at),
+                "estimates_count": job.related_counts.get("estimates", 0),
+                "opportunities_count": job.related_counts.get("opportunities", 0),
+                "options_count": job.estimate_count,
+                "invoices_count": job.related_counts.get("invoices", 0),
+                "payments_count": job.payments_count,
+                "invoice_status": job.invoice_status,
+                "attachments_count": job.related_counts.get("attachments", 0),
+                "photos_count": job.photo_count,
+                "forms_count": job.related_counts.get("forms", 0),
+                "plumbing_rule_statuses": {result.rule_id: result.status for result in plumbing_results},
+                "plumbing_scope_decisions": {
+                    result.rule_id: result.metadata.get("scope_decision", "")
+                    for result in plumbing_results
+                },
+                "plumbing_rule_insufficient_reasons": insufficient,
                 "missing_data_fields": sorted(job.missing_data),
             },
         )

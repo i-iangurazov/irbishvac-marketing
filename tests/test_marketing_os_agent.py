@@ -153,6 +153,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         service_titan_alert_include_customer_name=False,
         sales_comfort_advisor_audit_enabled=True,
         hvac_service_audit_enabled=False,
+        plumbing_service_audit_enabled=False,
         technician_compliance_enabled=True,
         dispatcher_audit_enabled=True,
         owner_slack_map={"Emil": "UEMIL", "Vadim": "UVADIM"},
@@ -481,6 +482,25 @@ def hvac_job(job_id: str = "hvac-1001", **overrides: object) -> ServiceTitanJob:
         workflow="HVAC Service",
         technician_id="tech-hvac-1",
         technician_name="HVAC Tech One",
+        dispatcher_id="",
+        dispatcher_name="",
+        status="Completed",
+    )
+    base.update(overrides)
+    return st_job(job_id, **base)
+
+
+def plumbing_job(job_id: str = "plumbing-1001", **overrides: object) -> ServiceTitanJob:
+    base = dict(
+        business_unit_id="64315277",
+        business_unit_name="Plumbing - Service",
+        job_type_id="112338076",
+        job_type_name="Plumbing Diagnostic",
+        department="Service",
+        trade="Plumbing",
+        workflow="",
+        technician_id="tech-plumbing-1",
+        technician_name="Plumbing Tech One",
         dispatcher_id="",
         dispatcher_name="",
         status="Completed",
@@ -2607,6 +2627,158 @@ class MarketingOsAgentTests(unittest.TestCase):
         )
         self.assertGreaterEqual(insufficient_summary.hvac_insufficient_data, 1)
         self.assertEqual(self.h.slack.messages, [])
+
+    def test_plumbing_service_audit_is_disabled_by_default(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        self.assertFalse(audit_settings.plumbing_service_audit_enabled)
+        rule_ids = {rule.rule_id for rule in active_service_titan_rules(audit_settings)}
+        self.assertNotIn("plumbing_options_fewer_than_three", rule_ids)
+        self.assertNotIn("plumbing_payment_missing_on_completed_job", rule_ids)
+
+    def test_plumbing_rules_return_not_applicable_for_non_plumbing_jobs(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        for job in (
+            sales_job(business_unit_id="64326403", job_type_id="54086644"),
+            plumbing_job(business_unit_id="64313020", business_unit_name="Plumbing - Install", job_type_id="64570637", job_type_name="Water Heater Installation"),
+            hvac_job(business_unit_id="1810", job_type_id="1933"),
+            plumbing_job(job_type_id="112630828", job_type_name="Plumbing Repair"),
+        ):
+            self.assertEqual(_st_rule(audit_settings, "plumbing_options_fewer_than_three").run(job, audit_settings).status, RESULT_NOT_APPLICABLE)
+
+    def test_plumbing_strict_scope_uses_confirmed_ids_only(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        rule = _st_rule(audit_settings, "plumbing_options_fewer_than_three")
+        self.assertEqual(rule.scope.applies_to_business_units, ("64315277",))
+        self.assertEqual(rule.scope.applies_to_job_types, ("57804592", "64569478", "112338076"))
+        self.assertIn("30209", rule.scope.excludes_job_types)
+        self.assertIn("111922608", rule.scope.excludes_job_types)
+        self.assertIn("112630828", rule.scope.excludes_job_types)
+
+    def test_plumbing_options_rule_passes_fails_and_handles_missing_data(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        rule = _st_rule(audit_settings, "plumbing_options_fewer_than_three")
+        self.assertEqual(rule.run(plumbing_job(estimate_count=3), audit_settings).status, RESULT_PASS)
+
+        fail = rule.run(plumbing_job(estimate_count=2), audit_settings)
+        self.assertEqual(fail.status, RESULT_FAIL)
+        self.assertEqual(fail.metadata["options_count"], 2)
+
+        insufficient = rule.run(
+            plumbing_job(
+                estimate_count=None,
+                present_fields={
+                    "status",
+                    "business_unit",
+                    "job_type",
+                    "payments",
+                    "forms",
+                    "hhr",
+                    "photos",
+                    "arrival_window",
+                    "arrived_at",
+                },
+            ),
+            audit_settings,
+        )
+        self.assertEqual(insufficient.status, RESULT_INSUFFICIENT)
+
+        not_applicable = rule.run(plumbing_job(status="Scheduled"), audit_settings)
+        self.assertEqual(not_applicable.status, RESULT_NOT_APPLICABLE)
+
+    def test_disabled_plumbing_photo_rule_does_not_send_alert(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_disabled_rule_ids=["plumbing_required_photos_missing"],
+        )
+        job = plumbing_job("plumbing-photo-disabled", estimate_count=3, photo_count=0)
+        summary = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([job]), self.h.slack).audit_once(
+            datetime(2026, 5, 15, 16, tzinfo=timezone.utc)
+        )
+        self.assertEqual(summary.plumbing_rules_evaluated, 4)
+        self.assertEqual(summary.plumbing_fail, 0)
+        self.assertEqual(summary.plumbing_alerts_sent, 0)
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_plumbing_only_client_skips_unneeded_related_categories_when_disabled_rules_configured(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_disabled_rule_ids=[
+                "plumbing_payment_missing_on_completed_job",
+                "plumbing_required_photos_missing",
+                "plumbing_diagnosis_form_missing",
+                "plumbing_arrival_outside_window",
+            ],
+        )
+        client = ServiceTitanClient(audit_settings)
+        self.assertTrue(client._should_fetch_related_category("appointments"))
+        self.assertTrue(client._should_fetch_related_category("appointment_assignments"))
+        self.assertTrue(client._should_fetch_related_category("estimates"))
+        self.assertTrue(client._should_fetch_related_category("opportunities"))
+        self.assertFalse(client._should_fetch_related_category("invoices"))
+        self.assertFalse(client._should_fetch_related_category("attachments"))
+        self.assertFalse(client._should_fetch_related_category("forms"))
+        self.assertFalse(client._should_fetch_related_category("technician_time"))
+        self.assertEqual(client._related_skip_reason("forms"), "forms skipped for Plumbing-only enabled rules")
+
+    def test_plumbing_slack_payload_excludes_customer_pii(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        job = plumbing_job(
+            "plumbing-pii",
+            customer_name="Sensitive Customer",
+            estimate_count=1,
+            notes="Customer phone 555-123-4567 email customer@example.com address 123 Main St",
+        )
+        result = _st_rule(audit_settings, "plumbing_options_fewer_than_three").run(job, audit_settings)
+        payload = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([]), self.h.slack)._alert_text(job, result)
+        self.assertIn("Plumbing Service Audit", payload)
+        self.assertIn("plumbing_options_fewer_than_three", payload)
+        self.assertNotIn("Sensitive Customer", payload)
+        self.assertNotIn("555-123-4567", payload)
+        self.assertNotIn("customer@example.com", payload)
+        self.assertNotIn("123 Main St", payload)
 
     def test_sales_enrichment_with_three_estimates_passes_options_rule(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)

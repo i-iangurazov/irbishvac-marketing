@@ -155,6 +155,34 @@ SERVICE_TITAN_DISABLED_RULE_IDS_JSON=["sales_photos_missing","hvac_required_phot
 
 Enable `hvac_required_photos_missing` later only after dry-run proves scoped job photos are available. Enable `hvac_diagnosis_form_missing` later only after dry-run proves scoped job forms are available. Enable `hvac_arrival_outside_window` later only after ServiceTitan exposes a reliable job/appointment arrival timestamp; the targeted sample had appointment windows but no `arrived_at` values.
 
+## Plumbing Service Audit
+
+The Plumbing Service Audit applies only to jobs that match Plumbing Service scope. It is controlled by `PLUMBING_SERVICE_AUDIT_ENABLED`, which defaults to `false`. It is implemented for dry-run validation only and is not approved for live alerts yet.
+
+Plumbing Service validation found this strict candidate scope in this tenant:
+
+```env
+SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rulesets":{"Plumbing Service Audit":{"applies_to":{"business_unit_ids":["64315277"],"job_type_ids":["57804592","64569478","112338076"],"workflows":null,"statuses":["Completed","Closed"]}}}}
+```
+
+Those IDs mean `64315277 / Plumbing - Service` with `57804592 / Water Heater Maintenance`, `64569478 / Water Heater Diagnostic`, and `112338076 / Plumbing Diagnostic`. Keep `64326403 / 54086644 / 64569350 / 123562931` Plumbing Sales or estimate-only jobs, `64313020 / 64569604 / 64570637` Plumbing Install jobs, and HVAC Service/Sales/Install/Maintenance jobs excluded from Plumbing Service scope.
+
+Do not include cross-BU job types `30209 / Full HVAC/Water heater Maintenance`, `111922608 / Water Heater Repair`, or `112630828 / Plumbing Repair` until the business confirms whether they belong in Plumbing Service audit scope.
+
+Plumbing rules:
+
+- `plumbing_options_fewer_than_three`: closed Plumbing Service jobs must show at least three estimate/option records only after the business confirms this expectation for the scoped job types. Estimate counts were visible in discovery, so this is the only currently API-evaluable Plumbing v1 candidate.
+- `plumbing_payment_missing_on_completed_job`: closed Plumbing Service jobs with a positive invoice total must show payment, paid invoice status, or zero balance when structured invoice/payment data is available. In discovery, invoice/payment data was missing for all matched Plumbing Service sample jobs, so keep this disabled.
+- `plumbing_diagnosis_form_missing`: closed Plumbing Service jobs must include a completed diagnosis/service form only when job-scoped form submission data is available. Unscoped tenant-level form pages stay `insufficient_data`; keep this disabled.
+- `plumbing_required_photos_missing`: closed Plumbing Service jobs must include required photos only when job-scoped photos/attachments are available. Keep this disabled until dry-run proves the tenant exposes scoped job photos.
+- `plumbing_arrival_outside_window`: Plumbing Service appointments should arrive within the configured first-window threshold only when actual-arrival timestamps are available. Discovery found appointment windows but no `arrived_at` values, so keep this disabled.
+
+If Plumbing dry-run testing is enabled, use reviewed scope IDs and keep live alerts disabled. Recommended future dry-run disabled rules:
+
+```env
+SERVICE_TITAN_DISABLED_RULE_IDS_JSON=["sales_photos_missing","hvac_options_fewer_than_three","hvac_required_photos_missing","hvac_diagnosis_form_missing","hvac_arrival_outside_window","plumbing_payment_missing_on_completed_job","plumbing_required_photos_missing","plumbing_diagnosis_form_missing","plumbing_arrival_outside_window"]
+```
+
 ## Current-State Report
 
 Current data flow:
@@ -255,6 +283,21 @@ SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rulesets":{"HVAC Service Audit":{"applies
 ```
 
 This leaves `hvac_options_fewer_than_three` and `hvac_payment_missing_on_completed_job` available for dry-run validation while suppressing photo/form/arrival false positives. In the targeted sample, `hvac_options_fewer_than_three` failed 14 of 20 matched jobs and needs business confirmation before live alerts. `hvac_payment_missing_on_completed_job` mostly evaluated cleanly but the single fail should be reviewed before live alerts.
+
+Initial Plumbing Service validation should use reviewed Plumbing IDs and keep payment/photo/form/arrival rules disabled until structured ServiceTitan data is available and business expectations are confirmed. This is a future dry-run setup only; do not use it for live alerts until business review is complete:
+
+```env
+PLUMBING_SERVICE_AUDIT_ENABLED=true
+SALES_COMFORT_ADVISOR_AUDIT_ENABLED=false
+HVAC_SERVICE_AUDIT_ENABLED=false
+TECHNICIAN_COMPLIANCE_ENABLED=false
+DISPATCHER_AUDIT_ENABLED=false
+SERVICE_TITAN_AUDIT_DRY_RUN=true
+SERVICE_TITAN_DISABLED_RULE_IDS_JSON=["sales_photos_missing","hvac_options_fewer_than_three","hvac_required_photos_missing","hvac_diagnosis_form_missing","hvac_arrival_outside_window","plumbing_payment_missing_on_completed_job","plumbing_required_photos_missing","plumbing_diagnosis_form_missing","plumbing_arrival_outside_window"]
+SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={"rulesets":{"Plumbing Service Audit":{"applies_to":{"business_unit_ids":["64315277"],"job_type_ids":["57804592","64569478","112338076"],"workflows":null,"statuses":["Completed","Closed"]}}}}
+```
+
+This leaves `plumbing_options_fewer_than_three` available for dry-run validation while suppressing payment/photo/form/arrival false positives. Do not enable Plumbing live alerts until the business confirms whether scoped Plumbing Service job types require three options and ServiceTitan exposes reliable structured data for the other rule candidates.
 
 Per-rule overrides still work. Example:
 
@@ -389,6 +432,7 @@ SERVICE_TITAN_WEEKLY_SUMMARY_HOUR=8
 SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS=7
 SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true
 HVAC_SERVICE_AUDIT_ENABLED=false
+PLUMBING_SERVICE_AUDIT_ENABLED=false
 TECHNICIAN_COMPLIANCE_ENABLED=false
 DISPATCHER_AUDIT_ENABLED=false
 SERVICE_TITAN_FIRST_CALL_GRACE_MINUTES=0
@@ -1000,6 +1044,7 @@ servicetitan_audit_cycle_completed
 - Keep `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE` set. Use `1` only for controlled one-alert historical validation.
 - Set `SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true`.
 - Set `HVAC_SERVICE_AUDIT_ENABLED=true` only for HVAC dry-run validation or reviewed HVAC rollout.
+- Set `PLUMBING_SERVICE_AUDIT_ENABLED=true` only for Plumbing dry-run validation or reviewed Plumbing rollout.
 - Keep `TECHNICIAN_COMPLIANCE_ENABLED=false` and `DISPATCHER_AUDIT_ENABLED=false` during Sales-only validation.
 - Set `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}` until discovery confirms tenant-specific scope narrowing is needed.
 - Run `python3 -m marketing_os_agent init-db` after deploy if the SQLite file is new.

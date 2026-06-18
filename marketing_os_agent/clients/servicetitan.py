@@ -171,6 +171,7 @@ class ServiceTitanClient:
         return bool(
             self.settings.sales_comfort_advisor_audit_enabled
             and not self.settings.hvac_service_audit_enabled
+            and not self.settings.plumbing_service_audit_enabled
             and not self.settings.technician_compliance_enabled
             and not self.settings.dispatcher_audit_enabled
         )
@@ -189,12 +190,31 @@ class ServiceTitanClient:
             if "hvac_diagnosis_form_missing" not in disabled_rules:
                 allowed.add("forms")
             return category in allowed
+        if self._should_fetch_plumbing_only():
+            allowed = {"appointments", "appointment_assignments", "estimates", "opportunities"}
+            if "plumbing_payment_missing_on_completed_job" not in disabled_rules:
+                allowed.add("invoices")
+            if "plumbing_required_photos_missing" not in disabled_rules:
+                allowed.update({"attachments", "forms"})
+            if "plumbing_diagnosis_form_missing" not in disabled_rules:
+                allowed.add("forms")
+            return category in allowed
         return True
 
     def _should_fetch_hvac_only(self) -> bool:
         return bool(
             self.settings.hvac_service_audit_enabled
             and not self.settings.sales_comfort_advisor_audit_enabled
+            and not self.settings.plumbing_service_audit_enabled
+            and not self.settings.technician_compliance_enabled
+            and not self.settings.dispatcher_audit_enabled
+        )
+
+    def _should_fetch_plumbing_only(self) -> bool:
+        return bool(
+            self.settings.plumbing_service_audit_enabled
+            and not self.settings.sales_comfort_advisor_audit_enabled
+            and not self.settings.hvac_service_audit_enabled
             and not self.settings.technician_compliance_enabled
             and not self.settings.dispatcher_audit_enabled
         )
@@ -748,6 +768,8 @@ class ServiceTitanClient:
             return f"{category} skipped for Sales-only enabled rules"
         if self._should_fetch_hvac_only():
             return f"{category} skipped for HVAC-only enabled rules"
+        if self._should_fetch_plumbing_only():
+            return f"{category} skipped for Plumbing-only enabled rules"
         return f"{category} skipped by active ruleset configuration"
 
     def _tenant_path(self, api: str, suffix: str) -> str:

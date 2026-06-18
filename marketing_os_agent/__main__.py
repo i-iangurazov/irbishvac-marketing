@@ -243,6 +243,7 @@ def _settings_error_diagnostics_text(error: str) -> str:
             f"- SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS raw: {os.getenv('SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS', '<unset>')}",
             f"- SALES_COMFORT_ADVISOR_AUDIT_ENABLED raw: {os.getenv('SALES_COMFORT_ADVISOR_AUDIT_ENABLED', '<unset>')}",
             f"- HVAC_SERVICE_AUDIT_ENABLED raw: {os.getenv('HVAC_SERVICE_AUDIT_ENABLED', '<unset>')}",
+            f"- PLUMBING_SERVICE_AUDIT_ENABLED raw: {os.getenv('PLUMBING_SERVICE_AUDIT_ENABLED', '<unset>')}",
             f"- TECHNICIAN_COMPLIANCE_ENABLED raw: {os.getenv('TECHNICIAN_COMPLIANCE_ENABLED', '<unset>')}",
             f"- DISPATCHER_AUDIT_ENABLED raw: {os.getenv('DISPATCHER_AUDIT_ENABLED', '<unset>')}",
             f"- SERVICE_TITAN_DISABLED_RULE_IDS_JSON valid list: {_raw_json_valid(disabled_raw, expected='list')}",

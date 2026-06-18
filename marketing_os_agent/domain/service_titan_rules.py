@@ -19,6 +19,7 @@ RULESET_TECHNICIAN = "Technician Compliance"
 RULESET_DISPATCHER = "Dispatcher / Job Quality Audit"
 RULESET_SALES = "Sales / Comfort Advisor Audit"
 RULESET_HVAC = "HVAC Service Audit"
+RULESET_PLUMBING = "Plumbing Service Audit"
 RULESET_SERVICE_CALL = "Service Call Handbook Audit"
 RULESET_PLY_MATERIALS = "Ply / PO Materials Audit"
 RULESET_FOLLOW_UP = "Follow-up / Escalation Audit"
@@ -57,6 +58,8 @@ HVAC_SERVICE_WORKFLOW_KEYWORDS = (
     "tune up",
     "tune-up",
 )
+PLUMBING_SERVICE_BUSINESS_UNIT_IDS = ("64315277",)
+PLUMBING_SERVICE_JOB_TYPE_IDS = ("57804592", "64569478", "112338076")
 CLOSED_STATUS_KEYWORDS = ("complete", "completed", "closed", "done")
 ACTIVE_OR_CLOSED_STATUS_KEYWORDS = (
     "scheduled",
@@ -195,6 +198,8 @@ def active_service_titan_rules(settings: Settings) -> list[AuditRule]:
         rules.extend(sales_comfort_advisor_rules())
     if settings.hvac_service_audit_enabled:
         rules.extend(hvac_service_rules())
+    if settings.plumbing_service_audit_enabled:
+        rules.extend(plumbing_service_rules())
     if settings.technician_compliance_enabled:
         rules.extend(technician_compliance_rules())
     if settings.dispatcher_audit_enabled:
@@ -310,6 +315,44 @@ def _hvac_scope(*, required_data_fields: tuple[str, ...], statuses: tuple[str, .
         required_context_fields=("status",),
         required_data_fields=required_data_fields,
         alert_routing="hvac service audit channel",
+    )
+
+
+def _plumbing_scope(*, required_data_fields: tuple[str, ...], statuses: tuple[str, ...] = CLOSED_STATUS_KEYWORDS) -> RuleScope:
+    return RuleScope(
+        handbook_source="Plumbing Service audit configuration",
+        applies_to_business_units=PLUMBING_SERVICE_BUSINESS_UNIT_IDS,
+        applies_to_job_types=PLUMBING_SERVICE_JOB_TYPE_IDS,
+        applies_to_job_statuses=statuses,
+        excludes_job_types=(
+            "30209",
+            "111922608",
+            "112630828",
+            "admin",
+            "internal",
+            "material only",
+            "warehouse only",
+            "estimate",
+            "sales",
+            "install",
+            "hvac",
+            "comfort advisor",
+        ),
+        excludes_statuses=EXCLUDED_STATUS_KEYWORDS,
+        excludes_tags=(
+            "admin",
+            "internal",
+            "sales",
+            "install",
+            "hvac",
+            "comfort advisor",
+            "canceled",
+            "cancelled",
+            "no access",
+        ),
+        required_context_fields=("status", "business_unit", "job_type"),
+        required_data_fields=required_data_fields,
+        alert_routing="plumbing service audit channel",
     )
 
 
@@ -439,6 +482,69 @@ def hvac_service_rules() -> list[AuditRule]:
             "Review dispatch timing and coach the arrival process if needed.",
             _arrival_window,
             scope=_hvac_scope(
+                required_data_fields=("arrival_window", "arrived_at"),
+                statuses=ACTIVE_OR_CLOSED_STATUS_KEYWORDS,
+            ),
+        ),
+    ]
+
+
+def plumbing_service_rules() -> list[AuditRule]:
+    return [
+        AuditRule(
+            "plumbing_options_fewer_than_three",
+            RULESET_PLUMBING,
+            "high",
+            "Closed Plumbing Service job has fewer than 3 options",
+            "Closed Plumbing Service jobs must show at least three options or estimates when this requirement is confirmed by the business.",
+            ("status", "estimates"),
+            "Review the Plumbing Service job and confirm Good / Better / Best options were presented or documented.",
+            _plumbing_three_options,
+            scope=_plumbing_scope(required_data_fields=("status", "estimates")),
+        ),
+        AuditRule(
+            "plumbing_payment_missing_on_completed_job",
+            RULESET_PLUMBING,
+            "high",
+            "Closed Plumbing Service job is missing payment",
+            "Closed Plumbing Service jobs with a positive invoice total must show payment, paid status, or zero balance when structured invoice/payment data is available.",
+            ("status", "payments"),
+            "Review the invoice/payment record and collect or correct payment documentation.",
+            _plumbing_payment_on_completed_job,
+            scope=_plumbing_scope(required_data_fields=("status", "payments")),
+        ),
+        AuditRule(
+            "plumbing_diagnosis_form_missing",
+            RULESET_PLUMBING,
+            "medium",
+            "Closed Plumbing Service job is missing diagnosis/service form",
+            "Closed Plumbing Service jobs must include a completed diagnosis or equivalent service form when job-scoped form data is available.",
+            ("status", "forms"),
+            "Complete the diagnosis/service form or document why it was not required.",
+            _plumbing_diagnosis_form,
+            scope=_plumbing_scope(required_data_fields=("status", "forms")),
+        ),
+        AuditRule(
+            "plumbing_required_photos_missing",
+            RULESET_PLUMBING,
+            "medium",
+            "Closed Plumbing Service job is missing required photos",
+            "Closed Plumbing Service jobs must include required photos or attachments when job-scoped photo data is available.",
+            ("status", "photos"),
+            "Upload the required Plumbing Service photos or document why photos were not required.",
+            _plumbing_photos,
+            scope=_plumbing_scope(required_data_fields=("status", "photos")),
+        ),
+        AuditRule(
+            "plumbing_arrival_outside_window",
+            RULESET_PLUMBING,
+            "medium",
+            "Plumbing Service arrival is outside the configured window threshold",
+            "Plumbing Service appointments should arrive within the configured first-window threshold when actual arrival data is available.",
+            ("arrival_window", "arrived_at"),
+            "Review dispatch timing and coach the arrival process if needed.",
+            _arrival_window,
+            scope=_plumbing_scope(
                 required_data_fields=("arrival_window", "arrived_at"),
                 statuses=ACTIVE_OR_CLOSED_STATUS_KEYWORDS,
             ),
@@ -1239,6 +1345,64 @@ def _hvac_photos(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> 
     if job.photo_count <= 0:
         return rule.result(job, RESULT_FAIL, "Closed HVAC Service job has no uploaded photos or image attachments.", rule.action, metadata)
     return rule.result(job, RESULT_PASS, "Required HVAC Service photos are present.", rule.action, metadata)
+
+
+def _plumbing_three_options(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "estimates" not in job.present_fields or job.estimate_count is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "estimates", "Estimate/option records were not available from ServiceTitan."), rule.action)
+    required_count = max(3, settings.service_titan_min_repair_options)
+    metadata = {"options_count": job.estimate_count, "required_options_count": required_count}
+    if job.estimate_count < required_count:
+        return rule.result(
+            job,
+            RESULT_FAIL,
+            f"Only {job.estimate_count} option/estimate record(s) were found; required minimum is {required_count}.",
+            rule.action,
+            metadata,
+        )
+    return rule.result(job, RESULT_PASS, "Required Plumbing Service option count is satisfied.", rule.action, metadata)
+
+
+def _plumbing_payment_on_completed_job(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:
+    result = _payment_on_completed_job(job, settings, rule)
+    metadata = {
+        **result.metadata,
+        "payment_total": job.payment_total,
+        "payments_count": job.payments_count,
+        "invoice_balance": job.invoice_balance,
+        "invoice_status": job.invoice_status,
+    }
+    return replace(result, metadata=metadata)
+
+
+def _plumbing_diagnosis_form(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "forms" not in job.present_fields or job.forms_count is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "forms", "Job-scoped form submissions were not available from ServiceTitan."), rule.action)
+    metadata = {
+        "forms_count": job.forms_count,
+        "diagnosis_form_present": bool(job.hhr_completed or job.forms_count > 0),
+    }
+    if job.hhr_completed is False or job.forms_count <= 0:
+        return rule.result(job, RESULT_FAIL, "Closed Plumbing Service job has no completed job-scoped diagnosis/service form.", rule.action, metadata)
+    return rule.result(job, RESULT_PASS, "Job-scoped diagnosis/service form evidence is present.", rule.action, metadata)
+
+
+def _plumbing_photos(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:
+    closed = _closed_or_pass(job, rule)
+    if closed:
+        return closed
+    if "photos" not in job.present_fields or job.photo_count is None:
+        return rule.result(job, RESULT_INSUFFICIENT, _field_unavailable(job, "photos", "Job-scoped photos/attachments were not available from ServiceTitan."), rule.action)
+    metadata = {"photos_count": job.photo_count}
+    if job.photo_count <= 0:
+        return rule.result(job, RESULT_FAIL, "Closed Plumbing Service job has no job-scoped required photos.", rule.action, metadata)
+    return rule.result(job, RESULT_PASS, "Required Plumbing Service photo evidence is present.", rule.action, metadata)
 
 
 def _options_presented(job: ServiceTitanJob, _settings: Settings, rule: AuditRule) -> RuleResult:

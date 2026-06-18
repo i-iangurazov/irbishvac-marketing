@@ -25,7 +25,7 @@ from .domain.service_titan_audit import (
     ServiceTitanWeeklySummaryService,
 )
 from .domain.service_titan_discovery import ServiceTitanScopeDiscovery, ServiceTitanScopeDiscoverySummary
-from .domain.service_titan_rules import RESULT_FAIL, RULESET_HVAC, RULESET_SALES, RuleResult, active_service_titan_rules
+from .domain.service_titan_rules import RESULT_FAIL, RULESET_HVAC, RULESET_PLUMBING, RULESET_SALES, RuleResult, active_service_titan_rules
 from .domain.task_processor import TaskProcessor
 from .http_server import AgentHttpServer
 from .models import ValidationReport
@@ -183,6 +183,7 @@ class AgentApp:
                 "disabled_rules": self.settings.service_titan_disabled_rule_ids,
                 "sales_enabled": self.settings.sales_comfort_advisor_audit_enabled,
                 "hvac_service_enabled": self.settings.hvac_service_audit_enabled,
+                "plumbing_service_enabled": self.settings.plumbing_service_audit_enabled,
                 "technician_compliance_enabled": self.settings.technician_compliance_enabled,
                 "dispatcher_audit_enabled": self.settings.dispatcher_audit_enabled,
                 "slack_channel_configured": bool(channel),
@@ -353,6 +354,7 @@ class AgentApp:
         rules = active_service_titan_rules(self.settings)
         sales_rules = [rule for rule in rules if rule.ruleset == RULESET_SALES]
         hvac_rules = [rule for rule in rules if rule.ruleset == RULESET_HVAC]
+        plumbing_rules = [rule for rule in rules if rule.ruleset == RULESET_PLUMBING]
         active_rule_ids = {rule.rule_id for rule in rules}
         checkpoint = self.db.get_kv("servicetitan_audit_last_processed")
         run_logs = self.db.get_recent_run_logs("servicetitan_audit", limit=5)
@@ -381,6 +383,7 @@ class AgentApp:
             f"  - SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS: {self.settings.service_titan_weekly_summary_lookback_days}",
             f"  - SALES_COMFORT_ADVISOR_AUDIT_ENABLED: {self.settings.sales_comfort_advisor_audit_enabled}",
             f"  - HVAC_SERVICE_AUDIT_ENABLED: {self.settings.hvac_service_audit_enabled}",
+            f"  - PLUMBING_SERVICE_AUDIT_ENABLED: {self.settings.plumbing_service_audit_enabled}",
             f"  - TECHNICIAN_COMPLIANCE_ENABLED: {self.settings.technician_compliance_enabled}",
             f"  - DISPATCHER_AUDIT_ENABLED: {self.settings.dispatcher_audit_enabled}",
             f"  - SERVICE_TITAN_DISABLED_RULE_IDS_JSON valid: {_json_valid(disabled_raw, expected='list')}",
@@ -395,6 +398,7 @@ class AgentApp:
             f"  - active ServiceTitan rules: {len(rules)}",
             f"  - active Sales rules: {', '.join(rule.rule_id for rule in sales_rules) if sales_rules else '<none>'}",
             f"  - active HVAC Service rules: {', '.join(rule.rule_id for rule in hvac_rules) if hvac_rules else '<none>'}",
+            f"  - active Plumbing Service rules: {', '.join(rule.rule_id for rule in plumbing_rules) if plumbing_rules else '<none>'}",
             f"  - sales_options_fewer_than_three active: {'sales_options_fewer_than_three' in active_rule_ids}",
             f"  - sales_arrival_after_first_half active: {'sales_arrival_after_first_half' in active_rule_ids}",
             f"  - sales_photos_missing active: {'sales_photos_missing' in active_rule_ids}",
@@ -403,6 +407,11 @@ class AgentApp:
             f"  - hvac_diagnosis_form_missing active: {'hvac_diagnosis_form_missing' in active_rule_ids}",
             f"  - hvac_required_photos_missing active: {'hvac_required_photos_missing' in active_rule_ids}",
             f"  - hvac_arrival_outside_window active: {'hvac_arrival_outside_window' in active_rule_ids}",
+            f"  - plumbing_options_fewer_than_three active: {'plumbing_options_fewer_than_three' in active_rule_ids}",
+            f"  - plumbing_payment_missing_on_completed_job active: {'plumbing_payment_missing_on_completed_job' in active_rule_ids}",
+            f"  - plumbing_diagnosis_form_missing active: {'plumbing_diagnosis_form_missing' in active_rule_ids}",
+            f"  - plumbing_required_photos_missing active: {'plumbing_required_photos_missing' in active_rule_ids}",
+            f"  - plumbing_arrival_outside_window active: {'plumbing_arrival_outside_window' in active_rule_ids}",
             "- checkpoint:",
             f"  - servicetitan_audit_last_processed: {checkpoint or '<none>'}",
             f"  - first-run baseline likely on next live cycle: {not checkpoint and not self.settings.service_titan_audit_dry_run and not self.settings.service_titan_audit_backfill_alerts}",
@@ -418,6 +427,7 @@ class AgentApp:
                     + f"checkpoint_ignored={details.get('checkpoint_ignored', '<unknown>')} "
                     + f"sales_fail={details.get('sales_fail', '<unknown>')} alerts_sent={details.get('alerts_sent', '<unknown>')} "
                     + f"hvac_fail={details.get('hvac_fail', '<unknown>')} "
+                    + f"plumbing_fail={details.get('plumbing_fail', '<unknown>')} "
                     + f"alerts_would_send={details.get('alerts_would_send', '<unknown>')} deduped={details.get('alerts_skipped_dedupe', '<unknown>')} "
                     + f"limited={details.get('alerts_skipped_limit', '<unknown>')} failed={details.get('alerts_failed', '<unknown>')} "
                     + f"errors={details.get('errors', '<unknown>')}"
