@@ -336,6 +336,10 @@ HVAC Service Audit:
 - Closed HVAC Service job is missing required photos.
 - HVAC Service arrival is outside the configured window threshold.
 
+Opt-in status cleanup rule:
+
+- `job_left_open_after_visit` detects jobs left open after the appointment end plus `SERVICE_TITAN_OPEN_JOB_GRACE_MINUTES`. It is disabled by default and only runs when enabled through `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON`.
+
 Legacy Technician Compliance, disabled by default for the Sales-first phase:
 
 - Technician clock-in missing.
@@ -437,6 +441,7 @@ TECHNICIAN_COMPLIANCE_ENABLED=false
 DISPATCHER_AUDIT_ENABLED=false
 SERVICE_TITAN_FIRST_CALL_GRACE_MINUTES=0
 SERVICE_TITAN_ARRIVAL_GRACE_MINUTES=30
+SERVICE_TITAN_OPEN_JOB_GRACE_MINUTES=120
 SERVICE_TITAN_MIN_LUNCH_BREAK_MINUTES=30
 SERVICE_TITAN_LUNCH_REQUIRED_AFTER_HOURS=5
 SERVICE_TITAN_MIN_NOTE_LENGTH=30
@@ -765,7 +770,7 @@ SLACK_ALERT_CHANNEL_ID=
 Optional alert labels for grouping in the same Slack channel:
 
 ```env
-SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON={"1812":"HVAC Sales / Comfort Advisors","64326403":"Plumbing Sales","64315277":"Plumbing Service"}
+SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON={"1810":"HVAC Service","1812":"HVAC Sales / Comfort Advisors","64326403":"Plumbing Sales","64315277":"Plumbing Service"}
 ```
 
 Optional and normally false:

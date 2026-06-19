@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from logging import LogRecord
 from unittest.mock import patch
@@ -142,6 +142,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         campaign_risk_task_completion_percent=20.0,
         service_titan_arrival_grace_minutes=30,
         service_titan_first_call_grace_minutes=0,
+        service_titan_open_job_grace_minutes=120,
         service_titan_min_lunch_break_minutes=30,
         service_titan_lunch_required_after_hours=5.0,
         service_titan_min_note_length=30,
@@ -1113,7 +1114,7 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(first.alerts_sent, 1)
         self.assertEqual(second.alerts_sent, 0)
         self.assertEqual(second.alerts_skipped_dedupe, 1)
-        alerts = [message for message in self.h.slack.messages if "ServiceTitan Operations Audit" in message[1]]
+        alerts = [message for message in self.h.slack.messages if "Technician clock-out missing" in message[1]]
         self.assertEqual(len(alerts), 1)
 
     def test_service_titan_fail_alert_sends_on_non_friday_one_time_run(self) -> None:
@@ -1906,6 +1907,63 @@ class MarketingOsAgentTests(unittest.TestCase):
         )
         self.assertEqual(missing.status, RESULT_INSUFFICIENT)
 
+    def test_job_left_open_after_visit_rule_is_opt_in(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        self.assertNotIn("job_left_open_after_visit", [rule.rule_id for rule in active_service_titan_rules(audit_settings)])
+
+        enabled = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_rule_scope_config={"rules": {"job_left_open_after_visit": {"enabled": True}}},
+        )
+        self.assertIn("job_left_open_after_visit", [rule.rule_id for rule in active_service_titan_rules(enabled)])
+
+    def test_job_left_open_after_visit_rule_results(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_rule_scope_config={"rules": {"job_left_open_after_visit": {"enabled": True}}},
+        )
+        rule = _st_rule(audit_settings, "job_left_open_after_visit")
+        past_end = datetime.now(timezone.utc) - timedelta(hours=3)
+        recent_end = datetime.now(timezone.utc) - timedelta(minutes=30)
+
+        self.assertEqual(rule.run(st_job(status="Completed", arrival_window_end=past_end), audit_settings).status, RESULT_NOT_APPLICABLE)
+        self.assertEqual(rule.run(st_job(status="In Progress", arrival_window_end=past_end), audit_settings).status, RESULT_FAIL)
+        self.assertEqual(rule.run(st_job(status="In Progress", arrival_window_end=recent_end), audit_settings).status, RESULT_NOT_APPLICABLE)
+
+        missing_end = rule.run(
+            st_job(
+                status="In Progress",
+                arrival_window_end=None,
+                present_fields={"status", "business_unit", "job_type", "arrival_window"},
+            ),
+            audit_settings,
+        )
+        self.assertEqual(missing_end.status, RESULT_INSUFFICIENT)
+
+        missing_status = rule.run(
+            st_job(
+                status="",
+                arrival_window_end=past_end,
+                present_fields={"arrival_window"},
+            ),
+            audit_settings,
+        )
+        self.assertEqual(missing_status.status, RESULT_INSUFFICIENT)
+
     def test_sales_scope_config_supports_business_unit_tags_and_campaign(self) -> None:
         audit_settings = settings(
             self.h.settings.sqlite_path,
@@ -2031,15 +2089,12 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(len(self.h.slack.messages), 1)
         self.assertEqual(self.h.slack.messages[0][0], "CST")
         alert_text = self.h.slack.messages[0][1]
-        self.assertIn("*Business Unit:* HVAC Sales / Comfort Advisors", alert_text)
-        self.assertIn("*BU ID:* 1812", alert_text)
-        self.assertIn("*BU Name:* HVAC - Sales", alert_text)
-        self.assertIn("*Job Type:* HVAC Estimate (1816)", alert_text)
-        self.assertIn("*Ruleset:* Sales / Comfort Advisor Audit", alert_text)
-        self.assertIn("*Rule ID:* sales_options_fewer_than_three", alert_text)
-        self.assertIn("*Severity:* high", alert_text)
-        self.assertIn("*Options count:* 2 / required 3", alert_text)
-        self.assertIn("*ServiceTitan:*", alert_text)
+        self.assertIn("🚨 HIGH - HVAC Sales / Comfort Advisors: Fewer Than 3 Options", alert_text)
+        self.assertIn("Job Type: HVAC Estimate", alert_text)
+        self.assertIn("Options: 2 of 3 required", alert_text)
+        self.assertIn("Open in ServiceTitan:", alert_text)
+        for internal_field in ("Rule ID", "Ruleset", "BU ID", "BU Name: <missing>", "Destination", "Delivery", "*Job:*"):
+            self.assertNotIn(internal_field, alert_text)
 
         missing_slack = settings(
             self.h.settings.sqlite_path,
@@ -2082,9 +2137,96 @@ class MarketingOsAgentTests(unittest.TestCase):
                 )
                 result = rule.run(job, audit_settings)
                 text = audit._alert_text(job, result)
-                self.assertIn(f"*Business Unit:* {expected_label}", text)
-                self.assertIn(f"*BU ID:* {business_unit_id or '<missing>'}", text)
-                self.assertIn(f"*BU Name:* {business_unit_name or '<missing>'}", text)
+                display_label = expected_label if expected_label != "Unknown Business Unit" else "Unknown"
+                self.assertIn(display_label, text)
+                self.assertNotIn("*BU ID:*", text)
+                self.assertNotIn("*BU Name:*", text)
+
+    def test_servicetitan_alert_text_is_compact_and_rule_specific(self) -> None:
+        hvac_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        audit = ServiceTitanAuditService(hvac_settings, self.h.db, FakeServiceTitan([]), self.h.slack)
+        payment_job = hvac_job(
+            "130522211",
+            business_unit_id="1810",
+            business_unit_name="HVAC - Service",
+            job_type_id="1933",
+            job_type_name="HVAC Diagnostic",
+            technician_name="Eduardo Loera-Gaeta",
+            invoice_total=115.0,
+            invoice_balance=115.0,
+            payment_total=0.0,
+            payments_count=0,
+            invoice_status="",
+            customer_name="Private Customer",
+            notes="Private raw customer note",
+            tag_names=["Private Address 123 Secret St"],
+        )
+        payment_result = _st_rule(hvac_settings, "hvac_payment_missing_on_completed_job").run(payment_job, hvac_settings)
+        payment_text = audit._alert_text(payment_job, payment_result)
+        self.assertIn("🚨 HIGH - HVAC Service: Missing Payment", payment_text)
+        self.assertIn("Technician: Eduardo Loera-Gaeta", payment_text)
+        self.assertIn("Job Type: HVAC Diagnostic", payment_text)
+        self.assertIn("Invoice: $115.00 total / $115.00 balance", payment_text)
+        self.assertIn("Open in ServiceTitan:", payment_text)
+        for forbidden in ("Rule ID", "Ruleset", "BU ID", "BU Name: <missing>", "Destination", "Delivery", "*Job:*"):
+            self.assertNotIn(forbidden, payment_text)
+        for pii in ("Private Customer", "Private raw customer note", "123 Secret St"):
+            self.assertNotIn(pii, payment_text)
+
+        plumbing_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            plumbing_service_audit_enabled=True,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+        )
+        plumbing_audit = ServiceTitanAuditService(plumbing_settings, self.h.db, FakeServiceTitan([]), self.h.slack)
+        options_job = plumbing_job("128859287", estimate_count=1, invoice_total=430.0, invoice_balance=0.0, payment_total=430.0)
+        options_result = _st_rule(plumbing_settings, "plumbing_options_fewer_than_three").run(options_job, plumbing_settings)
+        options_text = plumbing_audit._alert_text(options_job, options_result)
+        self.assertIn("🚨 HIGH - Plumbing Service: Fewer Than 3 Options", options_text)
+        self.assertIn("Options: 1 of 3 required", options_text)
+        self.assertIn("Invoice: $430.00 total / $0.00 balance", options_text)
+
+    def test_job_left_open_alert_text_has_no_customer_pii(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=False,
+            service_titan_rule_scope_config={"rules": {"job_left_open_after_visit": {"enabled": True}}},
+        )
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([]), self.h.slack)
+        rule = _st_rule(audit_settings, "job_left_open_after_visit")
+        job = st_job(
+            "open-job",
+            status="In Progress",
+            business_unit_id="1810",
+            business_unit_name="HVAC - Service",
+            job_type_name="HVAC Diagnostic",
+            technician_name="Tech One",
+            arrival_window_end=datetime.now(timezone.utc) - timedelta(hours=3),
+            customer_name="Private Customer",
+            notes="Private raw customer note",
+            tag_names=["Customer phone 555-1212"],
+        )
+        result = rule.run(job, audit_settings)
+        self.assertEqual(result.status, RESULT_FAIL)
+        text = audit._alert_text(job, result)
+        self.assertIn("⚠️ MEDIUM - HVAC Service: Job Still Open After Visit", text)
+        self.assertIn("Current status: In Progress", text)
+        self.assertIn("Open in ServiceTitan:", text)
+        for pii in ("Private Customer", "Private raw customer note", "555-1212"):
+            self.assertNotIn(pii, text)
 
     def test_sales_dry_run_summary_includes_business_unit_label_without_slack(self) -> None:
         audit_settings = settings(
@@ -2373,7 +2515,7 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.sales_alerts_sent, 2)
         self.assertEqual(len(self.h.slack.messages), 2)
         alert_text = "\n".join(message[1] for message in self.h.slack.messages)
-        self.assertIn("Closed Sales job has fewer than 3 options", alert_text)
+        self.assertIn("Fewer Than 3 Options", alert_text)
         self.assertIn("Sales advisor arrived after first half of appointment window", alert_text)
         self.assertNotIn("Closed Sales job is missing required photos", alert_text)
 
@@ -2975,8 +3117,8 @@ class MarketingOsAgentTests(unittest.TestCase):
         )
         result = _st_rule(audit_settings, "plumbing_options_fewer_than_three").run(job, audit_settings)
         payload = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([]), self.h.slack)._alert_text(job, result)
-        self.assertIn("Plumbing Service Audit", payload)
-        self.assertIn("plumbing_options_fewer_than_three", payload)
+        self.assertIn("Plumbing Service: Fewer Than 3 Options", payload)
+        self.assertIn("Options: 1 of 3 required", payload)
         self.assertNotIn("Sensitive Customer", payload)
         self.assertNotIn("555-123-4567", payload)
         self.assertNotIn("customer@example.com", payload)
@@ -3206,6 +3348,94 @@ class MarketingOsAgentTests(unittest.TestCase):
         )
         on_time_job = on_time_client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
         self.assertEqual(_st_rule(audit_settings, "sales_arrival_after_first_half").run(on_time_job, audit_settings).status, RESULT_PASS)
+
+    def test_sales_arrival_evaluates_only_first_appointment(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-two-appointments"),
+                appointments=[
+                    {
+                        "id": "appt-follow-up",
+                        "jobId": "sales-two-appointments",
+                        "arrivalWindowStart": "2026-05-16T10:00:00Z",
+                        "arrivalWindowEnd": "2026-05-16T12:00:00Z",
+                        "arrivedOn": "2026-05-16T11:30:00Z",
+                    },
+                    {
+                        "id": "appt-first",
+                        "jobId": "sales-two-appointments",
+                        "arrivalWindowStart": "2026-05-15T10:00:00Z",
+                        "arrivalWindowEnd": "2026-05-15T12:00:00Z",
+                        "arrivedOn": "2026-05-15T10:30:00Z",
+                    },
+                ],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "sales_arrival_after_first_half").run(job, audit_settings)
+        self.assertEqual(job.appointment_id, "appt-first")
+        self.assertEqual(result.status, RESULT_PASS)
+
+    def test_sales_arrival_missing_on_first_appointment_does_not_fallback_to_later_visit(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-first-arrival-missing"),
+                appointments=[
+                    {
+                        "id": "appt-first-missing",
+                        "jobId": "sales-first-arrival-missing",
+                        "arrivalWindowStart": "2026-05-15T10:00:00Z",
+                        "arrivalWindowEnd": "2026-05-15T12:00:00Z",
+                    },
+                    {
+                        "id": "appt-second-late",
+                        "jobId": "sales-first-arrival-missing",
+                        "arrivalWindowStart": "2026-05-16T10:00:00Z",
+                        "arrivalWindowEnd": "2026-05-16T12:00:00Z",
+                        "arrivedOn": "2026-05-16T11:30:00Z",
+                    },
+                ],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "sales_arrival_after_first_half").run(job, audit_settings)
+        self.assertEqual(job.appointment_id, "appt-first-missing")
+        self.assertEqual(result.status, RESULT_INSUFFICIENT)
+
+    def test_sales_arrival_prefers_explicit_appointment_sequence(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
+        client = ServiceTitanClient(
+            audit_settings,
+            st_enrichment_http(
+                job_payload=sales_job_payload("sales-sequence-appointments"),
+                appointments=[
+                    {
+                        "id": "appt-sequence-two",
+                        "sequence": 2,
+                        "jobId": "sales-sequence-appointments",
+                        "arrivalWindowStart": "2026-05-15T08:00:00Z",
+                        "arrivalWindowEnd": "2026-05-15T10:00:00Z",
+                        "arrivedOn": "2026-05-15T09:30:00Z",
+                    },
+                    {
+                        "id": "appt-sequence-one",
+                        "sequence": 1,
+                        "jobId": "sales-sequence-appointments",
+                        "arrivalWindowStart": "2026-05-15T12:00:00Z",
+                        "arrivalWindowEnd": "2026-05-15T14:00:00Z",
+                        "arrivedOn": "2026-05-15T12:15:00Z",
+                    },
+                ],
+            ),
+        )
+        job = client.query_recent_jobs(datetime(2026, 5, 15, 15, tzinfo=timezone.utc))[0]
+        result = _st_rule(audit_settings, "sales_arrival_after_first_half").run(job, audit_settings)
+        self.assertEqual(job.appointment_id, "appt-sequence-one")
+        self.assertEqual(result.status, RESULT_PASS)
 
     def test_sales_enrichment_missing_arrival_timestamp_returns_insufficient_data(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, service_titan_audit_enabled=True)
@@ -3722,7 +3952,7 @@ class MarketingOsAgentTests(unittest.TestCase):
         app.slack = fake_slack
         ok, text = app.service_titan_alert_test_text()
         self.assertTrue(ok)
-        self.assertIn("*ServiceTitan Operations Audit* - TEST", text)
+        self.assertIn("ℹ️ TEST - Unknown: [TEST] Synthetic ServiceTitan audit alert", text)
         self.assertIn("[TEST] Synthetic ServiceTitan audit alert", text)
         self.assertIn("writes violation/dedupe records: false", text)
         self.assertIn("would_send: True", text)

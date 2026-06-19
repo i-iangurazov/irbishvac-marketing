@@ -73,7 +73,7 @@ Defaults:
 - `TECHNICIAN_COMPLIANCE_ENABLED=false`
 - `DISPATCHER_AUDIT_ENABLED=false`
 - `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}`
-- `SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON={"1812":"HVAC Sales / Comfort Advisors","64326403":"Plumbing Sales","64315277":"Plumbing Service"}`
+- `SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON={"1810":"HVAC Service","1812":"HVAC Sales / Comfort Advisors","64326403":"Plumbing Sales","64315277":"Plumbing Service"}`
 - `BUDGET_OVERRUN_THRESHOLD_PERCENT=0`, which flags any actual spend at or over plan.
 - `CAMPAIGN_RISK_WINDOW_PERCENT=80`
 - `CAMPAIGN_RISK_TASK_COMPLETION_PERCENT=20`
@@ -172,13 +172,14 @@ The ServiceTitan Operations Audit Agent is disabled by default and runs in the s
 - Sales / Comfort Advisor Audit: three options, Sales photos when scoped photos are available, and first-half appointment-window arrival.
 - HVAC Service Audit: three options, payment on completed jobs, diagnosis/service form, photos when scoped photos are available, and arrival-window checks.
 - Plumbing Service Audit: three options, payment on completed jobs, diagnosis/service form, photos when scoped photos are available, and arrival-window checks. It is disabled by default and not approved for live alerts yet. The Plumbing options rule excludes Water Heater Maintenance and zero-dollar no-charge jobs; positive-invoice diagnostic jobs still need business confirmation before live alerts.
+- `job_left_open_after_visit` is available as an opt-in rule for jobs left open after an appointment end time plus `SERVICE_TITAN_OPEN_JOB_GRACE_MINUTES`; it is disabled unless enabled in `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON`.
 - Legacy Technician Compliance and Dispatcher / Job Quality Audit remain behind explicit flags and should stay disabled until reviewed.
 
 Rules return `pass`, `fail`, `insufficient_data`, `not_applicable`, or `error`. `insufficient_data` and `not_applicable` are logged and not alerted, so unavailable ServiceTitan fields and out-of-scope jobs do not create false positives.
 
 Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` for first production validation. Dry-run fetches real ServiceTitan jobs, evaluates rules, prints the one-time run summary, and skips Slack alerts and audit dedupe writes. The `servicetitan-audit-once` command runs one cycle and exits, even when continuous polling is still disabled. Set `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true` only when you need sanitized field availability logs for ServiceTitan payloads.
 
-ServiceTitan alerts use `SLACK_ALERT_CHANNEL_ID` only. Business Unit labels from `SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON` are included in the alert text for grouping; they do not route alerts to separate channels.
+ServiceTitan alerts use `SLACK_ALERT_CHANNEL_ID` only. Business Unit labels from `SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON` are included in compact alert text for grouping; they do not route alerts to separate channels. Normal Slack alerts omit internal scope/debug fields and customer PII.
 
 Weekly ServiceTitan violation summaries are disabled by default. Set `SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED=true` plus `SERVICE_TITAN_WEEKLY_SUMMARY_DAY`, `SERVICE_TITAN_WEEKLY_SUMMARY_HOUR`, and `SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS` to post a grouped stored-violation summary to `SLACK_ALERT_CHANNEL_ID`. The summary reads existing SQLite violation records; it does not fetch ServiceTitan or re-run the audit. Use `SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-weekly-summary-once` to print the summary without sending Slack.
 

@@ -1085,59 +1085,58 @@ class ServiceTitanAuditService:
 
     def _alert_text(self, job: ServiceTitanJob, result: RuleResult) -> str:
         business_unit = self._business_unit_classification(job)
-        lines = [
-            f"*ServiceTitan Operations Audit* - {result.severity.upper()}",
-            f"*Business Unit:* {business_unit['label']}",
-            f"*BU ID:* {business_unit['id']}",
-            f"*BU Name:* {business_unit['name']}",
-            f"*Job Type:* {self._job_type_label(job)}",
-            f"*Ruleset:* {result.ruleset}",
-            f"*Rule ID:* {result.rule_id}",
-            f"*Rule:* {result.title}",
-            f"*Severity:* {result.severity}",
-            f"*Job:* {job.job_number or job.job_id}",
-            f"*Destination:* {result.recommended_alert_recipient}",
-            f"*Delivery:* {result.delivery}",
-        ]
+        title = self._friendly_rule_title(result)
+        business_unit_label = business_unit["label"] if business_unit["label"] != "Unknown Business Unit" else "Unknown"
+        lines = [f"{self._severity_icon(result.severity)} {result.severity.upper()} - {business_unit_label}: {title}"]
+        if business_unit_label == "Unknown":
+            lines.append("Business Unit: Unknown")
         if job.technician_name:
-            lines.append(f"*Technician:* {job.technician_name}")
+            lines.append(f"Technician: {job.technician_name}")
         if job.dispatcher_name:
-            lines.append(f"*Dispatcher:* {job.dispatcher_name}")
+            lines.append(f"Dispatcher: {job.dispatcher_name}")
+        if job.job_type_name:
+            lines.append(f"Job Type: {job.job_type_name}")
         if job.arrival_window_start:
             window = self._format_dt(job.arrival_window_start)
             if job.arrival_window_end:
-                window = f"{window} to {self._format_dt(job.arrival_window_end)}"
-            lines.append(f"*Arrival window:* {window}")
+                window = self._format_window(job.arrival_window_start, job.arrival_window_end)
+            lines.append(f"Appointment: {window}")
         if job.arrived_at:
-            lines.append(f"*Arrived:* {self._format_dt(job.arrived_at)}")
-        if job.invoice_total is not None:
-            lines.append(f"*Invoice total:* {job.invoice_total}")
+            lines.append(f"Arrived: {self._format_time(job.arrived_at)}")
+        invoice_line = self._invoice_line(job, result)
+        if invoice_line:
+            lines.append(invoice_line)
         if "options_count" in result.metadata:
             required = result.metadata.get("required_options_count")
-            suffix = f" / required {required}" if required is not None else ""
-            lines.append(f"*Options count:* {result.metadata['options_count']}{suffix}")
+            if required is not None:
+                lines.append(f"Options: {result.metadata['options_count']} of {required} required")
+            else:
+                lines.append(f"Options: {result.metadata['options_count']}")
         if "photos_count" in result.metadata:
-            lines.append(f"*Photos count:* {result.metadata['photos_count']}")
-        if "payment_total" in result.metadata:
-            lines.append(f"*Payment total:* {result.metadata['payment_total']}")
-        if "invoice_balance" in result.metadata:
-            lines.append(f"*Invoice balance:* {result.metadata['invoice_balance']}")
-        if "invoice_status" in result.metadata and result.metadata.get("invoice_status"):
-            lines.append(f"*Invoice status:* {result.metadata['invoice_status']}")
+            lines.append(f"Photos: {result.metadata['photos_count']}")
         if "forms_count" in result.metadata:
-            lines.append(f"*Forms count:* {result.metadata['forms_count']}")
+            lines.append(f"Forms: {result.metadata['forms_count']}")
         if "diagnosis_form_present" in result.metadata:
-            lines.append(f"*Diagnosis form present:* {result.metadata['diagnosis_form_present']}")
+            lines.append(f"Diagnosis form present: {result.metadata['diagnosis_form_present']}")
         if "arrival_first_half_cutoff" in result.metadata:
-            lines.append(f"*First-half cutoff:* {result.metadata['arrival_first_half_cutoff']}")
+            parsed_cutoff = parse_notion_datetime(str(result.metadata["arrival_first_half_cutoff"]))
+            if parsed_cutoff:
+                lines.append(f"First-half cutoff: {self._format_dt(parsed_cutoff)}")
+        if "appointment_end" in result.metadata:
+            parsed_end = parse_notion_datetime(str(result.metadata["appointment_end"]))
+            if parsed_end:
+                lines.append(f"Appointment ended: {self._format_dt(parsed_end)}")
+        if "current_status" in result.metadata:
+            lines.append(f"Current status: {result.metadata['current_status']}")
         lines.extend(
             [
-                f"*Issue:* {result.explanation}",
-                f"*Recommended action:* {result.recommended_action}",
+                "",
+                f"Issue: {result.explanation}",
+                f"Action: {result.recommended_action}",
             ]
         )
         if job.url:
-            lines.append(f"*ServiceTitan:* {job.url}")
+            lines.extend(["", "Open in ServiceTitan:", job.url])
         return "\n".join(lines)
 
     def _business_unit_classification(self, job: ServiceTitanJob) -> dict[str, str]:
@@ -1155,7 +1154,68 @@ class ServiceTitanAuditService:
         return "Unknown Job Type"
 
     def _format_dt(self, value: datetime) -> str:
-        return value.astimezone(ZoneInfo(self.settings.service_titan_audit_timezone)).isoformat()
+        localized = value.astimezone(ZoneInfo(self.settings.service_titan_audit_timezone))
+        return localized.strftime("%b %d, %I:%M %p").replace(" 0", " ").replace(", 0", ", ")
+
+    def _format_time(self, value: datetime) -> str:
+        localized = value.astimezone(ZoneInfo(self.settings.service_titan_audit_timezone))
+        return localized.strftime("%I:%M %p").lstrip("0")
+
+    def _format_window(self, start: datetime, end: datetime) -> str:
+        start_local = start.astimezone(ZoneInfo(self.settings.service_titan_audit_timezone))
+        end_local = end.astimezone(ZoneInfo(self.settings.service_titan_audit_timezone))
+        if start_local.date() == end_local.date():
+            return f"{self._format_dt(start)}-{self._format_time(end)}"
+        return f"{self._format_dt(start)}-{self._format_dt(end)}"
+
+    def _severity_icon(self, severity: str) -> str:
+        normalized = severity.strip().lower()
+        if normalized == "high":
+            return "🚨"
+        if normalized == "medium":
+            return "⚠️"
+        return "ℹ️"
+
+    def _friendly_rule_title(self, result: RuleResult) -> str:
+        titles = {
+            "sales_options_fewer_than_three": "Fewer Than 3 Options",
+            "hvac_options_fewer_than_three": "Fewer Than 3 Options",
+            "plumbing_options_fewer_than_three": "Fewer Than 3 Options",
+            "hvac_payment_missing_on_completed_job": "Missing Payment",
+            "plumbing_payment_missing_on_completed_job": "Missing Payment",
+            "job_left_open_after_visit": "Job Still Open After Visit",
+        }
+        return titles.get(result.rule_id, result.title)
+
+    def _invoice_line(self, job: ServiceTitanJob, result: RuleResult) -> str:
+        invoice_total = result.metadata.get("invoice_total", job.invoice_total)
+        invoice_balance = result.metadata.get("invoice_balance", job.invoice_balance)
+        payment_total = result.metadata.get("payment_total", job.payment_total)
+        invoice_status = str(result.metadata.get("invoice_status") or job.invoice_status or "").strip()
+        if invoice_total is None and invoice_balance is None and payment_total is None and not invoice_status:
+            return ""
+        if invoice_total is not None and invoice_balance is not None:
+            line = f"Invoice: {self._format_money(invoice_total)} total / {self._format_money(invoice_balance)} balance"
+        elif invoice_total is not None:
+            line = f"Invoice: {self._format_money(invoice_total)}"
+        elif invoice_balance is not None:
+            line = f"Invoice balance: {self._format_money(invoice_balance)}"
+        else:
+            line = ""
+        details: list[str] = []
+        if payment_total is not None:
+            details.append(f"payment {self._format_money(payment_total)}")
+        if invoice_status:
+            details.append(f"status {invoice_status}")
+        if details:
+            line = f"{line} ({', '.join(details)})" if line else f"Invoice: {', '.join(details)}"
+        return line
+
+    def _format_money(self, value: object) -> str:
+        try:
+            return f"${float(value):,.2f}"
+        except (TypeError, ValueError):
+            return str(value)
 
     def _should_initialize_baseline(self, previous_checkpoint: str | None) -> bool:
         return bool(

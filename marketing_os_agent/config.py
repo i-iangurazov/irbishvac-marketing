@@ -121,6 +121,7 @@ def _json_object_env(name: str, default: dict[str, Any] | None = None) -> dict[s
 
 
 DEFAULT_SERVICE_TITAN_BUSINESS_UNIT_LABELS = {
+    "1810": "HVAC Service",
     "1812": "HVAC Sales / Comfort Advisors",
     "64326403": "Plumbing Sales",
     "64315277": "Plumbing Service",
@@ -233,6 +234,7 @@ class Settings:
     campaign_risk_task_completion_percent: float
     service_titan_arrival_grace_minutes: int
     service_titan_first_call_grace_minutes: int
+    service_titan_open_job_grace_minutes: int
     service_titan_min_lunch_break_minutes: int
     service_titan_lunch_required_after_hours: float
     service_titan_min_note_length: int
@@ -377,6 +379,7 @@ class Settings:
             campaign_risk_task_completion_percent=_float_env("CAMPAIGN_RISK_TASK_COMPLETION_PERCENT", 20.0),
             service_titan_arrival_grace_minutes=_int_env("SERVICE_TITAN_ARRIVAL_GRACE_MINUTES", 30),
             service_titan_first_call_grace_minutes=_int_env("SERVICE_TITAN_FIRST_CALL_GRACE_MINUTES", 0),
+            service_titan_open_job_grace_minutes=_int_env("SERVICE_TITAN_OPEN_JOB_GRACE_MINUTES", 120),
             service_titan_min_lunch_break_minutes=_int_env("SERVICE_TITAN_MIN_LUNCH_BREAK_MINUTES", 30),
             service_titan_lunch_required_after_hours=_float_env("SERVICE_TITAN_LUNCH_REQUIRED_AFTER_HOURS", 5.0),
             service_titan_min_note_length=_int_env("SERVICE_TITAN_MIN_NOTE_LENGTH", 30),

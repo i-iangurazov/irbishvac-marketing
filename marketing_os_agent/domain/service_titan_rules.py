@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from ..clients.servicetitan import ServiceTitanJob
@@ -195,6 +195,7 @@ class AuditRule:
 
 def active_service_titan_rules(settings: Settings) -> list[AuditRule]:
     rules: list[AuditRule] = []
+    rules.extend(open_job_rules())
     if settings.sales_comfort_advisor_audit_enabled:
         rules.extend(sales_comfort_advisor_rules())
     if settings.hvac_service_audit_enabled:
@@ -207,7 +208,25 @@ def active_service_titan_rules(settings: Settings) -> list[AuditRule]:
         rules.extend(dispatcher_audit_rules())
         rules.extend(handbook_audit_rules())
     disabled = {rule_id.strip() for rule_id in settings.service_titan_disabled_rule_ids if rule_id.strip()}
-    return [rule for rule in rules if rule.enabled_by_default and rule.rule_id not in disabled]
+    return [
+        _effective_rule(rule, settings)
+        for rule in rules
+        if (rule.enabled_by_default or _rule_explicitly_enabled(rule, settings)) and rule.rule_id not in disabled
+    ]
+
+
+def _rule_explicitly_enabled(rule: AuditRule, settings: Settings) -> bool:
+    config = settings.service_titan_rule_scope_config or {}
+    rulesets_config = config.get("rulesets", {}) if isinstance(config.get("rulesets", {}), dict) else {}
+    ruleset_config = rulesets_config.get(rule.ruleset, {}) if isinstance(rulesets_config.get(rule.ruleset, {}), dict) else {}
+    rules_config = config.get("rules", {}) if isinstance(config.get("rules", {}), dict) else {}
+    rule_config = rules_config.get(rule.rule_id, {}) if isinstance(rules_config.get(rule.rule_id, {}), dict) else {}
+    enabled = False
+    if "enabled" in ruleset_config:
+        enabled = _config_bool(ruleset_config["enabled"], enabled)
+    if "enabled" in rule_config:
+        enabled = _config_bool(rule_config["enabled"], enabled)
+    return enabled
 
 
 def _service_call_scope(
@@ -436,6 +455,31 @@ def sales_comfort_advisor_rules() -> list[AuditRule]:
                 statuses=ACTIVE_OR_CLOSED_STATUS_KEYWORDS,
             ),
         ),
+    ]
+
+
+def open_job_rules() -> list[AuditRule]:
+    return [
+        AuditRule(
+            "job_left_open_after_visit",
+            RULESET_SERVICE_CALL,
+            "medium",
+            "Job left open after visit",
+            "Jobs should be completed or closed after the visit is past the configured grace period.",
+            ("status", "arrival_window"),
+            "Ask the technician or dispatcher to close the job or update the job status.",
+            _job_left_open_after_visit,
+            enabled_by_default=False,
+            scope=RuleScope(
+                handbook_source="ServiceTitan open job status audit configuration",
+                applies_to_job_statuses=ACTIVE_OR_CLOSED_STATUS_KEYWORDS,
+                excludes_statuses=EXCLUDED_STATUS_KEYWORDS,
+                required_context_fields=("status",),
+                required_data_fields=("status", "arrival_window"),
+                alert_routing="service/operations audit channel",
+                default_enabled=False,
+            ),
+        )
     ]
 
 
@@ -1300,6 +1344,45 @@ def _sales_arrival_first_half(job: ServiceTitanJob, _settings: Settings, rule: A
             metadata,
         )
     return rule.result(job, RESULT_PASS, "Advisor arrived before the first half of the appointment window ended.", rule.action, metadata)
+
+
+def _job_left_open_after_visit(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:
+    if "status" not in job.present_fields:
+        return rule.result(job, RESULT_INSUFFICIENT, "ServiceTitan payload did not include job status.", rule.action)
+    if job.is_closed:
+        return rule.result(job, RESULT_NOT_APPLICABLE, "Job is already completed or closed.", rule.action)
+    if "arrival_window" not in job.present_fields or not job.arrival_window_end:
+        return rule.result(
+            job,
+            RESULT_INSUFFICIENT,
+            _field_unavailable(job, "arrival_window", "Appointment end time was not available from ServiceTitan."),
+            rule.action,
+        )
+
+    now = datetime.now(timezone.utc)
+    appointment_end = job.arrival_window_end.astimezone(timezone.utc)
+    grace_minutes = max(0, settings.service_titan_open_job_grace_minutes)
+    deadline = appointment_end + timedelta(minutes=grace_minutes)
+    metadata = {
+        "appointment_end": appointment_end.isoformat(),
+        "current_status": job.status,
+        "grace_minutes": grace_minutes,
+    }
+    if now <= deadline:
+        return rule.result(
+            job,
+            RESULT_NOT_APPLICABLE,
+            "Appointment has not passed the configured open-job grace period.",
+            rule.action,
+            metadata,
+        )
+    return rule.result(
+        job,
+        RESULT_FAIL,
+        "Appointment is past the grace period, but the job is not completed or closed.",
+        rule.action,
+        metadata,
+    )
 
 
 def _hvac_three_options(job: ServiceTitanJob, settings: Settings, rule: AuditRule) -> RuleResult:

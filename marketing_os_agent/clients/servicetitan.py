@@ -395,8 +395,7 @@ class ServiceTitanClient:
         else:
             _mark_missing(missing_data, ("appointment_id", "arrival_window", "arrived_at"), "jpm appointments endpoint returned no records for this job")
 
-        appointment_ids = [str(_raw_value(record, ("id", "appointmentId")) or "") for record in appointments]
-        appointment_ids = [value for value in appointment_ids if value]
+        appointment_ids = [appointment_id] if appointment_id else []
         if appointment_ids:
             assignments, assignments_error = self._related_records(
                 "appointment_assignments",
@@ -1483,7 +1482,30 @@ def _records_keys(records: list[dict[str, Any]]) -> list[str]:
 def _select_appointment(records: list[dict[str, Any]]) -> dict[str, Any]:
     if not records:
         return {}
-    return sorted(records, key=lambda item: str(_raw_value(item, ("start", "arrivalWindowStart", "createdOn", "id")) or ""))[0]
+
+    sequence_fields = ("sequence", "sequenceNumber", "appointmentNumber", "visitNumber", "order", "sortOrder")
+
+    def sort_key(item: dict[str, Any]) -> tuple[int, float, str, str]:
+        sequence = _first_float([item], sequence_fields)
+        if sequence is not None:
+            return (0, sequence, "", str(_raw_value(item, ("id", "appointmentId")) or ""))
+        start = _parse_datetime(
+            _raw_value(
+                item,
+                (
+                    "arrivalWindowStart",
+                    "scheduledStart",
+                    "scheduledStartOn",
+                    "start",
+                    "startDate",
+                    "createdOn",
+                ),
+            )
+        )
+        start_key = start.astimezone(timezone.utc).isoformat() if start else ""
+        return (1, 0.0, start_key, str(_raw_value(item, ("id", "appointmentId")) or ""))
+
+    return sorted(records, key=sort_key)[0]
 
 
 def _mark_missing(missing_data: dict[str, str], fields: tuple[str, ...], reason: str) -> None:
