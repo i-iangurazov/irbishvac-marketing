@@ -42,6 +42,10 @@ SLACK_ALERT_CHANNEL_ID=...
 
 Do not set `PM_AUDIT_DRY_RUN=false` until Jane has reviewed dry-run output.
 
+`PM_AUDIT_DRY_RUN=true` is separate from `SERVICE_TITAN_AUDIT_DRY_RUN=true`. For PM-only dry-run validation in Render, set `PM_AUDIT_ENABLED=true` and keep `PM_AUDIT_DRY_RUN=true`; do not change the live ServiceTitan audit dry-run setting unless intentionally pausing Sales/HVAC/Plumbing ServiceTitan alerts.
+
+WARNING: Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` only for one-off ServiceTitan audit validation commands or a deliberately paused dry-run environment. Do not set it globally on the live Render service unless intentionally stopping live ServiceTitan alerts.
+
 ## Scope
 
 In-scope project types:

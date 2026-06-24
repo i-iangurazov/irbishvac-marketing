@@ -6,6 +6,8 @@ Scope: read-only ServiceTitan discovery for a future Project Management Audit Ag
 
 Implementation follow-up: PM Audit Agent v1 is documented in `docs/pm-audit-agent.md`. It implements only the data-available v1 rules from this discovery and remains disabled/dry-run by default.
 
+PM dry-run uses `PM_AUDIT_DRY_RUN=true`, which is separate from `SERVICE_TITAN_AUDIT_DRY_RUN=true`. Do not set `SERVICE_TITAN_AUDIT_DRY_RUN=true` globally on a live Render service for PM validation unless intentionally pausing live ServiceTitan Sales/HVAC/Plumbing alerts.
+
 ## Existing Extension Points
 
 - Config: add future `PM_AUDIT_ENABLED=false` and timing thresholds in `marketing_os_agent/config.py`.

@@ -22,6 +22,55 @@ Sales / Comfort Advisor Audit is implemented for initial production monitoring. 
 - `marketing_os_agent/persistence.py` stores audit violations in SQLite.
 - `AgentApp` starts a separate ServiceTitan audit thread only when the feature is enabled.
 
+## Safe Env Patterns
+
+WARNING: Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` only for one-off validation commands or a deliberately paused dry-run environment. Do not set this globally on the live Render service unless you intentionally want to stop live Sales/HVAC/Plumbing ServiceTitan alerts.
+
+`SERVICE_TITAN_AUDIT_DRY_RUN=true` affects the ServiceTitan audit send path globally. It suppresses ServiceTitan Slack alerts, violation writes, dedupe writes, and checkpoint advancement. `PM_AUDIT_DRY_RUN=true` is separate and applies only to the PM Audit command.
+
+Local one-off ServiceTitan validation:
+
+```bash
+SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-audit-once
+```
+
+Live production ServiceTitan audit:
+
+```env
+SERVICE_TITAN_AUDIT_DRY_RUN=false
+SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false
+```
+
+PM Audit dry-run only:
+
+```env
+PM_AUDIT_ENABLED=true
+PM_AUDIT_DRY_RUN=true
+```
+
+PM Audit disabled:
+
+```env
+PM_AUDIT_ENABLED=false
+```
+
+For PM-only dry-run in Render, prefer `PM_AUDIT_ENABLED=true` and `PM_AUDIT_DRY_RUN=true` while leaving existing ServiceTitan live audit dry-run settings unchanged. Do not copy local validation env blindly into Render.
+
+Current rollout status:
+
+- Sales / Comfort Advisor Audit: live with strict Render scope.
+- HVAC Service Audit: implemented and disabled by default; only the payment rule is a controlled-rollout candidate.
+- Plumbing Service Audit: implemented and disabled by default; the options rule is a controlled-rollout candidate.
+- PM Audit: implemented, disabled by default, and dry-run first only.
+- Weekly Summary: implemented and disabled by default.
+
+Do not do:
+
+- Do not set `SERVICE_TITAN_AUDIT_DRY_RUN=true` on the live Render service unless intentionally pausing live ServiceTitan alerts.
+- Do not enable `PM_AUDIT_ENABLED=true` with `PM_AUDIT_DRY_RUN=false` until Jane approves live PM alerts.
+- Do not enable photos/forms/arrival rules until API data is confirmed reliable.
+- Do not remove Sales scope from `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` when adding HVAC or Plumbing scope.
+
 ## Sales / Comfort Advisor Audit
 
 The Sales / Comfort Advisor Audit applies only to jobs that match Sales scope. It is controlled by `SALES_COMFORT_ADVISOR_AUDIT_ENABLED`, which defaults to `true`.
@@ -84,6 +133,8 @@ Manual dry-run test:
 ```bash
 SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-weekly-summary-once
 ```
+
+WARNING: Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` here as a command-level one-off override. Do not set it globally on the live Render service unless intentionally pausing live ServiceTitan alerts.
 
 The manual command prints the summary. When `SERVICE_TITAN_AUDIT_DRY_RUN=true`, it does not send Slack and does not mark the weekly summary as sent. When dry-run is false and weekly summary sending is enabled or the command is forced manually, Slack delivery uses the same `SLACK_ALERT_CHANNEL_ID` as immediate ServiceTitan alerts.
 
@@ -273,6 +324,7 @@ Enable `sales_photos_missing` later by removing it from `SERVICE_TITAN_DISABLED_
 Initial HVAC Service validation should use reviewed HVAC IDs and keep form/photo/arrival rules disabled until the tenant exposes scoped sources and reliable arrival timestamps. This is a future dry-run setup only; do not use it for live alerts until business review is complete:
 
 ```env
+# WARNING: validation-only. Do not put SERVICE_TITAN_AUDIT_DRY_RUN=true on live Render unless intentionally pausing live ServiceTitan alerts.
 HVAC_SERVICE_AUDIT_ENABLED=true
 SALES_COMFORT_ADVISOR_AUDIT_ENABLED=false
 TECHNICIAN_COMPLIANCE_ENABLED=false
@@ -287,6 +339,7 @@ This leaves `hvac_options_fewer_than_three` and `hvac_payment_missing_on_complet
 Initial Plumbing Service validation should use reviewed Plumbing IDs and keep payment/photo/form/arrival rules disabled until structured ServiceTitan data is available and business expectations are confirmed. This is a future dry-run setup only; do not use it for live alerts until business review is complete:
 
 ```env
+# WARNING: validation-only. Do not put SERVICE_TITAN_AUDIT_DRY_RUN=true on live Render unless intentionally pausing live ServiceTitan alerts.
 PLUMBING_SERVICE_AUDIT_ENABLED=true
 SALES_COMFORT_ADVISOR_AUDIT_ENABLED=false
 HVAC_SERVICE_AUDIT_ENABLED=false
@@ -803,6 +856,8 @@ Set:
 SERVICE_TITAN_AUDIT_DRY_RUN=true
 ```
 
+WARNING: Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` only for one-off validation commands or a deliberately paused dry-run environment. Do not set this globally on the live Render service unless you intentionally want to stop live Sales/HVAC/Plumbing ServiceTitan alerts.
+
 Dry-run mode fetches real ServiceTitan data and evaluates every enabled rule, but it does not send Slack alerts, does not create violation records, and does not advance the ServiceTitan audit checkpoint. The run still writes normal run logs and prints a summary for one-time runs.
 
 The summary includes:
@@ -832,7 +887,7 @@ The summary includes:
 - Alerts skipped due to dedupe.
 - Errors.
 
-This is the recommended first production validation mode. You may keep `SERVICE_TITAN_AUDIT_ENABLED=false` in the long-running Render service and run `python3 -m marketing_os_agent servicetitan-audit-once` as a one-off command with `SERVICE_TITAN_AUDIT_DRY_RUN=true`.
+This is the recommended first validation mode before live ServiceTitan alerts. If Sales alerts are already live, do not change the live Render service to `SERVICE_TITAN_AUDIT_DRY_RUN=true`; instead, run a one-off command with command-level env overrides in a shell. You may keep `SERVICE_TITAN_AUDIT_ENABLED=false` in a long-running validation service and run `python3 -m marketing_os_agent servicetitan-audit-once` as a one-off command with `SERVICE_TITAN_AUDIT_DRY_RUN=true`.
 
 For sanitized field introspection, set:
 
@@ -868,7 +923,7 @@ Discover sanitized ServiceTitan scope values:
 python3 -m marketing_os_agent servicetitan-discover-scopes
 ```
 
-The one-time command runs exactly one cycle and exits. It intentionally does not require `SERVICE_TITAN_AUDIT_ENABLED=true`, so you can validate real ServiceTitan data without enabling continuous polling. Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` until you are ready to send Slack alerts.
+The one-time command runs exactly one cycle and exits. It intentionally does not require `SERVICE_TITAN_AUDIT_ENABLED=true`, so you can validate real ServiceTitan data without enabling continuous polling. Use command-level `SERVICE_TITAN_AUDIT_DRY_RUN=true` until you are ready to send Slack alerts. Do not set `SERVICE_TITAN_AUDIT_DRY_RUN=true` globally on an already-live Render service unless intentionally pausing live ServiceTitan alerts.
 The discovery command is read-only and prints sanitized scope values for configuring business-unit, job-type, status, tag, and workflow filters.
 
 Validate notification delivery paths:
@@ -927,6 +982,8 @@ Recommended first validation:
 SERVICE_TITAN_AUDIT_DRY_RUN=true SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true python3 -m marketing_os_agent servicetitan-audit-once
 ```
 
+WARNING: This is a local or shell-level one-off validation override. Do not copy `SERVICE_TITAN_AUDIT_DRY_RUN=true` into the live Render service unless intentionally pausing live Sales/HVAC/Plumbing alerts.
+
 Confirm the output includes:
 
 ```text
@@ -951,7 +1008,7 @@ Review:
 - Alerts that would have been sent.
 - Alert destinations.
 
-Keep dry-run enabled until notification delivery and routing are separately verified.
+Keep dry-run enabled only in the validation command/environment until notification delivery and routing are separately verified. If production Sales alerts are already live, leave the live Render ServiceTitan dry-run setting unchanged.
 
 ## Safe Historical Alert Validation
 
@@ -1044,7 +1101,7 @@ servicetitan_audit_cycle_completed
 
 - Add ServiceTitan env vars in Render only after the app is connected and scopes are approved.
 - Keep `SERVICE_TITAN_AUDIT_ENABLED=false` until credentials and Slack alert channel are ready.
-- Set `SERVICE_TITAN_AUDIT_DRY_RUN=true` for the first production validation run.
+- Set `SERVICE_TITAN_AUDIT_DRY_RUN=true` only for a first validation service/run before live alerts, or as a command-level one-off override. If the live Render service is already sending Sales alerts, do not change its global `SERVICE_TITAN_AUDIT_DRY_RUN` value unless intentionally pausing live ServiceTitan alerts.
 - Keep `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false` unless you explicitly want historical first-run alerts.
 - Keep `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE` set. Use `1` only for controlled one-alert historical validation.
 - Set `SALES_COMFORT_ADVISOR_AUDIT_ENABLED=true`.
@@ -1055,7 +1112,7 @@ servicetitan_audit_cycle_completed
 - Run `python3 -m marketing_os_agent init-db` after deploy if the SQLite file is new.
 - Run `python3 -m marketing_os_agent servicetitan-discover-scopes` to collect sanitized production scope names/IDs.
 - Configure `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` when the discovered business units/job types/statuses/tags need tenant-specific narrowing.
-- Run `SERVICE_TITAN_AUDIT_ENABLED=false SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-audit-once` with a short lookback for first validation.
+- Run `SERVICE_TITAN_AUDIT_ENABLED=false SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-audit-once` with a short lookback for first validation as a command-level override. Do not paste that override into a live Render service unless deliberately pausing live alerts.
 - Watch the command summary and logs for `servicetitan_continuous_audit_enabled`, `servicetitan_audit_loop_started`, `servicetitan_audit_cycle_started`, `servicetitan_audit_cycle_completed`, `servicetitan_audit_completed`, `servicetitan_rule_insufficient_data`, `servicetitan_alert_dry_run`, `servicetitan_duplicate_alert_suppressed`, `servicetitan_alert_skipped_max_per_cycle`, and `servicetitan_alert_sent`.
 - After dry-run results look correct, set `SERVICE_TITAN_AUDIT_DRY_RUN=false`, keep `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false`, confirm `SLACK_ALERT_CHANNEL_ID`, then set `SERVICE_TITAN_AUDIT_ENABLED=true` to start continuous polling. The first live cycle establishes a baseline; later cycles alert only new/updated violations.
 
@@ -1069,6 +1126,8 @@ SERVICE_TITAN_AUDIT_ENABLED=false SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m ma
 python3 -m marketing_os_agent servicetitan-alert-test
 NOTIFICATIONS_TEST_SEND=true python3 -m marketing_os_agent servicetitan-alert-test
 ```
+
+The `SERVICE_TITAN_AUDIT_DRY_RUN=true` line in this checklist is a one-off command override. It is not a recommended persistent live Render setting when Sales/HVAC/Plumbing alerts should continue sending.
 
 The `servicetitan-runtime-diagnostics` command prints masked runtime config, JSON parsing status, rule enablement, checkpoint state, recent audit-cycle summaries, and durable violation/alert dedupe counts. It does not call ServiceTitan or Slack and does not print customer PII or secrets.
 

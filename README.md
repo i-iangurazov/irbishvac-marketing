@@ -78,6 +78,47 @@ Defaults:
 - `CAMPAIGN_RISK_WINDOW_PERCENT=80`
 - `CAMPAIGN_RISK_TASK_COMPLETION_PERCENT=20`
 
+## Safe Env Patterns
+
+WARNING: Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` only for one-off validation commands or a deliberately paused dry-run environment. Do not set this globally on the live Render service unless you intentionally want to stop live Sales/HVAC/Plumbing ServiceTitan alerts.
+
+`SERVICE_TITAN_AUDIT_DRY_RUN=true` affects the ServiceTitan audit send path globally. It suppresses immediate ServiceTitan Slack alerts, violation writes, dedupe writes, and checkpoint advancement. `PM_AUDIT_DRY_RUN=true` is separate and applies only to the PM Audit command.
+
+Local one-off ServiceTitan validation:
+
+```bash
+SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-audit-once
+```
+
+Live production ServiceTitan audit:
+
+```env
+SERVICE_TITAN_AUDIT_DRY_RUN=false
+SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false
+```
+
+PM Audit dry-run only:
+
+```env
+PM_AUDIT_ENABLED=true
+PM_AUDIT_DRY_RUN=true
+```
+
+PM Audit disabled:
+
+```env
+PM_AUDIT_ENABLED=false
+```
+
+Do not copy local validation env blindly into Render. For PM-only dry-run validation in Render, prefer `PM_AUDIT_ENABLED=true` and `PM_AUDIT_DRY_RUN=true` while leaving existing ServiceTitan live audit dry-run settings unchanged.
+
+## Do Not Do
+
+- Do not set `SERVICE_TITAN_AUDIT_DRY_RUN=true` on the live Render service unless intentionally pausing live ServiceTitan alerts.
+- Do not enable `PM_AUDIT_ENABLED=true` with `PM_AUDIT_DRY_RUN=false` until Jane approves live PM alerts.
+- Do not enable photos/forms/arrival rules until API data is confirmed reliable.
+- Do not remove Sales scope from `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON` when adding HVAC or Plumbing scope.
+
 Optional reminder state mirror:
 
 - `NOTION_TASK_LAST_REMINDER_SENT_PROPERTY`, for example `Last Reminder Sent At`, can point to a Notion Date property. SQLite remains the required duplicate-prevention store; this Notion field gives visible state and prevents duplicate reminders if local state is rebuilt or lost.
@@ -178,11 +219,11 @@ The ServiceTitan Operations Audit Agent is disabled by default and runs in the s
 
 Rules return `pass`, `fail`, `insufficient_data`, `not_applicable`, or `error`. `insufficient_data` and `not_applicable` are logged and not alerted, so unavailable ServiceTitan fields and out-of-scope jobs do not create false positives.
 
-Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` for first production validation. Dry-run fetches real ServiceTitan jobs, evaluates rules, prints the one-time run summary, and skips Slack alerts and audit dedupe writes. The `servicetitan-audit-once` command runs one cycle and exits, even when continuous polling is still disabled. Set `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true` only when you need sanitized field availability logs for ServiceTitan payloads.
+Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` for command-level one-off validation only, or for a deliberately paused dry-run environment. Dry-run fetches real ServiceTitan jobs, evaluates rules, prints the one-time run summary, and skips Slack alerts and audit dedupe writes. The `servicetitan-audit-once` command runs one cycle and exits, even when continuous polling is still disabled. Do not set `SERVICE_TITAN_AUDIT_DRY_RUN=true` globally on a live Render service unless intentionally pausing live Sales/HVAC/Plumbing alerts. Set `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true` only when you need sanitized field availability logs for ServiceTitan payloads.
 
 ServiceTitan alerts use `SLACK_ALERT_CHANNEL_ID` only. Business Unit labels from `SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON` are included in compact alert text for grouping; they do not route alerts to separate channels. Normal Slack alerts omit internal scope/debug fields and customer PII.
 
-Weekly ServiceTitan violation summaries are disabled by default. Set `SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED=true` plus `SERVICE_TITAN_WEEKLY_SUMMARY_DAY`, `SERVICE_TITAN_WEEKLY_SUMMARY_HOUR`, and `SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS` to post a grouped stored-violation summary to `SLACK_ALERT_CHANNEL_ID`. The summary reads existing SQLite violation records; it does not fetch ServiceTitan or re-run the audit. Use `SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-weekly-summary-once` to print the summary without sending Slack.
+Weekly ServiceTitan violation summaries are disabled by default. Set `SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED=true` plus `SERVICE_TITAN_WEEKLY_SUMMARY_DAY`, `SERVICE_TITAN_WEEKLY_SUMMARY_HOUR`, and `SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS` to post a grouped stored-violation summary to `SLACK_ALERT_CHANNEL_ID`. The summary reads existing SQLite violation records; it does not fetch ServiceTitan or re-run the audit. Use command-level `SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-weekly-summary-once` to print the summary without sending Slack; do not copy that override into live Render unless intentionally pausing ServiceTitan sends.
 
 Use `python3 -m marketing_os_agent servicetitan-runtime-diagnostics` on Render to confirm masked runtime config, parsed rule JSON, checkpoint state, recent audit cycles, and durable alert dedupe state. Live Slack sends are capped by `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE`; set it to `1` with `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true` and `SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE=true` only for controlled one-real-historical-alert validation.
 
@@ -244,7 +285,7 @@ SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-week
 python3 -m marketing_os_agent test-email --to ilias@example.com
 ```
 
-Those commands may post to Slack and, for Friday roundup, attempt email. `test-email` reads Notion and only sends SMTP email; it does not post to Slack.
+Those commands may post to Slack and, for Friday roundup, attempt email. The `SERVICE_TITAN_AUDIT_DRY_RUN=true` weekly-summary example is a command-level one-off override only; do not set it globally on live Render unless intentionally pausing ServiceTitan audit sends. `test-email` reads Notion and only sends SMTP email; it does not post to Slack.
 
 ## Tests
 
