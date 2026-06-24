@@ -4,6 +4,8 @@ Discovery date: 2026-06-24
 
 Scope: read-only ServiceTitan discovery for a future Project Management Audit Agent. No ServiceTitan writes, Slack sends, Render env changes, or live PM rules were made.
 
+Implementation follow-up: PM Audit Agent v1 is documented in `docs/pm-audit-agent.md`. It implements only the data-available v1 rules from this discovery and remains disabled/dry-run by default.
+
 ## Existing Extension Points
 
 - Config: add future `PM_AUDIT_ENABLED=false` and timing thresholds in `marketing_os_agent/config.py`.

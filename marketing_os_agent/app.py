@@ -15,6 +15,7 @@ from .clients.slack import SlackClient
 from .config import HealthReport, Settings
 from .domain.campaign_health import CampaignHealthService
 from .domain.owner_mapping import OwnerResolver
+from .domain.pm_audit import PMAuditService, PMAuditSummary
 from .domain.formatting import format_friday_roundup_email
 from .domain.reports import ReportService, month_bounds, quarter_bounds, week_bounds
 from .domain.service_titan_audit import (
@@ -101,6 +102,7 @@ class AgentApp:
         self.service_titan_audit = ServiceTitanAuditService(settings, self.db, self.service_titan, self.slack)
         self.service_titan_weekly_summary = ServiceTitanWeeklySummaryService(settings, self.db, self.slack)
         self.service_titan_scope_discovery = ServiceTitanScopeDiscovery(settings, self.service_titan)
+        self.pm_audit = PMAuditService(settings, self.service_titan, self.slack)
 
     def initialize_storage(self) -> None:
         self.db.initialize()
@@ -225,6 +227,9 @@ class AgentApp:
 
     def run_service_titan_weekly_summary(self, now: datetime | None = None, *, force: bool = False) -> ServiceTitanWeeklySummary:
         return self.service_titan_weekly_summary.run_once(now, require_enabled=not force)
+
+    def run_pm_audit_once(self, now: datetime | None = None) -> PMAuditSummary:
+        return self.pm_audit.run_once(now)
 
     def notifications_test_text(self) -> tuple[bool, str]:
         send = self.settings.notifications_test_send

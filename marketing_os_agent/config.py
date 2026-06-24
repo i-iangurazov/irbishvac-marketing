@@ -156,6 +156,12 @@ class Settings:
     service_titan_weekly_summary_day: str
     service_titan_weekly_summary_hour: int
     service_titan_weekly_summary_lookback_days: int
+    pm_audit_enabled: bool
+    pm_audit_dry_run: bool
+    pm_audit_status_stale_days: int
+    pm_audit_task_overdue_days: int
+    pm_audit_pm_assignment_grace_hours: int
+    pm_audit_task_template_grace_hours: int
     notifications_test_send: bool
 
     anthropic_api_key: str
@@ -307,6 +313,12 @@ class Settings:
             service_titan_weekly_summary_day=_weekday_env("SERVICE_TITAN_WEEKLY_SUMMARY_DAY", "MON"),
             service_titan_weekly_summary_hour=_hour_env("SERVICE_TITAN_WEEKLY_SUMMARY_HOUR", 8),
             service_titan_weekly_summary_lookback_days=max(1, _int_env("SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS", 7)),
+            pm_audit_enabled=_bool_env("PM_AUDIT_ENABLED", False),
+            pm_audit_dry_run=_bool_env("PM_AUDIT_DRY_RUN", True),
+            pm_audit_status_stale_days=max(1, _int_env("PM_AUDIT_STATUS_STALE_DAYS", 14)),
+            pm_audit_task_overdue_days=max(1, _int_env("PM_AUDIT_TASK_OVERDUE_DAYS", 3)),
+            pm_audit_pm_assignment_grace_hours=max(0, _int_env("PM_AUDIT_PM_ASSIGNMENT_GRACE_HOURS", 24)),
+            pm_audit_task_template_grace_hours=max(0, _int_env("PM_AUDIT_TASK_TEMPLATE_GRACE_HOURS", 48)),
             notifications_test_send=_bool_env("NOTIFICATIONS_TEST_SEND", False),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
             claude_model=_env("CLAUDE_MODEL", "claude-sonnet-4-20250514"),

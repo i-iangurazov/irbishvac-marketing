@@ -120,6 +120,77 @@ class ServiceTitanJob:
         return self.technician_id or self.dispatcher_id or "unknown"
 
 
+@dataclass(frozen=True)
+class ServiceTitanProjectTask:
+    task_id: str
+    task_number: str
+    project_id: str
+    job_id: str
+    job_number: str
+    name: str
+    assigned_to_id: str
+    assigned_to_name: str
+    due_at: datetime | None
+    created_on: datetime | None
+    modified_on: datetime | None
+    closed_on: datetime | None
+    status: str
+    is_closed: bool | None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def display_name(self) -> str:
+        return self.task_number or self.task_id or self.name or "Task"
+
+    @property
+    def is_open(self) -> bool | None:
+        if self.is_closed is not None:
+            return not self.is_closed
+        normalized = self.status.lower().replace("_", " ").replace("-", " ")
+        if not normalized:
+            return None
+        return not any(value in normalized for value in ("complete", "completed", "closed", "done"))
+
+
+@dataclass(frozen=True)
+class ServiceTitanProject:
+    project_id: str
+    project_number: str
+    project_type_id: str
+    project_type_name: str
+    status_id: str
+    status: str
+    sub_status_id: str
+    created_on: datetime | None
+    modified_on: datetime | None
+    start_date: datetime | None
+    target_completion_date: datetime | None
+    actual_completion_date: datetime | None
+    business_unit_ids: list[str] = field(default_factory=list)
+    job_ids: list[str] = field(default_factory=list)
+    project_manager_ids: list[str] = field(default_factory=list)
+    project_manager_names: list[str] = field(default_factory=list)
+    custom_fields: dict[str, str] = field(default_factory=dict)
+    custom_fields_available: bool = False
+    tasks: list[ServiceTitanProjectTask] = field(default_factory=list)
+    tasks_available: bool = False
+    url: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def project_manager_label(self) -> str:
+        if self.project_manager_names:
+            return ", ".join(self.project_manager_names)
+        if self.project_manager_ids:
+            return ", ".join(self.project_manager_ids)
+        return "Unassigned"
+
+    @property
+    def is_completed(self) -> bool:
+        normalized = self.status.lower().replace("_", " ").replace("-", " ")
+        return any(value in normalized for value in ("complete", "completed", "closed", "done"))
+
+
 class ServiceTitanClient:
     def __init__(self, settings: Settings, http: HttpClient | None = None) -> None:
         self.settings = settings
@@ -164,6 +235,82 @@ class ServiceTitanClient:
         jobs = [self._enrich_job(parse_service_titan_job(record, self.settings)) for record in records]
         self.last_scope_filter_stats["jobs_enriched"] = len(jobs)
         return jobs
+
+    def query_pm_projects(self) -> list[ServiceTitanProject]:
+        project_type_names = self.query_pm_project_types()
+        project_status_names = self.query_pm_project_statuses()
+        employee_names = self._employee_name_map()
+        records = self._get_paginated(
+            self._tenant_path("jpm", "projects"),
+            {
+                "pageSize": str(self.settings.service_titan_audit_page_size),
+                "includeTotal": "true",
+                "sort": "-CreatedOn",
+            },
+        )
+        projects: list[ServiceTitanProject] = []
+        for record in records:
+            project = parse_service_titan_project(record, project_type_names, project_status_names, employee_names)
+            tasks, tasks_available = self.query_pm_project_tasks(project.project_id)
+            projects.append(replace(project, tasks=tasks, tasks_available=tasks_available))
+        return projects
+
+    def query_pm_project_types(self) -> dict[str, str]:
+        records = self._get_paginated(
+            self._tenant_path("jpm", "project-types"),
+            {"pageSize": "200", "includeTotal": "true"},
+        )
+        return {str(_raw_value(record, ("id", "projectTypeId")) or ""): str(_raw_value(record, ("name", "projectTypeName")) or "") for record in records}
+
+    def query_pm_project_statuses(self) -> dict[str, str]:
+        records = self._get_paginated(
+            self._tenant_path("jpm", "project-statuses"),
+            {"pageSize": "200", "includeTotal": "true"},
+        )
+        return {str(_raw_value(record, ("id", "statusId")) or ""): str(_raw_value(record, ("name", "statusName")) or "") for record in records}
+
+    def query_pm_project_tasks(self, project_id: str) -> tuple[list[ServiceTitanProjectTask], bool]:
+        if not project_id:
+            return [], False
+        try:
+            records = self._get_paginated(
+                self._tenant_path("taskmanagement", "tasks"),
+                {
+                    "projectId": project_id,
+                    "pageSize": str(self.settings.service_titan_audit_page_size),
+                    "includeTotal": "true",
+                },
+                related_category="pm_project_tasks",
+            )
+        except ServiceTitanApiError as exc:
+            logger.warning("servicetitan_pm_tasks_unavailable", extra={"project_id": project_id, "status": exc.status})
+            return [], False
+        except Exception as exc:
+            logger.warning("servicetitan_pm_tasks_failed", extra={"project_id": project_id, "error_message": str(exc)})
+            return [], False
+        return [parse_service_titan_project_task(record) for record in records], True
+
+    def _employee_name_map(self) -> dict[str, str]:
+        names: dict[str, str] = {}
+        for suffix in ("technicians", "employees"):
+            try:
+                records = self._get_paginated(
+                    self._tenant_path("settings", suffix),
+                    {"pageSize": "200", "includeTotal": "true"},
+                )
+            except Exception:
+                logger.info("servicetitan_pm_employee_map_unavailable", extra={"source": suffix})
+                continue
+            for record in records:
+                identifier = str(_raw_value(record, ("id", "employeeId", "technicianId")) or "")
+                name = str(_raw_value(record, ("name", "displayName")) or "")
+                if not name:
+                    first = str(_raw_value(record, ("firstName",)) or "")
+                    last = str(_raw_value(record, ("lastName",)) or "")
+                    name = " ".join(part for part in (first, last) if part)
+                if identifier and name:
+                    names[identifier] = name
+        return names
 
     def _prefilter_scope_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         from ..domain.service_titan_rules import (
@@ -1199,6 +1346,63 @@ def parse_service_titan_job(payload: dict[str, Any], settings: Settings) -> Serv
     )
 
 
+def parse_service_titan_project(
+    payload: dict[str, Any],
+    project_type_names: dict[str, str],
+    project_status_names: dict[str, str],
+    employee_names: dict[str, str],
+) -> ServiceTitanProject:
+    project_id = str(_raw_value(payload, ("id", "projectId")) or "")
+    project_type_id = str(_raw_value(payload, ("projectTypeId", "projectType.id", "type.id")) or "")
+    status_id = str(_raw_value(payload, ("statusId", "projectStatus.id", "status.id")) or "")
+    status = _display_value(_raw_value(payload, ("status", "projectStatus.name", "status.name"))) or project_status_names.get(status_id, "")
+    project_manager_ids = _id_list(_raw_value(payload, ("projectManagerIds", "projectManagerId", "projectManagers")))
+    custom_fields, custom_fields_available = _project_custom_fields(payload)
+    return ServiceTitanProject(
+        project_id=project_id,
+        project_number=str(_raw_value(payload, ("number", "projectNumber")) or project_id),
+        project_type_id=project_type_id,
+        project_type_name=_display_value(_raw_value(payload, ("projectType.name", "type.name", "projectType"))) or project_type_names.get(project_type_id, ""),
+        status_id=status_id,
+        status=status,
+        sub_status_id=str(_raw_value(payload, ("subStatusId", "subStatus.id")) or ""),
+        created_on=_parse_datetime(_raw_value(payload, ("createdOn", "createdDate"))),
+        modified_on=_parse_datetime(_raw_value(payload, ("modifiedOn", "updatedOn"))),
+        start_date=_parse_datetime(_raw_value(payload, ("startDate", "installDate", "scheduledStart", "installationDate"))),
+        target_completion_date=_parse_datetime(_raw_value(payload, ("targetCompletionDate", "targetCompletedOn"))),
+        actual_completion_date=_parse_datetime(_raw_value(payload, ("actualCompletionDate", "completedOn", "closedOn"))),
+        business_unit_ids=_id_list(_raw_value(payload, ("businessUnitIds", "businessUnits"))),
+        job_ids=_id_list(_raw_value(payload, ("jobIds", "jobs"))),
+        project_manager_ids=project_manager_ids,
+        project_manager_names=[employee_names[identifier] for identifier in project_manager_ids if identifier in employee_names],
+        custom_fields=custom_fields,
+        custom_fields_available=custom_fields_available,
+        url=f"https://go.servicetitan.com/#/Project/Index/{project_id}" if project_id else "",
+        raw=payload,
+    )
+
+
+def parse_service_titan_project_task(payload: dict[str, Any]) -> ServiceTitanProjectTask:
+    assigned_to_id = str(_raw_value(payload, ("assignedToId", "assigneeId", "assignedTo.id")) or "")
+    return ServiceTitanProjectTask(
+        task_id=str(_raw_value(payload, ("id", "taskId")) or ""),
+        task_number=str(_raw_value(payload, ("taskNumber", "number")) or ""),
+        project_id=str(_raw_value(payload, ("projectId", "project.id")) or ""),
+        job_id=str(_raw_value(payload, ("jobId", "job.id")) or ""),
+        job_number=str(_raw_value(payload, ("jobNumber", "job.number")) or ""),
+        name=str(_raw_value(payload, ("name", "title")) or ""),
+        assigned_to_id=assigned_to_id,
+        assigned_to_name=str(_raw_value(payload, ("assignedTo.name", "assignee.name")) or ""),
+        due_at=_parse_datetime(_raw_value(payload, ("completeBy", "dueDate", "dueOn"))),
+        created_on=_parse_datetime(_raw_value(payload, ("createdOn", "createdDate"))),
+        modified_on=_parse_datetime(_raw_value(payload, ("modifiedOn", "updatedOn"))),
+        closed_on=_parse_datetime(_raw_value(payload, ("closedOn", "completedOn"))),
+        status=_display_value(_raw_value(payload, ("status", "status.name"))),
+        is_closed=_bool_or_none(_raw_value(payload, ("isClosed", "closed"))),
+        raw=payload,
+    )
+
+
 def _records_from_response(data: dict[str, Any] | list[Any]) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [record for record in data if isinstance(record, dict)]
@@ -1234,6 +1438,8 @@ def _filter_records_for_params(records: list[dict[str, Any]], params: dict[str, 
 
 def _filter_specs_for_params(params: dict[str, str]) -> list[tuple[set[str], tuple[str, ...]]]:
     filters: list[tuple[set[str], tuple[str, ...]]] = []
+    if params.get("projectId"):
+        filters.append(({str(params["projectId"])}, ("projectId", "project.id")))
     if params.get("jobId"):
         filters.append(({str(params["jobId"])}, ("jobId", "job.id", "job.jobId")))
     if params.get("jobIds"):
@@ -1399,6 +1605,29 @@ def _custom_fields(payload: dict[str, Any]) -> dict[str, str]:
         if name and value is not None:
             fields[str(name)] = str(value)
     return fields
+
+
+def _project_custom_fields(payload: dict[str, Any]) -> tuple[dict[str, str], bool]:
+    if "customFields" not in payload:
+        return {}, False
+    raw_fields = payload.get("customFields")
+    if not isinstance(raw_fields, list):
+        return {}, True
+    fields: dict[str, str] = {}
+    for item in raw_fields:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("label") or item.get("typeName") or item.get("fieldName") or item.get("customFieldTypeName")
+        if not name:
+            type_id = item.get("typeId") or item.get("customFieldTypeId")
+            name = f"type:{type_id}" if type_id else ""
+        if not name:
+            continue
+        value = item.get("value")
+        if value is None:
+            value = item.get("textValue") or item.get("stringValue") or item.get("displayValue") or ""
+        fields[str(name)] = str(value).strip()
+    return fields, True
 
 
 def _string_list(value: Any) -> list[str]:

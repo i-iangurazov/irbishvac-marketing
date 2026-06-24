@@ -137,6 +137,7 @@ Use `process-pending-transitions` when `debug-tasks` shows `notion_status` diffe
 Use `repost-missing-slack-updates` after fixing Slack channel membership if an earlier transition was recorded before a Slack timestamp was stored.
 Use `servicetitan-audit-once` after configuring ServiceTitan credentials to run one operations audit cycle without waiting for the background interval.
 Use `servicetitan-discover-scopes` to print sanitized ServiceTitan business units, job types, statuses, tags, material context, related-record counts, and payload key availability before narrowing production rule scopes.
+Use `pm-audit-once` after configuring ServiceTitan credentials to run one disabled-by-default Project Management audit cycle. It stays dry-run unless `PM_AUDIT_ENABLED=true` and `PM_AUDIT_DRY_RUN=false`.
 Use `debug-tasks` when a Notion edit is being read but no transition posts. It prints current Notion status next to the saved local baseline status.
 Use `transition-counts` to inspect observed status transitions, including repeated completions that the service actually saw.
 Use `list-claude-models` when Anthropic returns a model 404. It prints model IDs available to the configured `ANTHROPIC_API_KEY`.
@@ -184,6 +185,16 @@ ServiceTitan alerts use `SLACK_ALERT_CHANNEL_ID` only. Business Unit labels from
 Weekly ServiceTitan violation summaries are disabled by default. Set `SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED=true` plus `SERVICE_TITAN_WEEKLY_SUMMARY_DAY`, `SERVICE_TITAN_WEEKLY_SUMMARY_HOUR`, and `SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS` to post a grouped stored-violation summary to `SLACK_ALERT_CHANNEL_ID`. The summary reads existing SQLite violation records; it does not fetch ServiceTitan or re-run the audit. Use `SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-weekly-summary-once` to print the summary without sending Slack.
 
 Use `python3 -m marketing_os_agent servicetitan-runtime-diagnostics` on Render to confirm masked runtime config, parsed rule JSON, checkpoint state, recent audit cycles, and durable alert dedupe state. Live Slack sends are capped by `SERVICE_TITAN_AUDIT_MAX_ALERTS_PER_CYCLE`; set it to `1` with `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=true` and `SERVICE_TITAN_AUDIT_IGNORE_CHECKPOINT_ONCE=true` only for controlled one-real-historical-alert validation.
+
+## PM Audit Agent
+
+The Project Management Audit Agent is implemented as a separate one-time, read-only command and is disabled by default:
+
+```bash
+python3 -m marketing_os_agent pm-audit-once
+```
+
+Enable only for validation with `PM_AUDIT_ENABLED=true`; keep `PM_AUDIT_DRY_RUN=true` until Jane approves the rules and output. V1 audits only PM install projects with project type `Standard Install` or `Construction & Remodel`. It implements R1, R3, R6, R7, R11, R13, R15, and R17 from [docs/pm-audit-agent-discovery.md](docs/pm-audit-agent-discovery.md). Passes and skips stay silent; dry-run prints grouped failures by PM and sends no Slack.
 
 See [docs/servicetitan-operations-audit.md](docs/servicetitan-operations-audit.md) for setup, required scopes, dedupe behavior, adding rules, manual QA, known field limitations, and Render deployment notes.
 
