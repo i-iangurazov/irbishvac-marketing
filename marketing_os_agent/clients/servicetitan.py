@@ -204,6 +204,13 @@ class ServiceTitanClient:
             "jobs_skipped_before_enrichment": 0,
             "jobs_enriched": 0,
         }
+        self.last_pm_audit_stats: dict[str, int] = {
+            "raw_projects_fetched": 0,
+            "in_scope_projects": 0,
+            "skipped_out_of_scope": 0,
+            "projects_evaluated": 0,
+            "tasks_loaded": 0,
+        }
 
     @property
     def available(self) -> bool:
@@ -236,23 +243,52 @@ class ServiceTitanClient:
         self.last_scope_filter_stats["jobs_enriched"] = len(jobs)
         return jobs
 
-    def query_pm_projects(self) -> list[ServiceTitanProject]:
+    def query_pm_projects(
+        self,
+        *,
+        project_type_ids: set[str] | None = None,
+        exclude_keywords: tuple[str, ...] = (),
+        max_projects: int | None = None,
+        max_tasks: int | None = None,
+    ) -> list[ServiceTitanProject]:
         project_type_names = self.query_pm_project_types()
         project_status_names = self.query_pm_project_statuses()
         employee_names = self._employee_name_map()
+        project_limit = max(1, max_projects if max_projects is not None else self.settings.pm_audit_max_projects)
+        task_limit = max(0, max_tasks if max_tasks is not None else self.settings.pm_audit_max_tasks)
         records = self._get_paginated(
             self._tenant_path("jpm", "projects"),
             {
-                "pageSize": str(self.settings.service_titan_audit_page_size),
+                "pageSize": str(self.settings.pm_audit_project_page_size),
                 "includeTotal": "true",
                 "sort": "-CreatedOn",
             },
         )
+        stats = {
+            "raw_projects_fetched": len(records),
+            "in_scope_projects": 0,
+            "skipped_out_of_scope": 0,
+            "projects_evaluated": 0,
+            "tasks_loaded": 0,
+        }
         projects: list[ServiceTitanProject] = []
         for record in records:
             project = parse_service_titan_project(record, project_type_names, project_status_names, employee_names)
-            tasks, tasks_available = self.query_pm_project_tasks(project.project_id)
+            if not _pm_project_matches_scope(project, project_type_ids, exclude_keywords):
+                stats["skipped_out_of_scope"] += 1
+                continue
+            stats["in_scope_projects"] += 1
+            if len(projects) >= project_limit:
+                continue
+            remaining_tasks = task_limit - stats["tasks_loaded"]
+            if remaining_tasks <= 0:
+                tasks, tasks_available = [], False
+            else:
+                tasks, tasks_available = self.query_pm_project_tasks(project.project_id, max_tasks=remaining_tasks)
+            stats["tasks_loaded"] += len(tasks)
             projects.append(replace(project, tasks=tasks, tasks_available=tasks_available))
+        stats["projects_evaluated"] = len(projects)
+        self.last_pm_audit_stats = stats
         return projects
 
     def query_pm_project_types(self) -> dict[str, str]:
@@ -269,15 +305,18 @@ class ServiceTitanClient:
         )
         return {str(_raw_value(record, ("id", "statusId")) or ""): str(_raw_value(record, ("name", "statusName")) or "") for record in records}
 
-    def query_pm_project_tasks(self, project_id: str) -> tuple[list[ServiceTitanProjectTask], bool]:
+    def query_pm_project_tasks(self, project_id: str, *, max_tasks: int | None = None) -> tuple[list[ServiceTitanProjectTask], bool]:
         if not project_id:
             return [], False
         try:
+            task_page_size = self.settings.service_titan_audit_page_size
+            if max_tasks is not None and max_tasks > 0:
+                task_page_size = min(task_page_size, max_tasks)
             records = self._get_paginated(
                 self._tenant_path("taskmanagement", "tasks"),
                 {
                     "projectId": project_id,
-                    "pageSize": str(self.settings.service_titan_audit_page_size),
+                    "pageSize": str(task_page_size),
                     "includeTotal": "true",
                 },
                 related_category="pm_project_tasks",
@@ -288,6 +327,8 @@ class ServiceTitanClient:
         except Exception as exc:
             logger.warning("servicetitan_pm_tasks_failed", extra={"project_id": project_id, "error_message": str(exc)})
             return [], False
+        if max_tasks is not None:
+            records = records[:max(0, max_tasks)]
         return [parse_service_titan_project_task(record) for record in records], True
 
     def _employee_name_map(self) -> dict[str, str]:
@@ -1401,6 +1442,24 @@ def parse_service_titan_project_task(payload: dict[str, Any]) -> ServiceTitanPro
         is_closed=_bool_or_none(_raw_value(payload, ("isClosed", "closed"))),
         raw=payload,
     )
+
+
+def _pm_project_matches_scope(project: ServiceTitanProject, project_type_ids: set[str] | None, exclude_keywords: tuple[str, ...]) -> bool:
+    if project_type_ids is not None and project.project_type_id not in project_type_ids:
+        return False
+    if exclude_keywords:
+        text = " ".join(
+            value
+            for value in (
+                project.project_type_name,
+                project.status,
+                *project.business_unit_ids,
+            )
+            if value
+        ).lower()
+        if any(keyword in text for keyword in exclude_keywords):
+            return False
+    return True
 
 
 def _records_from_response(data: dict[str, Any] | list[Any]) -> list[dict[str, Any]]:

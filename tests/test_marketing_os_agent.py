@@ -77,6 +77,11 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         pm_audit_task_overdue_days=3,
         pm_audit_pm_assignment_grace_hours=24,
         pm_audit_task_template_grace_hours=48,
+        pm_audit_project_page_size=50,
+        pm_audit_max_projects=100,
+        pm_audit_max_tasks=500,
+        pm_audit_sold_by_field_names=["Sold by", "Sold By", "Comfort Advisor", "Sold By CA"],
+        pm_audit_permit_field_names=["Permit", "Permit Number", "Permit #", "Permit Status"],
         notifications_test_send=False,
         anthropic_api_key="",
         claude_model="claude-test",
@@ -731,11 +736,51 @@ class FakePMServiceTitan:
     def __init__(self, projects: list[ServiceTitanProject] | None = None, fail: bool = False) -> None:
         self.projects = projects or []
         self.fail = fail
+        self.query_kwargs: dict[str, object] = {}
+        self.last_pm_audit_stats: dict[str, int] = {
+            "raw_projects_fetched": len(self.projects),
+            "in_scope_projects": len(self.projects),
+            "skipped_out_of_scope": 0,
+            "projects_evaluated": len(self.projects),
+            "tasks_loaded": sum(len(project.tasks) for project in self.projects),
+        }
 
-    def query_pm_projects(self) -> list[ServiceTitanProject]:
+    def query_pm_projects(self, **kwargs: object) -> list[ServiceTitanProject]:
+        self.query_kwargs = kwargs
         if self.fail:
             raise ServiceTitanApiError(503, {"message": "unavailable"})
         return self.projects
+
+
+class FilteringPMServiceTitan(ServiceTitanClient):
+    def __init__(self, audit_settings: Settings, records: list[dict[str, object]], tasks_by_project: dict[str, list[ServiceTitanProjectTask]]) -> None:
+        super().__init__(audit_settings)
+        self.records = records
+        self.tasks_by_project = tasks_by_project
+        self.task_calls: list[str] = []
+
+    def query_pm_project_types(self) -> dict[str, str]:
+        return {
+            "63812999": "Standard Install",
+            "63813000": "Construction & Remodel",
+            "recall": "Recall",
+        }
+
+    def query_pm_project_statuses(self) -> dict[str, str]:
+        return {"scheduled": "Scheduled"}
+
+    def _employee_name_map(self) -> dict[str, str]:
+        return {}
+
+    def _get_paginated(self, path: str, params: dict[str, str], *, related_category: str | None = None) -> list[dict[str, object]]:
+        return self.records
+
+    def query_pm_project_tasks(self, project_id: str, *, max_tasks: int | None = None) -> tuple[list[ServiceTitanProjectTask], bool]:
+        self.task_calls.append(project_id)
+        tasks = self.tasks_by_project.get(project_id, [])
+        if max_tasks is not None:
+            tasks = tasks[:max(0, max_tasks)]
+        return tasks, True
 
 
 class ScopeFilteringServiceTitan(ServiceTitanClient):
@@ -952,6 +997,25 @@ class MarketingOsAgentTests(unittest.TestCase):
         audit_settings = settings(self.h.settings.sqlite_path)
         self.assertFalse(audit_settings.pm_audit_enabled)
         self.assertTrue(audit_settings.pm_audit_dry_run)
+        self.assertEqual(audit_settings.pm_audit_project_page_size, 50)
+        self.assertEqual(audit_settings.pm_audit_max_projects, 100)
+        self.assertEqual(audit_settings.pm_audit_max_tasks, 500)
+        self.assertIn("Comfort Advisor", audit_settings.pm_audit_sold_by_field_names)
+        self.assertIn("Permit Number", audit_settings.pm_audit_permit_field_names)
+
+    def test_pm_audit_passes_bounded_config_to_client(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            pm_audit_enabled=True,
+            pm_audit_dry_run=True,
+            pm_audit_max_projects=12,
+            pm_audit_max_tasks=34,
+        )
+        client = FakePMServiceTitan([pm_project()])
+        PMAuditService(audit_settings, client, self.h.slack).run_once(datetime(2026, 6, 24, 12, tzinfo=timezone.utc))
+        self.assertEqual(client.query_kwargs["max_projects"], 12)
+        self.assertEqual(client.query_kwargs["max_tasks"], 34)
+        self.assertEqual(client.query_kwargs["project_type_ids"], {"63812999", "63813000"})
 
     def test_pm_audit_dry_run_does_not_send_slack(self) -> None:
         project = pm_project("pm-dry-run", custom_fields={"Sold by": "Advisor One", "Permit": ""})
@@ -969,6 +1033,36 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.status, "disabled")
         self.assertEqual(summary.projects_scanned, 0)
         self.assertEqual(self.h.slack.messages, [])
+
+    def test_pm_audit_filters_project_types_before_task_enrichment(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, pm_audit_project_page_size=50, pm_audit_max_projects=10, pm_audit_max_tasks=10)
+        records = [
+            {"id": "pm-service", "projectTypeId": "recall", "status": "Scheduled"},
+            {"id": "pm-install", "projectTypeId": "63812999", "status": "Scheduled", "customFields": [{"name": "Sold by", "value": "Advisor"}, {"name": "Permit", "value": "P-1"}]},
+        ]
+        client = FilteringPMServiceTitan(audit_settings, records, {"pm-install": [pm_task(project_id="pm-install")]})
+        projects = client.query_pm_projects(project_type_ids={"63812999", "63813000"}, max_projects=10, max_tasks=10)
+        self.assertEqual([project.project_id for project in projects], ["pm-install"])
+        self.assertEqual(client.task_calls, ["pm-install"])
+        self.assertEqual(client.last_pm_audit_stats["raw_projects_fetched"], 2)
+        self.assertEqual(client.last_pm_audit_stats["skipped_out_of_scope"], 1)
+
+    def test_pm_audit_respects_max_project_and_task_limits(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, pm_audit_project_page_size=50)
+        records = [
+            {"id": "pm-1", "projectTypeId": "63812999", "status": "Scheduled"},
+            {"id": "pm-2", "projectTypeId": "63812999", "status": "Scheduled"},
+        ]
+        client = FilteringPMServiceTitan(
+            audit_settings,
+            records,
+            {"pm-1": [pm_task("1", project_id="pm-1"), pm_task("2", project_id="pm-1")], "pm-2": [pm_task("3", project_id="pm-2")]},
+        )
+        projects = client.query_pm_projects(project_type_ids={"63812999"}, max_projects=1, max_tasks=1)
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(len(projects[0].tasks), 1)
+        self.assertEqual(client.task_calls, ["pm-1"])
+        self.assertEqual(client.last_pm_audit_stats["tasks_loaded"], 1)
 
     def test_pm_r1_project_type_valid_invalid_missing_and_unavailable(self) -> None:
         self.assertEqual(self._pm_result(pm_project(project_type_id="63812999", project_type_name="Standard Install"), "R1").status, PM_PASS)
@@ -999,17 +1093,29 @@ class MarketingOsAgentTests(unittest.TestCase):
         result = self._pm_result(pm_project(project_manager_ids=[], project_manager_names=[], created_on=None), "R3")
         self.assertEqual(result.status, PM_SKIP)
 
-    def test_pm_r6_fails_missing_sold_by_custom_field(self) -> None:
+    def test_pm_r6_skips_when_no_configured_sold_by_field_exists(self) -> None:
+        result = self._pm_result(pm_project(custom_fields={"Unrelated": ""}, custom_fields_available=True), "R6")
+        self.assertEqual(result.status, PM_SKIP)
+
+    def test_pm_r6_fails_when_configured_sold_by_field_exists_but_empty(self) -> None:
         result = self._pm_result(pm_project(custom_fields={"Sold by": "", "Permit": "PERMIT-1"}), "R6")
         self.assertEqual(result.status, PM_FAIL)
 
-    def test_pm_r7_fails_missing_permit_when_field_available(self) -> None:
+    def test_pm_r6_passes_when_configured_sold_by_field_has_value(self) -> None:
+        result = self._pm_result(pm_project(custom_fields={"Comfort Advisor": "Advisor One", "Permit": "PERMIT-1"}), "R6")
+        self.assertEqual(result.status, PM_PASS)
+
+    def test_pm_r7_skips_when_no_configured_permit_field_exists(self) -> None:
+        result = self._pm_result(pm_project(custom_fields={"Sold by": "Advisor One"}, custom_fields_available=True), "R7")
+        self.assertEqual(result.status, PM_SKIP)
+
+    def test_pm_r7_fails_when_configured_permit_field_exists_but_empty(self) -> None:
         result = self._pm_result(pm_project(custom_fields={"Sold by": "Advisor One", "Permit": ""}), "R7")
         self.assertEqual(result.status, PM_FAIL)
 
-    def test_pm_r7_skips_when_permit_field_unavailable(self) -> None:
-        result = self._pm_result(pm_project(custom_fields={"Sold by": "Advisor One"}, custom_fields_available=True), "R7")
-        self.assertEqual(result.status, PM_SKIP)
+    def test_pm_r7_passes_when_configured_permit_field_has_value(self) -> None:
+        result = self._pm_result(pm_project(custom_fields={"Sold by": "Advisor One", "Permit Number": "P-1"}), "R7")
+        self.assertEqual(result.status, PM_PASS)
 
     def test_pm_r11_fails_no_tasks_after_grace(self) -> None:
         result = self._pm_result(pm_project(tasks=[], created_on=datetime(2026, 6, 20, tzinfo=timezone.utc)), "R11")
@@ -1030,6 +1136,14 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(missing_due.status, PM_SKIP)
         missing_status = self._pm_result(pm_project(tasks=[pm_task(status="", is_closed=None)]), "R15")
         self.assertEqual(missing_status.status, PM_SKIP)
+
+    def test_pm_r15_skips_missing_due_task_but_still_flags_other_overdue_task(self) -> None:
+        missing_due = pm_task("missing", due_at=None, status="To Do", is_closed=False)
+        overdue = pm_task("overdue", due_at=datetime(2026, 6, 18, tzinfo=timezone.utc), status="To Do", is_closed=False)
+        summary = self._run_pm_audit([pm_project(tasks=[missing_due, overdue])], pm_audit_task_overdue_days=3)
+        result = next(result for result in summary.project_audits[0].results if result.rule_id == "R15")
+        self.assertEqual(result.status, PM_FAIL)
+        self.assertEqual(summary.open_tasks_without_due_skipped, 1)
 
     def test_pm_r17_fails_completed_project_with_open_tasks(self) -> None:
         result = self._pm_result(
@@ -1086,6 +1200,18 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertIn("Summary:", text)
         for pii in ("Sensitive Customer", "private raw notes", "address", "phone", "email"):
             self.assertNotIn(pii, text)
+
+    def test_pm_dry_run_summary_includes_top_fail_and_skip_reasons(self) -> None:
+        current_task = pm_task(due_at=datetime(2026, 6, 30, tzinfo=timezone.utc), status="To Do", is_closed=False)
+        fail_project = pm_project("pm-fail", custom_fields={"Sold by": "", "Permit": "P-1"}, tasks=[current_task])
+        skip_project = pm_project("pm-skip", created_on=None, project_manager_ids=[], project_manager_names=[], tasks=[current_task])
+        summary = self._run_pm_audit([fail_project, skip_project])
+        text = "\n".join(summary.to_lines())
+        self.assertIn("- top fail rules:", text)
+        self.assertIn("R6 Comfort Advisor / Sold By set", text)
+        self.assertIn("- top skip reasons:", text)
+        self.assertIn("Project created timestamp unavailable.", text)
+        self.assertIn("Top fail: R6 Comfort Advisor / Sold By set", summary.alert_text(datetime(2026, 6, 24, tzinfo=timezone.utc), "UTC"))
 
     def test_completed_without_deliverable_gets_flagged(self) -> None:
         item = task("t1", "Completed", deliverable_link="", notes="")

@@ -67,6 +67,19 @@ def _json_map_env(name: str) -> dict[str, str]:
     return parsed
 
 
+def _json_string_list_env(name: str, default: list[str]) -> list[str]:
+    raw = _env(name, "").strip()
+    if not raw:
+        return list(default)
+    try:
+        parsed: Any = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be valid JSON") from exc
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise ValueError(f"{name} must be a JSON array of strings")
+    return parsed
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw = _env(name, "")
     if raw == "":
@@ -162,6 +175,11 @@ class Settings:
     pm_audit_task_overdue_days: int
     pm_audit_pm_assignment_grace_hours: int
     pm_audit_task_template_grace_hours: int
+    pm_audit_project_page_size: int
+    pm_audit_max_projects: int
+    pm_audit_max_tasks: int
+    pm_audit_sold_by_field_names: list[str]
+    pm_audit_permit_field_names: list[str]
     notifications_test_send: bool
 
     anthropic_api_key: str
@@ -319,6 +337,17 @@ class Settings:
             pm_audit_task_overdue_days=max(1, _int_env("PM_AUDIT_TASK_OVERDUE_DAYS", 3)),
             pm_audit_pm_assignment_grace_hours=max(0, _int_env("PM_AUDIT_PM_ASSIGNMENT_GRACE_HOURS", 24)),
             pm_audit_task_template_grace_hours=max(0, _int_env("PM_AUDIT_TASK_TEMPLATE_GRACE_HOURS", 48)),
+            pm_audit_project_page_size=max(1, _int_env("PM_AUDIT_PROJECT_PAGE_SIZE", 50)),
+            pm_audit_max_projects=max(1, _int_env("PM_AUDIT_MAX_PROJECTS", 100)),
+            pm_audit_max_tasks=max(0, _int_env("PM_AUDIT_MAX_TASKS", 500)),
+            pm_audit_sold_by_field_names=_json_string_list_env(
+                "PM_AUDIT_SOLD_BY_FIELD_NAMES",
+                ["Sold by", "Sold By", "Comfort Advisor", "Sold By CA"],
+            ),
+            pm_audit_permit_field_names=_json_string_list_env(
+                "PM_AUDIT_PERMIT_FIELD_NAMES",
+                ["Permit", "Permit Number", "Permit #", "Permit Status"],
+            ),
             notifications_test_send=_bool_env("NOTIFICATIONS_TEST_SEND", False),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
             claude_model=_env("CLAUDE_MODEL", "claude-sonnet-4-20250514"),

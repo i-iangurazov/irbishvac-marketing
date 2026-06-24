@@ -194,7 +194,7 @@ The Project Management Audit Agent is implemented as a separate one-time, read-o
 python3 -m marketing_os_agent pm-audit-once
 ```
 
-Enable only for validation with `PM_AUDIT_ENABLED=true`; keep `PM_AUDIT_DRY_RUN=true` until Jane approves the rules and output. V1 audits only PM install projects with project type `Standard Install` or `Construction & Remodel`. It implements R1, R3, R6, R7, R11, R13, R15, and R17 from [docs/pm-audit-agent-discovery.md](docs/pm-audit-agent-discovery.md). Passes and skips stay silent; dry-run prints grouped failures by PM and sends no Slack.
+Enable only for validation with `PM_AUDIT_ENABLED=true`; keep `PM_AUDIT_DRY_RUN=true` until Jane approves the rules and output. V1 audits only PM install projects with project type `Standard Install` or `Construction & Remodel`, filters those project types before loading project tasks, and caps validation with `PM_AUDIT_MAX_PROJECTS` / `PM_AUDIT_MAX_TASKS`. It implements R1, R3, R6, R7, R11, R13, R15, and R17 from [docs/pm-audit-agent-discovery.md](docs/pm-audit-agent-discovery.md). R6/R7 use configurable custom-field aliases and should stay dry-run until Jane confirms the exact Sold By and permit fields. Passes and skips stay silent; dry-run prints grouped failures by PM and sends no Slack.
 
 See [docs/servicetitan-operations-audit.md](docs/servicetitan-operations-audit.md) for setup, required scopes, dedupe behavior, adding rules, manual QA, known field limitations, and Render deployment notes.
 

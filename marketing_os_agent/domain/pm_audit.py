@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -44,6 +45,7 @@ class PMRuleResult:
     due_at: datetime | None = None
     install_date: datetime | None = None
     task_number: str = ""
+    skipped_open_tasks_without_due: int = 0
 
 
 @dataclass
@@ -65,6 +67,9 @@ class PMAuditSummary:
     projects_scanned: int = 0
     in_scope_projects: int = 0
     skipped_out_of_scope: int = 0
+    projects_evaluated: int = 0
+    tasks_loaded: int = 0
+    open_tasks_without_due_skipped: int = 0
     rules_evaluated: int = 0
     pass_count: int = 0
     fail_count: int = 0
@@ -88,9 +93,12 @@ class PMAuditSummary:
             f"PM audit: {self.status}",
             f"- enabled: {self.enabled}",
             f"- dry_run: {self.dry_run}",
-            f"- projects scanned: {self.projects_scanned}",
+            f"- raw projects fetched: {self.projects_scanned}",
             f"- in-scope projects: {self.in_scope_projects}",
             f"- out-of-scope projects skipped: {self.skipped_out_of_scope}",
+            f"- projects evaluated: {self.projects_evaluated}",
+            f"- tasks loaded: {self.tasks_loaded}",
+            f"- open tasks without due date skipped: {self.open_tasks_without_due_skipped}",
             f"- rules evaluated: {self.rules_evaluated}",
             f"- pass: {self.pass_count}",
             f"- fail: {self.fail_count}",
@@ -102,9 +110,31 @@ class PMAuditSummary:
         if self.config_errors:
             lines.append("- config errors:")
             lines.extend(f"  - {error}" for error in self.config_errors)
+        top_fail = self.top_fail_rules(3)
+        if top_fail:
+            lines.append("- top fail rules:")
+            lines.extend(f"  - {rule}: {count}" for rule, count in top_fail)
+        top_skip = self.top_skip_reasons(3)
+        if top_skip:
+            lines.append("- top skip reasons:")
+            lines.extend(f"  - {reason}: {count}" for reason, count in top_skip)
         if self.failures:
             lines.extend(["", self.alert_text()])
         return lines
+
+    def top_fail_rules(self, limit: int = 3) -> list[tuple[str, int]]:
+        counts: Counter[str] = Counter()
+        for _, result in self.failures:
+            counts[f"{result.rule_id} {result.name}"] += 1
+        return counts.most_common(limit)
+
+    def top_skip_reasons(self, limit: int = 3) -> list[tuple[str, int]]:
+        counts: Counter[str] = Counter()
+        for audit in self.project_audits:
+            for result in audit.results:
+                if result.status == PM_SKIP:
+                    counts[result.issue] += 1
+        return counts.most_common(limit)
 
     def alert_text(self, now: datetime | None = None, timezone_name: str = "UTC") -> str:
         now = now or datetime.now(timezone.utc)
@@ -125,12 +155,13 @@ class PMAuditSummary:
             lines.extend(["", f"{pm}:"])
             lines.extend(groups[pm])
 
-        summary_parts = [f"{pm} {len(items)} issue{'s' if len(items) != 1 else ''}" for pm, items in sorted(groups.items())]
-        summary_parts.extend(f"{pm} clean" for pm in sorted(clean_counts) if pm not in groups)
-        if summary_parts:
-            lines.extend(["", "Summary: " + ", ".join(summary_parts) + "."])
-        else:
-            lines.extend(["", "Summary: no PM audit failures."])
+        lines.extend(["", f"Summary: {self.projects_evaluated or self.in_scope_projects} projects evaluated, {self.fail_count} fails, {self.skip_count} skips."])
+        top_fail = self.top_fail_rules(1)
+        if top_fail:
+            lines.append(f"Top fail: {top_fail[0][0]} ({top_fail[0][1]}).")
+        top_skip = self.top_skip_reasons(1)
+        if top_skip:
+            lines.append(f"Top skip: {top_skip[0][0]} ({top_skip[0][1]}).")
         return "\n".join(lines)
 
 
@@ -155,7 +186,12 @@ class PMAuditService:
             return summary
 
         try:
-            projects = self.client.query_pm_projects()
+            projects = self.client.query_pm_projects(
+                project_type_ids=PM_INSTALL_PROJECT_TYPE_IDS,
+                exclude_keywords=PM_OUT_OF_SCOPE_KEYWORDS,
+                max_projects=self.settings.pm_audit_max_projects,
+                max_tasks=self.settings.pm_audit_max_tasks,
+            )
         except ServiceTitanApiError as exc:
             summary.status = "api_error"
             summary.errors = 1
@@ -167,7 +203,21 @@ class PMAuditService:
             logger.warning("pm_audit_failed", extra={"error_message": str(exc)})
             return summary
 
-        summary.projects_scanned = len(projects)
+        stats = getattr(self.client, "last_pm_audit_stats", {})
+        summary.projects_scanned = int(stats.get("raw_projects_fetched", len(projects)))
+        summary.skipped_out_of_scope = int(stats.get("skipped_out_of_scope", 0))
+        summary.projects_evaluated = int(stats.get("projects_evaluated", len(projects)))
+        summary.tasks_loaded = int(stats.get("tasks_loaded", 0))
+        logger.info(
+            "pm_audit_scope_filter",
+            extra={
+                "raw_projects": summary.projects_scanned,
+                "in_scope": int(stats.get("in_scope_projects", len(projects))),
+                "skipped_out_of_scope": summary.skipped_out_of_scope,
+                "projects_evaluated": summary.projects_evaluated,
+                "tasks_loaded": summary.tasks_loaded,
+            },
+        )
         for project in projects:
             if _is_explicitly_out_of_scope(project):
                 summary.skipped_out_of_scope += 1
@@ -185,6 +235,7 @@ class PMAuditService:
                     summary.fail_count += 1
                 elif result.status == PM_SKIP:
                     summary.skip_count += 1
+                summary.open_tasks_without_due_skipped += result.skipped_open_tasks_without_due
 
         if summary.fail_count and self.settings.pm_audit_dry_run:
             summary.alerts_would_send = 1
@@ -216,8 +267,8 @@ def _run_pm_rules(project: ServiceTitanProject, settings: Settings, now: datetim
     return [
         _rule_project_type(project),
         _rule_pm_assigned(project, settings, now),
-        _rule_sold_by(project),
-        _rule_permit_present(project),
+        _rule_sold_by(project, settings),
+        _rule_permit_present(project, settings),
         _rule_tasks_applied(project, settings, now),
         _rule_tasks_assigned(project),
         _rule_no_stale_tasks(project, settings, now),
@@ -246,23 +297,26 @@ def _rule_pm_assigned(project: ServiceTitanProject, settings: Settings, now: dat
     return _result("R3", "PM assigned", PM_FAIL, "No PM assigned after the grace period.", "Project Manager", due_at=deadline)
 
 
-def _rule_sold_by(project: ServiceTitanProject) -> PMRuleResult:
+def _rule_sold_by(project: ServiceTitanProject, settings: Settings) -> PMRuleResult:
     if not project.custom_fields_available:
         return _result("R6", "Comfort Advisor / Sold By set", PM_SKIP, "Project custom fields unavailable.", "Sold by")
-    sold_by = _custom_field(project, "Sold by")
+    field_name, sold_by = _custom_field_match(project, settings.pm_audit_sold_by_field_names)
+    if field_name is None:
+        return _result("R6", "Comfort Advisor / Sold By set", PM_SKIP, "Configured Sold By field unavailable.", "Sold by")
     if not sold_by:
-        return _result("R6", "Comfort Advisor / Sold By set", PM_FAIL, "Sold by custom field is empty.", "Sold by")
-    return _result("R6", "Comfort Advisor / Sold By set", PM_PASS, "Sold by custom field is present.", "Sold by")
+        return _result("R6", "Comfort Advisor / Sold By set", PM_FAIL, "Configured Sold By field is empty.", field_name)
+    return _result("R6", "Comfort Advisor / Sold By set", PM_PASS, "Configured Sold By field is present.", field_name)
 
 
-def _rule_permit_present(project: ServiceTitanProject) -> PMRuleResult:
+def _rule_permit_present(project: ServiceTitanProject, settings: Settings) -> PMRuleResult:
     if not project.custom_fields_available:
         return _result("R7", "Permit field present", PM_SKIP, "Project custom fields unavailable.", "Permit")
-    if not _has_custom_field(project, "Permit"):
-        return _result("R7", "Permit field present", PM_SKIP, "Permit custom field unavailable.", "Permit")
-    if not _custom_field(project, "Permit"):
-        return _result("R7", "Permit field present", PM_FAIL, "Permit field is empty.", "Permit")
-    return _result("R7", "Permit field present", PM_PASS, "Permit field is present.", "Permit")
+    field_name, permit = _custom_field_match(project, settings.pm_audit_permit_field_names)
+    if field_name is None:
+        return _result("R7", "Permit field present", PM_SKIP, "Configured permit field unavailable.", "Permit")
+    if not permit:
+        return _result("R7", "Permit field present", PM_FAIL, "Configured permit field is empty.", field_name)
+    return _result("R7", "Permit field present", PM_PASS, "Configured permit field is present.", field_name)
 
 
 def _rule_tasks_applied(project: ServiceTitanProject, settings: Settings, now: datetime) -> PMRuleResult:
@@ -299,14 +353,18 @@ def _rule_tasks_assigned(project: ServiceTitanProject) -> PMRuleResult:
 def _rule_no_stale_tasks(project: ServiceTitanProject, settings: Settings, now: datetime) -> PMRuleResult:
     if not project.tasks_available:
         return _result("R15", "No stale open tasks", PM_SKIP, "Project task list unavailable.", "Task due date")
+    missing_due_count = 0
+    missing_status_count = 0
     for task in project.tasks:
         is_open = task.is_open
         if is_open is None:
-            return _result("R15", "No stale open tasks", PM_SKIP, "Task status unavailable.", "Task status", task_number=task.display_name)
+            missing_status_count += 1
+            continue
         if not is_open:
             continue
         if not task.due_at:
-            return _result("R15", "No stale open tasks", PM_SKIP, "Open task due date unavailable.", "Task due date", task_number=task.display_name)
+            missing_due_count += 1
+            continue
         deadline = task.due_at.astimezone(timezone.utc) + timedelta(days=settings.pm_audit_task_overdue_days)
         if now > deadline:
             return _result(
@@ -317,7 +375,19 @@ def _rule_no_stale_tasks(project: ServiceTitanProject, settings: Settings, now: 
                 "Task due date",
                 due_at=task.due_at,
                 task_number=task.display_name,
+                skipped_open_tasks_without_due=missing_due_count,
             )
+    if missing_status_count:
+        return _result("R15", "No stale open tasks", PM_SKIP, "Task status unavailable.", "Task status", skipped_open_tasks_without_due=missing_due_count)
+    if missing_due_count:
+        return _result(
+            "R15",
+            "No stale open tasks",
+            PM_SKIP,
+            "Open task due date unavailable.",
+            "Task due date",
+            skipped_open_tasks_without_due=missing_due_count,
+        )
     return _result("R15", "No stale open tasks", PM_PASS, "No stale open tasks found.", "Task due date")
 
 
@@ -353,6 +423,7 @@ def _result(
     due_at: datetime | None = None,
     install_date: datetime | None = None,
     task_number: str = "",
+    skipped_open_tasks_without_due: int = 0,
 ) -> PMRuleResult:
     return PMRuleResult(
         rule_id=rule_id,
@@ -364,6 +435,7 @@ def _result(
         due_at=due_at,
         install_date=install_date,
         task_number=task_number,
+        skipped_open_tasks_without_due=skipped_open_tasks_without_due,
     )
 
 
@@ -387,17 +459,13 @@ def _project_status_field_available(project: ServiceTitanProject) -> bool:
     return any(key in project.raw for key in ("status", "statusId", "projectStatus"))
 
 
-def _has_custom_field(project: ServiceTitanProject, field_name: str) -> bool:
-    target = _normalize(field_name)
-    return any(_normalize(name) == target for name in project.custom_fields)
-
-
-def _custom_field(project: ServiceTitanProject, field_name: str) -> str:
-    target = _normalize(field_name)
-    for name, value in project.custom_fields.items():
-        if _normalize(name) == target:
-            return value.strip()
-    return ""
+def _custom_field_match(project: ServiceTitanProject, field_names: list[str]) -> tuple[str | None, str]:
+    normalized_fields = {_normalize(name): (name, value.strip()) for name, value in project.custom_fields.items()}
+    for field_name in field_names:
+        match = normalized_fields.get(_normalize(field_name))
+        if match is not None:
+            return match
+    return None, ""
 
 
 def _failure_line(project: ServiceTitanProject, result: PMRuleResult, timezone_name: str) -> str:
