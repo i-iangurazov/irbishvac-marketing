@@ -34,6 +34,23 @@ PM_OUT_OF_SCOPE_KEYWORDS = (
 )
 
 
+PM_AUDIT_TEST_MESSAGE = """📋 PM Audit — Test
+
+Jane
+• Project #PM-TEST-1001 — Missing PM task template
+  Field: Tasks
+  Action: Apply PM task template
+  Link: https://go.servicetitan.com/#/Project/Index/PM-TEST-1001
+
+Gerson
+• Project #PM-TEST-1002 — Task has no assignee
+  Field: Task #PM-TASK-884
+  Action: Assign task owner
+  Link: https://go.servicetitan.com/#/Project/Index/PM-TEST-1002
+
+Summary: Jane 1 issue · Gerson 1 issue"""
+
+
 @dataclass(frozen=True)
 class PMRuleResult:
     rule_id: str
@@ -146,16 +163,17 @@ class PMAuditSummary:
             if audit.failures:
                 groups.setdefault(pm, [])
                 for failure in audit.failures:
-                    groups[pm].append(_failure_line(audit.project, failure, timezone_name))
+                    groups[pm].append(_failure_block(audit.project, failure, timezone_name))
             elif not audit.skipped_out_of_scope:
                 clean_counts[pm] = clean_counts.get(pm, 0) + 1
 
-        lines = [f"PM Audit, {local_now.date().isoformat()}"]
+        lines = [f"📋 PM Audit — {local_now.strftime('%b %d').replace(' 0', ' ')}"]
         for pm in sorted(groups):
-            lines.extend(["", f"{pm}:"])
+            lines.extend(["", pm])
             lines.extend(groups[pm])
 
-        lines.extend(["", f"Summary: {self.projects_evaluated or self.in_scope_projects} projects evaluated, {self.fail_count} fails, {self.skip_count} skips."])
+        lines.extend(["", f"Summary: {_pm_summary(groups, clean_counts)}"])
+        lines.append(f"Totals: {self.projects_evaluated or self.in_scope_projects} projects evaluated · {self.fail_count} fails · {self.skip_count} skips")
         top_fail = self.top_fail_rules(1)
         if top_fail:
             lines.append(f"Top fail: {top_fail[0][0]} ({top_fail[0][1]}).")
@@ -241,7 +259,7 @@ class PMAuditService:
             summary.alerts_would_send = 1
             logger.info("pm_audit_dry_run", extra={"failures": summary.fail_count})
         elif summary.fail_count:
-            ts = self.slack.post_message(self.settings.slack_alert_channel_id, summary.alert_text(now, self.settings.timezone))
+            ts = self.slack.post_message(self._alert_channel(), summary.alert_text(now, self.settings.timezone))
             if ts:
                 summary.alerts_sent = 1
                 logger.info("pm_audit_slack_sent", extra={"failures": summary.fail_count})
@@ -259,8 +277,11 @@ class PMAuditService:
         }
         if not self.settings.pm_audit_dry_run:
             required["SLACK_BOT_TOKEN"] = self.settings.slack_bot_token
-            required["SLACK_ALERT_CHANNEL_ID"] = self.settings.slack_alert_channel_id
+            required["PM_AUDIT_SLACK_CHANNEL_ID or SLACK_ALERT_CHANNEL_ID"] = self._alert_channel()
         return [key for key, value in required.items() if not value]
+
+    def _alert_channel(self) -> str:
+        return self.settings.pm_audit_slack_channel_id or self.settings.slack_alert_channel_id
 
 
 def _run_pm_rules(project: ServiceTitanProject, settings: Settings, now: datetime) -> list[PMRuleResult]:
@@ -289,12 +310,7 @@ def _rule_project_type(project: ServiceTitanProject) -> PMRuleResult:
 def _rule_pm_assigned(project: ServiceTitanProject, settings: Settings, now: datetime) -> PMRuleResult:
     if project.project_manager_ids:
         return _result("R3", "PM assigned", PM_PASS, "PM is assigned.", "Project Manager")
-    if not project.created_on:
-        return _result("R3", "PM assigned", PM_SKIP, "Project created timestamp unavailable.", "Project Manager")
-    deadline = project.created_on.astimezone(timezone.utc) + timedelta(hours=settings.pm_audit_pm_assignment_grace_hours)
-    if now <= deadline:
-        return _result("R3", "PM assigned", PM_SKIP, "Project is still inside PM assignment grace period.", "Project Manager")
-    return _result("R3", "PM assigned", PM_FAIL, "No PM assigned after the grace period.", "Project Manager", due_at=deadline)
+    return _result("R3", "PM assigned", PM_FAIL, "No PM assigned.", "Project Manager")
 
 
 def _rule_sold_by(project: ServiceTitanProject, settings: Settings) -> PMRuleResult:
@@ -383,12 +399,12 @@ def _rule_no_stale_tasks(project: ServiceTitanProject, settings: Settings, now: 
         return _result(
             "R15",
             "No stale open tasks",
-            PM_SKIP,
-            "Open task due date unavailable.",
+            PM_PASS,
+            "No stale open tasks with due dates found.",
             "Task due date",
             skipped_open_tasks_without_due=missing_due_count,
         )
-    return _result("R15", "No stale open tasks", PM_PASS, "No stale open tasks found.", "Task due date")
+    return _result("R15", "No stale open tasks", PM_PASS, "No stale open tasks with due dates found.", "Task due date")
 
 
 def _rule_completed_closed_out(project: ServiceTitanProject) -> PMRuleResult:
@@ -468,19 +484,30 @@ def _custom_field_match(project: ServiceTitanProject, field_names: list[str]) ->
     return None, ""
 
 
-def _failure_line(project: ServiceTitanProject, result: PMRuleResult, timezone_name: str) -> str:
-    parts = [
-        f"Project #{project.project_number or project.project_id}",
-        _short_issue(result),
-        result.task_number or result.field,
+def _failure_block(project: ServiceTitanProject, result: PMRuleResult, timezone_name: str) -> str:
+    lines = [
+        f"• Project #{project.project_number or project.project_id} — {_short_issue(result)}",
+        f"  Field: {result.task_number or result.field}",
+        f"  Action: {_action_for_rule(result.rule_id)}",
     ]
     if result.due_at:
-        parts.append(f"due {_format_date(result.due_at, timezone_name)}")
+        lines.append(f"  Due: {_format_date(result.due_at, timezone_name)}")
     elif result.install_date or project.start_date:
-        parts.append(f"install {_format_date(result.install_date or project.start_date, timezone_name)}")
+        lines.append(f"  Install: {_format_date(result.install_date or project.start_date, timezone_name)}")
     if project.url:
-        parts.append(project.url)
-    return " | ".join(parts)
+        lines.append(f"  Link: {project.url}")
+    return "\n".join(lines)
+
+
+def _pm_summary(groups: dict[str, list[str]], clean_counts: dict[str, int]) -> str:
+    parts: list[str] = []
+    for pm in sorted(groups):
+        issue_count = len(groups[pm])
+        parts.append(f"{pm} {issue_count} issue{'s' if issue_count != 1 else ''}")
+    for pm in sorted(clean_counts):
+        count = clean_counts[pm]
+        parts.append(f"{pm} clean" if count == 1 else f"{pm} {count} clean")
+    return " · ".join(parts) if parts else "No PM issues"
 
 
 def _short_issue(result: PMRuleResult) -> str:
@@ -495,6 +522,20 @@ def _short_issue(result: PMRuleResult) -> str:
         "R17": "Completed project has open tasks",
     }
     return mapping.get(result.rule_id, result.issue)
+
+
+def _action_for_rule(rule_id: str) -> str:
+    mapping = {
+        "R1": "Set the correct PM install project type.",
+        "R3": "Assign the project manager.",
+        "R6": "Fill Project Details Sold By.",
+        "R7": "Fill Project Details PERMIT information.",
+        "R11": "Apply PM task template.",
+        "R13": "Assign task owner.",
+        "R15": "Update or close overdue task.",
+        "R17": "Close completed project tasks.",
+    }
+    return mapping.get(rule_id, "Review the PM project in ServiceTitan.")
 
 
 def _format_date(value: datetime, timezone_name: str) -> str:

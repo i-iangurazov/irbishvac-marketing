@@ -15,7 +15,7 @@ from .clients.slack import SlackClient
 from .config import HealthReport, Settings
 from .domain.campaign_health import CampaignHealthService
 from .domain.owner_mapping import OwnerResolver
-from .domain.pm_audit import PMAuditService, PMAuditSummary
+from .domain.pm_audit import PM_AUDIT_TEST_MESSAGE, PMAuditService, PMAuditSummary
 from .domain.formatting import format_friday_roundup_email
 from .domain.reports import ReportService, month_bounds, quarter_bounds, week_bounds
 from .domain.service_titan_audit import (
@@ -230,6 +230,35 @@ class AgentApp:
 
     def run_pm_audit_once(self, now: datetime | None = None) -> PMAuditSummary:
         return self.pm_audit.run_once(now)
+
+    def pm_audit_slack_test_text(self) -> tuple[bool, str]:
+        send = self.settings.pm_audit_test_send
+        channel = self.settings.pm_audit_slack_channel_id
+        lines = [
+            "PM Audit Slack test diagnostics",
+            f"- PM_AUDIT_TEST_SEND: {send}",
+            f"- PM_AUDIT_DRY_RUN: {self.settings.pm_audit_dry_run}",
+            "- calls ServiceTitan: false",
+            "- uses live ServiceTitan audit channel fallback: false",
+            f"- PM_AUDIT_SLACK_CHANNEL_ID present: {bool(channel)}",
+            f"- SLACK_BOT_TOKEN present: {bool(self.settings.slack_bot_token)}",
+            "- payload:",
+            PM_AUDIT_TEST_MESSAGE,
+        ]
+        ok = bool(self.settings.slack_bot_token and channel)
+        if not send:
+            lines.append("- Slack send: skipped because PM_AUDIT_TEST_SEND=false")
+            lines.append("- No Slack messages were sent.")
+            return ok, "\n".join(lines)
+        if not self.settings.slack_bot_token or not channel:
+            lines.append("- Slack send: not attempted because Slack token or PM test channel is missing")
+            return False, "\n".join(lines)
+        ts = self.slack.post_message(channel, PM_AUDIT_TEST_MESSAGE)
+        if ts:
+            lines.append(f"- Slack send: sent to PM_AUDIT_SLACK_CHANNEL_ID (ts={ts})")
+            return True, "\n".join(lines)
+        lines.append("- Slack send: failed. Check bot token, PM channel ID, and whether the bot is invited to the channel.")
+        return False, "\n".join(lines)
 
     def notifications_test_text(self) -> tuple[bool, str]:
         send = self.settings.notifications_test_send

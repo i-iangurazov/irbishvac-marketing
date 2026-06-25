@@ -1667,12 +1667,26 @@ def _custom_fields(payload: dict[str, Any]) -> dict[str, str]:
 
 
 def _project_custom_fields(payload: dict[str, Any]) -> tuple[dict[str, str], bool]:
+    fields: dict[str, str] = {}
+    available = False
+    for key in (
+        "projectDetails",
+        "projectDetail",
+        "projectDetailsSections",
+        "projectDetailSections",
+        "details",
+        "detailSections",
+        "sections",
+    ):
+        if key in payload:
+            fields.update(_project_detail_fields(payload.get(key)))
+            available = True
+
     if "customFields" not in payload:
-        return {}, False
+        return fields, available
     raw_fields = payload.get("customFields")
     if not isinstance(raw_fields, list):
-        return {}, True
-    fields: dict[str, str] = {}
+        return fields, True
     for item in raw_fields:
         if not isinstance(item, dict):
             continue
@@ -1687,6 +1701,84 @@ def _project_custom_fields(payload: dict[str, Any]) -> tuple[dict[str, str], boo
             value = item.get("textValue") or item.get("stringValue") or item.get("displayValue") or ""
         fields[str(name)] = str(value).strip()
     return fields, True
+
+
+def _project_detail_fields(raw: Any) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    permit_section_seen = False
+
+    def visit(node: Any, section_name: str = "") -> None:
+        nonlocal permit_section_seen
+        if isinstance(node, list):
+            for item in node:
+                visit(item, section_name)
+            return
+        if not isinstance(node, dict):
+            return
+
+        name = _detail_field_name(node)
+        normalized_name = _normalize_key(name)
+        child_keys = ("fields", "items", "customFields", "details", "values", "questions", "sections", "children")
+        has_children = any(isinstance(node.get(key), (list, dict)) for key in child_keys)
+        value = _detail_field_value(node)
+        has_value = value is not None
+
+        child_section = section_name
+        if has_children and name:
+            if normalized_name == "permit":
+                permit_section_seen = True
+                child_section = "PERMIT"
+            elif normalized_name not in {"project details", "project detail", "details"}:
+                child_section = section_name or str(name)
+
+        if name and has_value:
+            clean_value = str(value or "").strip()
+            fields[str(name)] = clean_value
+            if section_name:
+                fields[f"{section_name} {name}"] = clean_value
+            if section_name == "PERMIT":
+                if clean_value:
+                    existing = fields.get("PERMIT", "")
+                    fields["PERMIT"] = f"{existing}; {clean_value}".strip("; ") if existing else clean_value
+                else:
+                    fields.setdefault("PERMIT", "")
+
+        for key in child_keys:
+            if key in node:
+                visit(node.get(key), child_section)
+
+    visit(raw)
+    if permit_section_seen:
+        fields.setdefault("PERMIT", "")
+    return fields
+
+
+def _detail_field_name(node: dict[str, Any]) -> str:
+    raw_name = (
+        node.get("name")
+        or node.get("label")
+        or node.get("title")
+        or node.get("fieldName")
+        or node.get("customFieldTypeName")
+        or node.get("sectionName")
+        or node.get("typeName")
+        or node.get("key")
+    )
+    return str(raw_name or "").strip()
+
+
+def _detail_field_value(node: dict[str, Any]) -> Any:
+    for key in ("value", "textValue", "stringValue", "displayValue", "selectedValue", "number", "status"):
+        if key in node:
+            value = node.get(key)
+            if isinstance(value, dict):
+                return _display_value(value)
+            return value
+    return None
+
+
+def _normalize_key(value: str) -> str:
+    return " ".join(value.lower().replace("_", " ").replace("-", " ").split())
 
 
 def _string_list(value: Any) -> list[str]:

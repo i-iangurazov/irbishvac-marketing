@@ -149,8 +149,8 @@ Install-like job context seen in recent raw jobs:
 | R1 | Project type set and valid | Yes | Project type ID/name; approved labels | `/jpm/projects.projectTypeId`, `/jpm/project-types` | Ready, needs Jane confirmation on exact labels | Low after exact IDs are configured | Implement in v1 |
 | R3 | PM assigned | Yes | Assigned PM | `/jpm/projects.projectManagerIds` | Ready for presence check; assignment timestamp missing | Low for presence, medium for grace-window timing | Implement presence in v1; defer timestamp SLA |
 | R4 | Status set and current | Yes | Status/status age | `/jpm/projects.status/statusId`, `modifiedOn` | Partial; no status-specific modified timestamp | Medium if using project `modifiedOn` as status age | Dry-run only or implement status-present first |
-| R6 | Comfort Advisor set | Yes | Sold-by/Comfort Advisor | Configured project custom field aliases via `PM_AUDIT_SOLD_BY_FIELD_NAMES`; jobs also expose `soldById` | Partial after dry-run; exact field needs Jane confirmation | Medium until field source is confirmed | Keep dry-run until field aliases are confirmed |
-| R7 | Permit number present | Yes | Permit value | Configured project custom field aliases via `PM_AUDIT_PERMIT_FIELD_NAMES` | Partial after dry-run; sampled payloads did not expose permit field | Medium/high until field source and semantics are checked | Keep skip/dry-run until permit field is mapped |
+| R6 | Comfort Advisor set | Yes | Project Details `Sold By` | Project Details fields parsed via `PM_AUDIT_SOLD_BY_FIELD_NAMES` | Re-pointed in v1.1 after Jane confirmation; needs another dry-run to confirm realistic empty rates | Medium until revalidated | Keep dry-run until Project Details Sold By empty rate is reviewed |
+| R7 | Permit number present | Yes | Project Details `PERMIT` section | Project Details PERMIT fields parsed via `PM_AUDIT_PERMIT_FIELD_NAMES` | Re-pointed in v1.1 after Jane confirmation; separate ServiceTitan Permits module is not used | Medium/high until revalidated and permit-owner exception is defined | Keep skip/dry-run until Project Details PERMIT empty rate is reviewed |
 | R8 | HOA approval status set | No | HOA applicability and approval | Project custom fields `Under HOA`, `HOA Approval` | Partial, needs Jane confirmation | Medium; only applies to HOA projects/zip list | Dry-run only |
 | R9 | Asbestos check recorded | No | Asbestos applicability/status | Project custom fields `Asbestos EXISTS in OLD system`, `Asbestos Abatement` | Partial, needs `asbestos_year_cutoff` | Medium | Dry-run only |
 | R10 | Review-requested flag set | No | Review flag | Project custom field `Review Requested` | Ready if field expectation is confirmed | Medium | Needs business confirmation |
@@ -194,16 +194,23 @@ Skip for initial live rollout:
 
 ## Future Slack Summary Proposal
 
-Do not send Slack during discovery. Future PM Slack output should be compact, grouped by PM, and PII-safe:
+Do not send Slack during discovery. PM Slack output should be compact, grouped by PM, and PII-safe:
 
 ```text
-PM Audit, 2026-06-24
+📋 PM Audit — Jun 24
 
-Jane:
-Project #127623147 | Missing permit number | Permit | install Jun 28
-Project #127623148 | PM Pre-Scheduling overdue | Task #884 | due Jun 20
+Jane
+• Project #127623147 — Missing permit number
+  Field: Permit
+  Action: Fill Project Details PERMIT information
 
-Summary: Jane 2 issues, Gerson clean, Evan 1 issue.
+Gerson
+• Project #127623148 — PM Pre-Scheduling overdue
+  Field: Task #884
+  Action: Update or close overdue task
+  Due: Jun 20
+
+Summary: Jane 1 issue · Gerson 1 issue
 ```
 
 Allowed identifiers:
@@ -222,8 +229,8 @@ Do not include customer names, addresses, phone numbers, emails, raw notes, raw 
 
 1. Confirm project type IDs/names for in-scope PM installs: `63812999 / Standard Install` and `63813000 / Construction & Remodel`.
 2. Confirm exact out-of-scope business units/job types for service, warranty, recall, maintenance, free diagnostic, and internal/R&D.
-3. Confirm whether `Sold by` custom field is the official Comfort Advisor source.
-4. Confirm whether `Permit` field presence is enough for R7, or whether permit status/date is required.
+3. Revalidate Project Details `Sold By` empty rates after the v1.1 field re-point.
+4. Revalidate Project Details `PERMIT` empty rates, and confirm whether permit presence/status/date is enough for R7.
 5. Confirm whether `Under HOA` and `HOA Approval` define HOA applicability/status, and provide `hoa_zip_list` if zip-based logic is required.
 6. Provide `asbestos_year_cutoff` and define how `Asbestos EXISTS in OLD system` / `Asbestos Abatement` should be interpreted.
 7. Define when `Review Requested` is required.

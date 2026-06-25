@@ -180,6 +180,8 @@ class Settings:
     pm_audit_max_tasks: int
     pm_audit_sold_by_field_names: list[str]
     pm_audit_permit_field_names: list[str]
+    pm_audit_slack_channel_id: str
+    pm_audit_test_send: bool
     notifications_test_send: bool
 
     anthropic_api_key: str
@@ -342,12 +344,14 @@ class Settings:
             pm_audit_max_tasks=max(0, _int_env("PM_AUDIT_MAX_TASKS", 500)),
             pm_audit_sold_by_field_names=_json_string_list_env(
                 "PM_AUDIT_SOLD_BY_FIELD_NAMES",
-                ["Sold by", "Sold By", "Comfort Advisor", "Sold By CA"],
+                ["Sold By", "Sold by", "Comfort Advisor", "Sold By CA"],
             ),
             pm_audit_permit_field_names=_json_string_list_env(
                 "PM_AUDIT_PERMIT_FIELD_NAMES",
-                ["Permit", "Permit Number", "Permit #", "Permit Status"],
+                ["PERMIT", "Permit", "Permit Number", "Permit #", "Permit Status"],
             ),
+            pm_audit_slack_channel_id=_env("PM_AUDIT_SLACK_CHANNEL_ID"),
+            pm_audit_test_send=_bool_env("PM_AUDIT_TEST_SEND", False),
             notifications_test_send=_bool_env("NOTIFICATIONS_TEST_SEND", False),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
             claude_model=_env("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
