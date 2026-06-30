@@ -148,7 +148,7 @@ Install-like job context seen in recent raw jobs:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | R1 | Project type set and valid | Yes | Project type ID/name; approved labels | `/jpm/projects.projectTypeId`, `/jpm/project-types` | Ready, needs Jane confirmation on exact labels | Low after exact IDs are configured | Implement in v1 |
 | R3 | PM assigned | Yes | Assigned PM | `/jpm/projects.projectManagerIds` | Ready for presence check; assignment timestamp missing | Low for presence, medium for grace-window timing | Implement presence in v1; defer timestamp SLA |
-| R4 | Status set and current | Yes | Status/status age | `/jpm/projects.status/statusId`, `modifiedOn` | Partial; no status-specific modified timestamp | Medium if using project `modifiedOn` as status age | Dry-run only or implement status-present first |
+| R4 | Status set and current | Yes | Status/status age | `/jpm/projects.status/statusId`; status-specific last-updated field when present | Ready for status presence; stale check only when status timestamp is available | Low for presence, medium for stale check if timestamp semantics vary | First live allowlist candidate |
 | R6 | Comfort Advisor set | Yes | Project Details `Sold By` | Project Details fields parsed via `PM_AUDIT_SOLD_BY_FIELD_NAMES` | Re-pointed in v1.1 after Jane confirmation; needs another dry-run to confirm realistic empty rates | Medium until revalidated | Keep dry-run until Project Details Sold By empty rate is reviewed |
 | R7 | Permit number present | Yes | Project Details `PERMIT` section | Project Details PERMIT fields parsed via `PM_AUDIT_PERMIT_FIELD_NAMES` | Re-pointed in v1.1 after Jane confirmation; separate ServiceTitan Permits module is not used | Medium/high until revalidated and permit-owner exception is defined | Keep skip/dry-run until Project Details PERMIT empty rate is reviewed |
 | R8 | HOA approval status set | No | HOA applicability and approval | Project custom fields `Under HOA`, `HOA Approval` | Partial, needs Jane confirmation | Medium; only applies to HOA projects/zip list | Dry-run only |
@@ -168,16 +168,25 @@ Install-like job context seen in recent raw jobs:
 
 ## Recommended PM Audit V1 Scope
 
-Start with precision-first dry-run rules only:
+Implemented rules remain available for dry-run validation:
 
 1. R1 `pm_project_type_invalid_or_missing`
 2. R3 `pm_missing_project_manager`
-3. R6 `pm_missing_comfort_advisor`
-4. R7 `pm_missing_permit_number`
-5. R11 `pm_task_template_or_tasks_missing`
-6. R13 `pm_task_missing_assignee`
-7. R15 `pm_stale_open_task`
-8. R17 `pm_completed_project_not_closed_out` as dry-run until closeout definition is confirmed
+3. R4 `pm_status_set_and_current`
+4. R6 `pm_missing_comfort_advisor`
+5. R7 `pm_missing_permit_number`
+6. R11 `pm_task_template_or_tasks_missing`
+7. R13 `pm_task_missing_assignee`
+8. R15 `pm_stale_open_task`
+9. R17 `pm_completed_project_not_closed_out`
+
+First scheduled live allowlist:
+
+```json
+["R1","R4","R13","R17"]
+```
+
+Keep R3/R6/R7/R11/R15 out of scheduled live messages until Jane reviews more dry-run output.
 
 Skip for initial live rollout:
 

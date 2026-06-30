@@ -285,16 +285,19 @@ class PMAuditService:
 
 
 def _run_pm_rules(project: ServiceTitanProject, settings: Settings, now: datetime) -> list[PMRuleResult]:
-    return [
-        _rule_project_type(project),
-        _rule_pm_assigned(project, settings, now),
-        _rule_sold_by(project, settings),
-        _rule_permit_present(project, settings),
-        _rule_tasks_applied(project, settings, now),
-        _rule_tasks_assigned(project),
-        _rule_no_stale_tasks(project, settings, now),
-        _rule_completed_closed_out(project),
-    ]
+    enabled_rule_ids = {rule_id.strip().upper() for rule_id in settings.pm_audit_enabled_rule_ids if rule_id.strip()}
+    rules = (
+        ("R1", lambda: _rule_project_type(project)),
+        ("R3", lambda: _rule_pm_assigned(project, settings, now)),
+        ("R4", lambda: _rule_status_current(project, settings, now)),
+        ("R6", lambda: _rule_sold_by(project, settings)),
+        ("R7", lambda: _rule_permit_present(project, settings)),
+        ("R11", lambda: _rule_tasks_applied(project, settings, now)),
+        ("R13", lambda: _rule_tasks_assigned(project)),
+        ("R15", lambda: _rule_no_stale_tasks(project, settings, now)),
+        ("R17", lambda: _rule_completed_closed_out(project)),
+    )
+    return [run() for rule_id, run in rules if not enabled_rule_ids or rule_id in enabled_rule_ids]
 
 
 def _rule_project_type(project: ServiceTitanProject) -> PMRuleResult:
@@ -311,6 +314,28 @@ def _rule_pm_assigned(project: ServiceTitanProject, settings: Settings, now: dat
     if project.project_manager_ids:
         return _result("R3", "PM assigned", PM_PASS, "PM is assigned.", "Project Manager")
     return _result("R3", "PM assigned", PM_FAIL, "No PM assigned.", "Project Manager")
+
+
+def _rule_status_current(project: ServiceTitanProject, settings: Settings, now: datetime) -> PMRuleResult:
+    if not project.status.strip():
+        return _result("R4", "Status set and current", PM_FAIL, "Project status is missing.", "Project status")
+
+    status_updated_at = _status_last_updated_at(project)
+    if status_updated_at is None:
+        return _result("R4", "Status set and current", PM_PASS, "Project status is present; status timestamp unavailable.", "Project status")
+    if project.tasks_available:
+        has_open_tasks = any(task.is_open for task in project.tasks)
+        stale_after = status_updated_at.astimezone(timezone.utc) + timedelta(days=settings.pm_audit_status_stale_days)
+        if has_open_tasks and now > stale_after:
+            return _result(
+                "R4",
+                "Status set and current",
+                PM_FAIL,
+                "Project status has not been updated within the configured threshold.",
+                "Project status",
+                due_at=stale_after,
+            )
+    return _result("R4", "Status set and current", PM_PASS, "Project status is present and current.", "Project status")
 
 
 def _rule_sold_by(project: ServiceTitanProject, settings: Settings) -> PMRuleResult:
@@ -475,6 +500,60 @@ def _project_status_field_available(project: ServiceTitanProject) -> bool:
     return any(key in project.raw for key in ("status", "statusId", "projectStatus"))
 
 
+def _status_last_updated_at(project: ServiceTitanProject) -> datetime | None:
+    raw_value = _nested_raw_value(
+        project.raw,
+        (
+            "statusLastUpdatedOn",
+            "statusLastUpdatedAt",
+            "statusUpdatedOn",
+            "statusUpdatedAt",
+            "statusModifiedOn",
+            "statusModifiedAt",
+            "status.lastUpdatedOn",
+            "status.lastUpdatedAt",
+            "status.updatedOn",
+            "status.updatedAt",
+            "status.modifiedOn",
+            "status.modifiedAt",
+            "projectStatus.lastUpdatedOn",
+            "projectStatus.lastUpdatedAt",
+            "projectStatus.updatedOn",
+            "projectStatus.updatedAt",
+            "projectStatus.modifiedOn",
+            "projectStatus.modifiedAt",
+        ),
+    )
+    return _parse_datetime(raw_value)
+
+
+def _nested_raw_value(source: dict[str, object], names: tuple[str, ...]) -> object | None:
+    for name in names:
+        current: object = source
+        for part in name.split("."):
+            if not isinstance(current, dict) or part not in current:
+                current = None
+                break
+            current = current[part]
+        if current is not None:
+            return current
+    return None
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
 def _custom_field_match(project: ServiceTitanProject, field_names: list[str]) -> tuple[str | None, str]:
     normalized_fields = {_normalize(name): (name, value.strip()) for name, value in project.custom_fields.items()}
     for field_name in field_names:
@@ -514,6 +593,7 @@ def _short_issue(result: PMRuleResult) -> str:
     mapping = {
         "R1": "Invalid project type",
         "R3": "No PM assigned",
+        "R4": "Status stale or missing",
         "R6": "Missing Sold by",
         "R7": "Missing permit field",
         "R11": "No project tasks",
@@ -528,6 +608,7 @@ def _action_for_rule(rule_id: str) -> str:
     mapping = {
         "R1": "Set the correct PM install project type.",
         "R3": "Assign the project manager.",
+        "R4": "Update project status.",
         "R6": "Fill Project Details Sold By.",
         "R7": "Fill Project Details PERMIT information.",
         "R11": "Apply PM task template.",

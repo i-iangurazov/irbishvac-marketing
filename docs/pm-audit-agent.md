@@ -29,6 +29,7 @@ PM_AUDIT_TASK_TEMPLATE_GRACE_HOURS=48
 PM_AUDIT_PROJECT_PAGE_SIZE=50
 PM_AUDIT_MAX_PROJECTS=100
 PM_AUDIT_MAX_TASKS=500
+PM_AUDIT_ENABLED_RULE_IDS_JSON=[]
 PM_AUDIT_SOLD_BY_FIELD_NAMES=["Sold By","Sold by","Comfort Advisor","Sold By CA"]
 PM_AUDIT_PERMIT_FIELD_NAMES=["PERMIT","Permit","Permit Number","Permit #","Permit Status"]
 PM_AUDIT_SLACK_CHANNEL_ID=
@@ -56,6 +57,35 @@ Do not set `PM_AUDIT_DRY_RUN=false` until Jane has reviewed dry-run output.
 
 WARNING: Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` only for one-off ServiceTitan audit validation commands or a deliberately paused dry-run environment. Do not set it globally on the live Render service unless intentionally stopping live ServiceTitan alerts.
 
+## Rule Allowlist
+
+`PM_AUDIT_ENABLED_RULE_IDS_JSON` controls which implemented PM rules run:
+
+- Empty or unset: evaluate all implemented PM rules.
+- Non-empty: evaluate only listed rule IDs.
+
+Supported IDs:
+
+```json
+["R1","R3","R4","R6","R7","R11","R13","R15","R17"]
+```
+
+First scheduled live set:
+
+```env
+PM_AUDIT_ENABLED_RULE_IDS_JSON=["R1","R4","R13","R17"]
+```
+
+Run this allowlist in dry-run before creating the Cron Job. If R4 produces a high stale-status count, keep R4 out of scheduled live messages and use `["R1","R13","R17"]` until Jane confirms the status timestamp semantics and threshold.
+
+Do not include these in the first scheduled PM messages:
+
+- R3 PM assigned: currently noisy and needs more review.
+- R6 Sold By: re-pointed to Project Details, but needs another dry-run to confirm realistic empty rates.
+- R7 Permit: re-pointed to Project Details PERMIT, but needs another dry-run to confirm field availability.
+- R11 Tasks applied: task-count proxy is useful, but not in Jane's first live set.
+- R15 No stale tasks: useful later, but not in Jane's first live set.
+
 ## Scope
 
 In-scope project types:
@@ -80,6 +110,7 @@ The v1 implementation uses project type first. It fetches project metadata, filt
 | --- | --- | --- |
 | R1 | Project type set and valid | Fails missing/invalid project type when the project type field is available. |
 | R3 | PM assigned | Fails when no PM is assigned at all; passes when a PM is assigned. The grace-period setting is retained for future SLA logic but is not required for the basic no-PM check. |
+| R4 | Status set and current | Fails when project status is empty. Passes when status exists. If a status last-updated timestamp is available and older than `PM_AUDIT_STATUS_STALE_DAYS` while the project has open tasks, fails as stale; if that timestamp is missing, it does not guess. |
 | R6 | Comfort Advisor / Sold By set | Reads Project Details `Sold By` using `PM_AUDIT_SOLD_BY_FIELD_NAMES`; skips when none of the configured fields exist, fails when a configured field exists but is empty. Valid non-empty values include Comfort Advisor names, `HVAC Service`, and `Plumbing Service`. Keep dry-run until revalidation confirms realistic empty rates. |
 | R7 | Permit field present | Reads Project Details `PERMIT` using `PM_AUDIT_PERMIT_FIELD_NAMES`; skips when the PERMIT section/fields are unavailable, fails when configured permit data exists but is empty. Does not use the separate ServiceTitan Permits module in v1.1. |
 | R11 | Tasks applied / task count present | Uses task count as a v1 proxy for task-template application; fails when no project tasks exist after `PM_AUDIT_TASK_TEMPLATE_GRACE_HOURS`; skips when the timestamp needed for the grace period is unavailable. |
@@ -87,7 +118,26 @@ The v1 implementation uses project type first. It fetches project metadata, filt
 | R15 | No stale open tasks | Fails when an open task with a due date is more than `PM_AUDIT_TASK_OVERDUE_DAYS` past due. Open tasks without due dates are ignored for stale-task failure. |
 | R17 | Completed projects are closed out | Fails when a completed project still has open tasks. |
 
-First live candidates after validation are R1 project type, R13 task assignee, and R17 completed-with-open-tasks. Add status-present/current only when status last-updated is available. R3, R6, R7, R11, and R15 should stay dry-run pending revalidation.
+First live candidates after validation are R1 project type, R4 status present/current, R13 task assignee, and R17 completed-with-open-tasks. R3, R6, R7, R11, and R15 should stay dry-run pending revalidation.
+
+## Render Cron Job
+
+PM Audit is not registered in the web app startup loop. Deploying the web service does not run `pm-audit-once`; use a Render Cron Job for scheduled PM checks.
+
+Recommended first Cron command:
+
+```bash
+PM_AUDIT_ENABLED=true \
+PM_AUDIT_DRY_RUN=false \
+PM_AUDIT_TEST_SEND=false \
+PM_AUDIT_ENABLED_RULE_IDS_JSON='["R1","R4","R13","R17"]' \
+PM_AUDIT_MAX_PROJECTS=50 \
+PM_AUDIT_PROJECT_PAGE_SIZE=50 \
+PM_AUDIT_MAX_TASKS=500 \
+python3 -m marketing_os_agent pm-audit-once
+```
+
+Start with once daily on weekdays. Do not run more frequently until Jane confirms alert quality. Do not set `SERVICE_TITAN_AUDIT_DRY_RUN=true` for PM Cron; it is unrelated and would pause live Sales/HVAC/Plumbing ServiceTitan alerts.
 
 ## Rules Intentionally Skipped
 

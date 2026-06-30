@@ -87,6 +87,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         pm_audit_project_page_size=50,
         pm_audit_max_projects=100,
         pm_audit_max_tasks=500,
+        pm_audit_enabled_rule_ids=[],
         pm_audit_sold_by_field_names=["Sold By", "Sold by", "Comfort Advisor", "Sold By CA"],
         pm_audit_permit_field_names=["PERMIT", "Permit", "Permit Number", "Permit #", "Permit Status"],
         pm_audit_slack_channel_id="",
@@ -1009,6 +1010,7 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(audit_settings.pm_audit_project_page_size, 50)
         self.assertEqual(audit_settings.pm_audit_max_projects, 100)
         self.assertEqual(audit_settings.pm_audit_max_tasks, 500)
+        self.assertEqual(audit_settings.pm_audit_enabled_rule_ids, [])
         self.assertIn("Comfort Advisor", audit_settings.pm_audit_sold_by_field_names)
         self.assertIn("PERMIT", audit_settings.pm_audit_permit_field_names)
         self.assertIn("Permit Number", audit_settings.pm_audit_permit_field_names)
@@ -1075,6 +1077,22 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(client.task_calls, ["pm-1"])
         self.assertEqual(client.last_pm_audit_stats["tasks_loaded"], 1)
 
+    def test_pm_audit_empty_rule_allowlist_preserves_all_rule_behavior(self) -> None:
+        summary = self._run_pm_audit([pm_project()], pm_audit_enabled_rule_ids=[])
+        rule_ids = {result.rule_id for result in summary.project_audits[0].results}
+        self.assertEqual(rule_ids, {"R1", "R3", "R4", "R6", "R7", "R11", "R13", "R15", "R17"})
+
+    def test_pm_audit_rule_allowlist_evaluates_only_selected_rules(self) -> None:
+        summary = self._run_pm_audit([pm_project()], pm_audit_enabled_rule_ids=["R1", "R13", "R17"])
+        rule_ids = [result.rule_id for result in summary.project_audits[0].results]
+        self.assertEqual(rule_ids, ["R1", "R13", "R17"])
+
+    def test_pm_audit_first_live_allowlist_excludes_noisy_rules(self) -> None:
+        summary = self._run_pm_audit([pm_project()], pm_audit_enabled_rule_ids=["R1", "R4", "R13", "R17"])
+        rule_ids = {result.rule_id for result in summary.project_audits[0].results}
+        self.assertEqual(rule_ids, {"R1", "R4", "R13", "R17"})
+        self.assertTrue({"R3", "R6", "R7", "R11", "R15"}.isdisjoint(rule_ids))
+
     def test_pm_r1_project_type_valid_invalid_missing_and_unavailable(self) -> None:
         self.assertEqual(self._pm_result(pm_project(project_type_id="63812999", project_type_name="Standard Install"), "R1").status, PM_PASS)
         self.assertEqual(
@@ -1106,6 +1124,37 @@ class MarketingOsAgentTests(unittest.TestCase):
 
     def test_pm_r3_passes_when_pm_assigned(self) -> None:
         result = self._pm_result(pm_project(project_manager_ids=["pm-1"], project_manager_names=["Jane"], created_on=None), "R3")
+        self.assertEqual(result.status, PM_PASS)
+
+    def test_pm_r4_fails_missing_status(self) -> None:
+        result = self._pm_result(pm_project(status="", raw={"id": "pm-no-status", "projectTypeId": "63812999", "status": ""}), "R4")
+        self.assertEqual(result.status, PM_FAIL)
+
+    def test_pm_r4_passes_when_status_exists(self) -> None:
+        result = self._pm_result(pm_project(status="Scheduled", raw={"id": "pm-status", "projectTypeId": "63812999", "status": "Scheduled"}), "R4")
+        self.assertEqual(result.status, PM_PASS)
+
+    def test_pm_r4_fails_stale_status_only_with_status_timestamp_and_open_tasks(self) -> None:
+        project = pm_project(
+            status="In Progress",
+            raw={
+                "id": "pm-stale-status",
+                "projectTypeId": "63812999",
+                "status": "In Progress",
+                "statusLastUpdatedOn": "2026-06-01T00:00:00+00:00",
+            },
+            tasks=[pm_task(status="To Do", is_closed=False)],
+        )
+        result = self._pm_result(project, "R4", pm_audit_status_stale_days=14)
+        self.assertEqual(result.status, PM_FAIL)
+
+    def test_pm_r4_does_not_fail_stale_check_without_status_timestamp(self) -> None:
+        project = pm_project(
+            status="In Progress",
+            raw={"id": "pm-no-status-time", "projectTypeId": "63812999", "status": "In Progress"},
+            tasks=[pm_task(status="To Do", is_closed=False)],
+        )
+        result = self._pm_result(project, "R4", pm_audit_status_stale_days=14)
         self.assertEqual(result.status, PM_PASS)
 
     def test_pm_r6_skips_when_no_configured_sold_by_field_exists(self) -> None:
@@ -1280,6 +1329,27 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertIn("Summary:", text)
         for pii in ("Sensitive Customer", "private raw notes", "address", "phone", "email"):
             self.assertNotIn(pii, text)
+
+    def test_pm_slack_output_only_includes_allowlisted_rule_failures(self) -> None:
+        project = pm_project(
+            "pm-allowlisted-alert",
+            project_number="130000001",
+            project_manager_ids=[],
+            project_manager_names=[],
+            status="Completed",
+            raw={
+                "id": "pm-allowlisted-alert",
+                "projectTypeId": "63812999",
+                "status": "Completed",
+                "customerName": "Sensitive Customer",
+            },
+            tasks=[pm_task(status="To Do", is_closed=False)],
+        )
+        summary = self._run_pm_audit([project], pm_audit_enabled_rule_ids=["R17"])
+        text = summary.alert_text(datetime(2026, 6, 24, tzinfo=timezone.utc), "UTC")
+        self.assertIn("Completed project has open tasks", text)
+        self.assertNotIn("No PM assigned", text)
+        self.assertNotIn("Sensitive Customer", text)
 
     def test_pm_dry_run_summary_includes_top_fail_and_skip_reasons(self) -> None:
         current_task = pm_task(due_at=datetime(2026, 6, 30, tzinfo=timezone.utc), status="To Do", is_closed=False)

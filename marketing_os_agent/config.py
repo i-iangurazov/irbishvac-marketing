@@ -178,6 +178,7 @@ class Settings:
     pm_audit_project_page_size: int
     pm_audit_max_projects: int
     pm_audit_max_tasks: int
+    pm_audit_enabled_rule_ids: list[str]
     pm_audit_sold_by_field_names: list[str]
     pm_audit_permit_field_names: list[str]
     pm_audit_slack_channel_id: str
@@ -342,6 +343,7 @@ class Settings:
             pm_audit_project_page_size=max(1, _int_env("PM_AUDIT_PROJECT_PAGE_SIZE", 50)),
             pm_audit_max_projects=max(1, _int_env("PM_AUDIT_MAX_PROJECTS", 100)),
             pm_audit_max_tasks=max(0, _int_env("PM_AUDIT_MAX_TASKS", 500)),
+            pm_audit_enabled_rule_ids=_json_string_list_env("PM_AUDIT_ENABLED_RULE_IDS_JSON", []),
             pm_audit_sold_by_field_names=_json_string_list_env(
                 "PM_AUDIT_SOLD_BY_FIELD_NAMES",
                 ["Sold By", "Sold by", "Comfort Advisor", "Sold By CA"],
