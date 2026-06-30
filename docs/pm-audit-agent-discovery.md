@@ -163,14 +163,19 @@ Install-like job context seen in recent raw jobs:
 | R11 | Task template or tasks applied | Yes | Template or task list | `/taskmanagement/tasks?projectId=...`; template ID not found | Partial | Low for task-count check, medium for template identity | Implement task-count check in v1 |
 | R13 | Every task has assignee | Yes | Task assignee | `/taskmanagement/tasks.assignedToId` | Ready | Low | Implement in v1 |
 | R15 | No stale tasks | Yes | Task due/status/closed | `/taskmanagement/tasks.completeBy/isClosed/status/closedOn` | Ready | Low/medium depending overdue threshold | Implement in v1 |
-| R16 | On-hold has a reason | No | Hold status and reason | Project status `Hold`; subStatusId found, reason text not found | Partial | Medium/high without reason mapping | Skip for now |
+| R16 | On-hold has a reason | No | Hold status and reason | Project status `Hold`; configured structured reason fields | Implemented skip-safe; raw notes ignored | Medium/high without reason mapping | Dry-run only |
 | R17 | Completed projects are closed out | Yes | Completed status, completion date, closeout evidence | `/jpm/projects.status/actualCompletionDate`; forms unsafe | Partial | Medium if closeout requires ICR/form | Implement simple status/date check dry-run |
-| R18 | Payment order | Yes | Invoice/payment sequence | Invoices available; payments lack projectId; project invoice filters unreliable | Partial | High | Skip for now or dry-run after job-linked invoice mapping |
-| R19 | Homeowner Authorization timing | Yes | Authorization form timestamp | Form name observed, but forms unscoped | Not available safely | High | Skip for now |
-| R20 | Installation Completion Report green | Yes | ICR status | Form name observed, but forms unscoped | Not available safely | High | Skip for now |
-| R21 | Equipment registered | No | Equipment registration/status | Project custom field `Equipment Status`; installed equipment endpoint 404 | Partial | Medium/high | Skip for now |
+| R18 | Payment order | Yes | Invoice/payment sequence | Structured payment milestone fields when available; invoice mapping still limited | Implemented skip-safe | High | Dry-run only |
+| R19 | Homeowner Authorization timing | Yes | Authorization form timestamp | Structured project/job-scoped form timestamps only | Implemented skip-safe; unscoped forms skip | High | Dry-run only |
+| R20 | Installation Completion Report green | Yes | ICR status | Structured project/job-scoped form/report status only | Implemented skip-safe; unscoped forms skip | High | Dry-run only |
+| R21 | Equipment registered | No | Equipment registration/status | Configured project fields such as `Equipment Status`; installed equipment endpoint 404 | Implemented skip-safe | Medium/high | Dry-run only |
 | R22 | Deposit before install | Yes | Deposit/payment amount/date, install date, linked invoices | Project `jobIds` -> `/accounting/invoices?jobId=...` gives invoice total/balance and sometimes `paidOn`/`depositedOn`; payment/export filters were not reliable | Partial | Medium/high because partial payment date and moved-payment history may be missing | Dry-run only; skip when invoice/payment linkage is unclear |
-| R23 | Permit before install | Yes | Permit date/status and install date | Project custom field `Permit`; project `startDate` | Partial | Medium until permit field value/date semantics are checked | Dry-run only |
+| R23 | Permit before install | Yes | Permit date/status and install date | Project Details PERMIT fields plus project `startDate` | Implemented skip-safe | Medium until permit field value/date semantics are checked | Dry-run only |
+| R24 | Equipment confirmed before scheduling | No | Scheduled install date, equipment readiness | Configured equipment fields when available | Implemented skip-safe | Medium until field semantics are confirmed | Dry-run only |
+| R25 | Rebate confirmed before scheduling | No | Rebate applicability/status, scheduled install | Configured rebate fields when available | Implemented skip-safe | Medium/high until applicability is reliable | Dry-run only |
+| R26 | Crew assigned before scheduling | No | Scheduled install date, crew/team assignment | Configured crew fields when available | Implemented skip-safe | Medium until field semantics are confirmed | Dry-run only |
+| R27 | Project left open too long | No | Completion/final-payment signal and open status | Project completion/final-payment structured timestamps when available | Implemented skip-safe | Medium until final-payment signal is reliable | Dry-run only |
+| R28 | Change order missing written approval | No | Change-order signal and written approval | Configured change-order approval fields when available | Implemented skip-safe; raw notes ignored | Medium/high until field semantics are confirmed | Dry-run only |
 
 ## Recommended PM Audit V1 Scope
 
@@ -185,16 +190,17 @@ Implemented rules remain available for dry-run validation:
 7. R13 `pm_task_missing_assignee`
 8. R15 `pm_stale_open_task`
 9. R17 `pm_completed_project_not_closed_out`
+10. R8-R10, R16, R18-R28 are implemented as skip-safe dry-run rules.
 
 First scheduled live allowlist:
 
 ```json
-["R1","R4","R13","R17"]
+["R1","R13","R17"]
 ```
 
-Keep R3/R6/R7/R11/R15 out of scheduled live messages until Jane reviews more dry-run output.
+Keep R3/R4/R6/R7/R8-R11/R15/R16/R18-R28 out of scheduled live messages until Jane reviews more dry-run output.
 
-Skip for initial live rollout:
+Dry-run only for initial rollout:
 
 - R8 HOA approval until HOA applicability rules and zip list are confirmed.
 - R9 asbestos until cutoff year and field semantics are confirmed.
@@ -206,6 +212,11 @@ Skip for initial live rollout:
 - R21 equipment registered until ServiceTitan exposes reliable equipment registration or Jane accepts `Equipment Status` as evidence.
 - R22 deposit before install until project/job-linked invoice/payment mapping is proven.
 - R23 permit before install until permit field value/date semantics are confirmed.
+- R24 equipment confirmation until equipment status field semantics are confirmed.
+- R25 rebate confirmation until rebate applicability/status fields are confirmed.
+- R26 crew assignment until crew/team field semantics are confirmed.
+- R27 project left open until completion/final-payment signals are confirmed.
+- R28 change-order approval until structured change-order fields are confirmed.
 
 ## Future Slack Summary Proposal
 

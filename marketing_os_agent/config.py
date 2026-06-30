@@ -44,6 +44,16 @@ def _int_env(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer") from exc
 
 
+def _optional_int_env(name: str) -> int | None:
+    raw = _env(name, "").strip()
+    if raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
 def _float_env(name: str, default: float) -> float:
     raw = _env(name, "")
     if raw == "":
@@ -186,6 +196,24 @@ class Settings:
     pm_audit_enabled_rule_ids: list[str]
     pm_audit_sold_by_field_names: list[str]
     pm_audit_permit_field_names: list[str]
+    pm_audit_hoa_field_names: list[str]
+    pm_audit_hoa_zip_list: list[str]
+    pm_audit_asbestos_field_names: list[str]
+    pm_audit_asbestos_year_cutoff: int | None
+    pm_audit_review_requested_field_names: list[str]
+    pm_audit_on_hold_max_days: int
+    pm_audit_on_hold_reason_field_names: list[str]
+    pm_audit_homeowner_auth_within_hours: int
+    pm_audit_homeowner_auth_form_names: list[str]
+    pm_audit_completion_report_form_names: list[str]
+    pm_audit_equipment_field_names: list[str]
+    pm_audit_deposit_before_install_days: int
+    pm_audit_deposit_line_item_names: list[str]
+    pm_audit_permit_before_install_days: int
+    pm_audit_project_left_open_days: int
+    pm_audit_rebate_field_names: list[str]
+    pm_audit_crew_field_names: list[str]
+    pm_audit_change_order_field_names: list[str]
     pm_audit_slack_channel_id: str
     pm_audit_test_send: bool
     notifications_test_send: bool
@@ -362,6 +390,57 @@ class Settings:
             pm_audit_permit_field_names=_json_string_list_env(
                 "PM_AUDIT_PERMIT_FIELD_NAMES",
                 ["PERMIT", "Permit", "Permit Number", "Permit #", "Permit Status"],
+            ),
+            pm_audit_hoa_field_names=_json_string_list_env(
+                "PM_AUDIT_HOA_FIELD_NAMES",
+                ["HOA Approval", "Under HOA", "HOA Status", "HOA"],
+            ),
+            pm_audit_hoa_zip_list=_json_string_list_env("PM_AUDIT_HOA_ZIP_LIST", []),
+            pm_audit_asbestos_field_names=_json_string_list_env(
+                "PM_AUDIT_ASBESTOS_FIELD_NAMES",
+                ["Asbestos", "Asbestos Status", "Asbestos Check"],
+            ),
+            pm_audit_asbestos_year_cutoff=_optional_int_env("PM_AUDIT_ASBESTOS_YEAR_CUTOFF"),
+            pm_audit_review_requested_field_names=_json_string_list_env(
+                "PM_AUDIT_REVIEW_REQUESTED_FIELD_NAMES",
+                ["Review Requested", "Review request", "Review Sent"],
+            ),
+            pm_audit_on_hold_max_days=max(1, _int_env("PM_AUDIT_ON_HOLD_MAX_DAYS", 30)),
+            pm_audit_on_hold_reason_field_names=_json_string_list_env(
+                "PM_AUDIT_ON_HOLD_REASON_FIELD_NAMES",
+                ["On Hold Reason", "Hold Reason", "Hold Notes"],
+            ),
+            pm_audit_homeowner_auth_within_hours=max(1, _int_env("PM_AUDIT_HOMEOWNER_AUTH_WITHIN_HOURS", 2)),
+            pm_audit_homeowner_auth_form_names=_json_string_list_env(
+                "PM_AUDIT_HOMEOWNER_AUTH_FORM_NAMES",
+                ["Homeowner Authorization", "Homeowner Authorization Form"],
+            ),
+            pm_audit_completion_report_form_names=_json_string_list_env(
+                "PM_AUDIT_COMPLETION_REPORT_FORM_NAMES",
+                ["Installation Completion Report", "Completion Report"],
+            ),
+            pm_audit_equipment_field_names=_json_string_list_env(
+                "PM_AUDIT_EQUIPMENT_FIELD_NAMES",
+                ["Equipment Registered", "Equipment Status", "Equipment Registration"],
+            ),
+            pm_audit_deposit_before_install_days=max(1, _int_env("PM_AUDIT_DEPOSIT_BEFORE_INSTALL_DAYS", 7)),
+            pm_audit_deposit_line_item_names=_json_string_list_env(
+                "PM_AUDIT_DEPOSIT_LINE_ITEM_NAMES",
+                ["Deposit", "Project Deposit", "Installation Deposit"],
+            ),
+            pm_audit_permit_before_install_days=max(1, _int_env("PM_AUDIT_PERMIT_BEFORE_INSTALL_DAYS", 10)),
+            pm_audit_project_left_open_days=max(1, _int_env("PM_AUDIT_PROJECT_LEFT_OPEN_DAYS", 7)),
+            pm_audit_rebate_field_names=_json_string_list_env(
+                "PM_AUDIT_REBATE_FIELD_NAMES",
+                ["Rebate", "Rebate Status", "Rebate Approval"],
+            ),
+            pm_audit_crew_field_names=_json_string_list_env(
+                "PM_AUDIT_CREW_FIELD_NAMES",
+                ["Crew", "Install Crew", "Team"],
+            ),
+            pm_audit_change_order_field_names=_json_string_list_env(
+                "PM_AUDIT_CHANGE_ORDER_FIELD_NAMES",
+                ["Change Order", "Change Order Approval", "Additional Work Approval", "Written Approval"],
             ),
             pm_audit_slack_channel_id=_env("PM_AUDIT_SLACK_CHANNEL_ID"),
             pm_audit_test_send=_bool_env("PM_AUDIT_TEST_SEND", False),

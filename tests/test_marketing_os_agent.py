@@ -95,6 +95,24 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         pm_audit_enabled_rule_ids=[],
         pm_audit_sold_by_field_names=["Sold By", "Sold by", "Comfort Advisor", "Sold By CA"],
         pm_audit_permit_field_names=["PERMIT", "Permit", "Permit Number", "Permit #", "Permit Status"],
+        pm_audit_hoa_field_names=["HOA Approval", "Under HOA", "HOA Status", "HOA"],
+        pm_audit_hoa_zip_list=[],
+        pm_audit_asbestos_field_names=["Asbestos", "Asbestos Status", "Asbestos Check"],
+        pm_audit_asbestos_year_cutoff=None,
+        pm_audit_review_requested_field_names=["Review Requested", "Review request", "Review Sent"],
+        pm_audit_on_hold_max_days=30,
+        pm_audit_on_hold_reason_field_names=["On Hold Reason", "Hold Reason", "Hold Notes"],
+        pm_audit_homeowner_auth_within_hours=2,
+        pm_audit_homeowner_auth_form_names=["Homeowner Authorization", "Homeowner Authorization Form"],
+        pm_audit_completion_report_form_names=["Installation Completion Report", "Completion Report"],
+        pm_audit_equipment_field_names=["Equipment Registered", "Equipment Status", "Equipment Registration"],
+        pm_audit_deposit_before_install_days=7,
+        pm_audit_deposit_line_item_names=["Deposit", "Project Deposit", "Installation Deposit"],
+        pm_audit_permit_before_install_days=10,
+        pm_audit_project_left_open_days=7,
+        pm_audit_rebate_field_names=["Rebate", "Rebate Status", "Rebate Approval"],
+        pm_audit_crew_field_names=["Crew", "Install Crew", "Team"],
+        pm_audit_change_order_field_names=["Change Order", "Change Order Approval", "Additional Work Approval", "Written Approval"],
         pm_audit_slack_channel_id="",
         pm_audit_test_send=False,
         notifications_test_send=False,
@@ -1033,6 +1051,15 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertIn("Comfort Advisor", audit_settings.pm_audit_sold_by_field_names)
         self.assertIn("PERMIT", audit_settings.pm_audit_permit_field_names)
         self.assertIn("Permit Number", audit_settings.pm_audit_permit_field_names)
+        self.assertIn("HOA Approval", audit_settings.pm_audit_hoa_field_names)
+        self.assertIn("Asbestos Check", audit_settings.pm_audit_asbestos_field_names)
+        self.assertIsNone(audit_settings.pm_audit_asbestos_year_cutoff)
+        self.assertEqual(audit_settings.pm_audit_on_hold_max_days, 30)
+        self.assertEqual(audit_settings.pm_audit_homeowner_auth_within_hours, 2)
+        self.assertIn("Installation Completion Report", audit_settings.pm_audit_completion_report_form_names)
+        self.assertEqual(audit_settings.pm_audit_deposit_before_install_days, 7)
+        self.assertEqual(audit_settings.pm_audit_permit_before_install_days, 10)
+        self.assertEqual(audit_settings.pm_audit_project_left_open_days, 7)
         self.assertFalse(audit_settings.pm_audit_test_send)
         self.assertEqual(audit_settings.servicetitan_project_url_template, "https://go.servicetitan.com/#/project/{project_id}")
 
@@ -1219,7 +1246,35 @@ class MarketingOsAgentTests(unittest.TestCase):
     def test_pm_audit_empty_rule_allowlist_preserves_all_rule_behavior(self) -> None:
         summary = self._run_pm_audit([pm_project()], pm_audit_enabled_rule_ids=[])
         rule_ids = {result.rule_id for result in summary.project_audits[0].results}
-        self.assertEqual(rule_ids, {"R1", "R3", "R4", "R6", "R7", "R11", "R13", "R15", "R17"})
+        self.assertEqual(
+            rule_ids,
+            {
+                "R1",
+                "R3",
+                "R4",
+                "R6",
+                "R7",
+                "R8",
+                "R9",
+                "R10",
+                "R11",
+                "R13",
+                "R15",
+                "R16",
+                "R17",
+                "R18",
+                "R19",
+                "R20",
+                "R21",
+                "R22",
+                "R23",
+                "R24",
+                "R25",
+                "R26",
+                "R27",
+                "R28",
+            },
+        )
 
     def test_pm_audit_rule_allowlist_evaluates_only_selected_rules(self) -> None:
         summary = self._run_pm_audit([pm_project()], pm_audit_enabled_rule_ids=["R1", "R13", "R17"])
@@ -1227,10 +1282,10 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(rule_ids, ["R1", "R13", "R17"])
 
     def test_pm_audit_first_live_allowlist_excludes_noisy_rules(self) -> None:
-        summary = self._run_pm_audit([pm_project()], pm_audit_enabled_rule_ids=["R1", "R4", "R13", "R17"])
+        summary = self._run_pm_audit([pm_project()], pm_audit_enabled_rule_ids=["R1", "R13", "R17"])
         rule_ids = {result.rule_id for result in summary.project_audits[0].results}
-        self.assertEqual(rule_ids, {"R1", "R4", "R13", "R17"})
-        self.assertTrue({"R3", "R6", "R7", "R11", "R15"}.isdisjoint(rule_ids))
+        self.assertEqual(rule_ids, {"R1", "R13", "R17"})
+        self.assertTrue({"R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11", "R15", "R16", "R18", "R19", "R20", "R21", "R22", "R23", "R24", "R25", "R26", "R27", "R28"}.isdisjoint(rule_ids))
 
     def test_pm_r1_project_type_valid_invalid_missing_and_unavailable(self) -> None:
         self.assertEqual(self._pm_result(pm_project(project_type_id="63812999", project_type_name="Standard Install"), "R1").status, PM_PASS)
@@ -1416,6 +1471,167 @@ class MarketingOsAgentTests(unittest.TestCase):
         )
         self.assertEqual(result.status, PM_FAIL)
 
+    def test_pm_r8_hoa_approval_pass_fail_skip(self) -> None:
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Under HOA": "No"}), "R8").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Under HOA": "Yes", "HOA Approval": ""}), "R8").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Sold By": "Advisor"}, custom_fields_available=True), "R8").status, PM_SKIP)
+
+    def test_pm_r9_asbestos_check_pass_fail_skip(self) -> None:
+        replacement_raw = {"id": "pm-asbestos", "projectTypeId": "63812999", "status": "Scheduled", "yearBuilt": 1975, "installType": "Replacement"}
+        fail = self._pm_result(
+            pm_project(raw=replacement_raw, custom_fields={"Asbestos Check": ""}),
+            "R9",
+            pm_audit_asbestos_year_cutoff=1980,
+        )
+        self.assertEqual(fail.status, PM_FAIL)
+        passed = self._pm_result(
+            pm_project(raw=replacement_raw, custom_fields={"Asbestos Check": "Recorded"}),
+            "R9",
+            pm_audit_asbestos_year_cutoff=1980,
+        )
+        self.assertEqual(passed.status, PM_PASS)
+        skipped = self._pm_result(pm_project(raw=replacement_raw, custom_fields={"Asbestos Check": ""}), "R9")
+        self.assertEqual(skipped.status, PM_SKIP)
+
+    def test_pm_r10_review_requested_pass_fail_skip(self) -> None:
+        completed_raw = {"id": "pm-review", "projectTypeId": "63812999", "status": "Completed"}
+        self.assertEqual(self._pm_result(pm_project(status="Scheduled", custom_fields={"Review Requested": ""}), "R10").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(status="Completed", raw=completed_raw, custom_fields={"Review Requested": ""}), "R10").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(status="Completed", raw=completed_raw, custom_fields={"Review Requested": "Yes"}), "R10").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(status="Completed", raw=completed_raw, custom_fields={"Sold By": "Advisor"}), "R10").status, PM_SKIP)
+
+    def test_pm_r16_on_hold_reason_pass_fail_skip(self) -> None:
+        hold_raw = {"id": "pm-hold", "projectTypeId": "63812999", "status": "On Hold", "onHoldSince": "2026-05-01T00:00:00+00:00"}
+        self.assertEqual(self._pm_result(pm_project(status="Scheduled"), "R16").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(status="On Hold", raw=hold_raw, custom_fields={"On Hold Reason": ""}), "R16", pm_audit_on_hold_max_days=30).status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(status="On Hold", raw=hold_raw, custom_fields={"On Hold Reason": "Waiting on parts"}), "R16", pm_audit_on_hold_max_days=30).status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(status="On Hold", raw={"id": "pm-hold", "projectTypeId": "63812999", "status": "On Hold"}), "R16").status, PM_SKIP)
+
+    def test_pm_r18_payment_order_pass_fail_skip(self) -> None:
+        valid = pm_project(
+            raw={
+                "id": "pm-pay-valid",
+                "projectTypeId": "63812999",
+                "status": "Scheduled",
+                "paymentMilestones": [
+                    {"name": "Deposit", "paidAt": "2026-06-01T00:00:00+00:00"},
+                    {"name": "First installment", "paidAt": "2026-06-02T00:00:00+00:00"},
+                    {"name": "Final balance", "paidAt": "2026-06-03T00:00:00+00:00"},
+                ],
+            }
+        )
+        self.assertEqual(self._pm_result(valid, "R18").status, PM_PASS)
+        invalid = replace(
+            valid,
+            raw={
+                "id": "pm-pay-invalid",
+                "projectTypeId": "63812999",
+                "status": "Scheduled",
+                "paymentMilestones": [
+                    {"name": "Deposit", "paidAt": "2026-06-02T00:00:00+00:00"},
+                    {"name": "First installment", "paidAt": "2026-06-01T00:00:00+00:00"},
+                    {"name": "Final balance", "paidAt": "2026-06-03T00:00:00+00:00"},
+                ],
+            },
+        )
+        self.assertEqual(self._pm_result(invalid, "R18").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(raw={"id": "pm-no-pay", "projectTypeId": "63812999", "status": "Scheduled"}), "R18").status, PM_SKIP)
+
+    def test_pm_r19_homeowner_authorization_timing_pass_fail_skip(self) -> None:
+        base_raw = {"id": "pm-auth", "projectTypeId": "63812999", "status": "Scheduled", "crewArrivedAt": "2026-06-24T08:00:00+00:00"}
+        self.assertEqual(self._pm_result(pm_project(raw={**base_raw, "homeownerAuthorizationCompletedAt": "2026-06-24T09:00:00+00:00"}), "R19").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(raw={**base_raw, "homeownerAuthorizationCompletedAt": "2026-06-24T11:30:00+00:00"}), "R19").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(raw={"id": "pm-auth", "projectTypeId": "63812999", "status": "Scheduled"}), "R19").status, PM_SKIP)
+
+    def test_pm_r20_completion_report_pass_fail_skip(self) -> None:
+        completed = {"id": "pm-report", "projectTypeId": "63812999", "status": "Completed"}
+        self.assertEqual(self._pm_result(pm_project(status="Scheduled"), "R20").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(status="Completed", raw={**completed, "completionReportStatus": "Green"}), "R20").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(status="Completed", raw={**completed, "completionReportStatus": "Red"}), "R20").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(status="Completed", raw=completed), "R20").status, PM_SKIP)
+
+    def test_pm_r21_equipment_registered_pass_fail_skip(self) -> None:
+        raw = {"id": "pm-equipment", "projectTypeId": "63812999", "status": "Completed"}
+        self.assertEqual(self._pm_result(pm_project(status="Scheduled", custom_fields={"Equipment Registered": ""}), "R21").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(status="Completed", raw=raw, custom_fields={"Equipment Registered": "Done"}), "R21").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(status="Completed", raw=raw, custom_fields={"Equipment Registered": ""}), "R21").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(status="Completed", raw=raw, custom_fields={}), "R21").status, PM_SKIP)
+
+    def test_pm_r22_deposit_before_install_pass_fail_skip(self) -> None:
+        install_date = datetime(2026, 6, 28, tzinfo=timezone.utc)
+        invoice_paid = {"id": "inv-1", "projectId": "pm-deposit", "jobId": "job-1", "total": 10000, "balance": 9000, "paidOn": "2026-06-20T00:00:00+00:00"}
+        invoice_unpaid = {"id": "inv-2", "projectId": "pm-deposit", "jobId": "job-1", "total": 10000, "balance": 10000}
+        self.assertEqual(
+            self._pm_result(pm_project("pm-deposit", start_date=install_date, invoices=[invoice_paid], invoices_available=True), "R22").status,
+            PM_PASS,
+        )
+        self.assertEqual(
+            self._pm_result(pm_project("pm-deposit", start_date=install_date, invoices=[invoice_unpaid], invoices_available=True), "R22").status,
+            PM_FAIL,
+        )
+        self.assertEqual(self._pm_result(pm_project("pm-deposit", start_date=install_date, invoices=[], invoices_available=False), "R22").status, PM_SKIP)
+
+    def test_pm_r23_permit_before_install_pass_fail_skip(self) -> None:
+        install_date = datetime(2026, 6, 28, tzinfo=timezone.utc)
+        self.assertEqual(self._pm_result(pm_project(start_date=install_date, custom_fields={"Permit": "P-1"}), "R23").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(start_date=install_date, custom_fields={"Permit": ""}), "R23").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(start_date=install_date, custom_fields={"Permit Owner": "Customer", "Permit": ""}), "R23").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(start_date=install_date, custom_fields={}), "R23").status, PM_SKIP)
+
+    def test_pm_r24_equipment_confirmed_pass_fail_skip(self) -> None:
+        self.assertEqual(self._pm_result(pm_project(start_date=None, custom_fields={"Equipment Status": ""}), "R24").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Equipment Status": "Ready"}), "R24").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Equipment Status": ""}), "R24").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={}), "R24").status, PM_SKIP)
+
+    def test_pm_r25_rebate_confirmed_pass_fail_skip(self) -> None:
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Rebate Status": "Approved"}), "R25").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Rebate Status": "Pending"}), "R25").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Rebate Status": "N/A"}), "R25").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={}), "R25").status, PM_SKIP)
+
+    def test_pm_r26_crew_assigned_pass_fail_skip(self) -> None:
+        self.assertEqual(self._pm_result(pm_project(start_date=None, custom_fields={"Crew": ""}), "R26").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Crew": "Install Team 1"}), "R26").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Crew": ""}), "R26").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={}), "R26").status, PM_SKIP)
+
+    def test_pm_r27_project_left_open_too_long_pass_fail_skip(self) -> None:
+        completed_raw = {"id": "pm-left-open", "projectTypeId": "63812999", "status": "Completed"}
+        self.assertEqual(self._pm_result(pm_project(status="Completed", raw=completed_raw), "R27").status, PM_PASS)
+        self.assertEqual(
+            self._pm_result(
+                pm_project(
+                    status="In Progress",
+                    raw={"id": "pm-left-open", "projectTypeId": "63812999", "status": "In Progress"},
+                    actual_completion_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                ),
+                "R27",
+                pm_audit_project_left_open_days=7,
+            ).status,
+            PM_FAIL,
+        )
+        self.assertEqual(self._pm_result(pm_project(status="In Progress", actual_completion_date=None), "R27").status, PM_SKIP)
+
+    def test_pm_r28_change_order_written_approval_pass_fail_skip(self) -> None:
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Change Order Approval": "Approved"}), "R28").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Change Order Approval": "Pending"}), "R28").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Change Order": "Yes"}), "R28").status, PM_FAIL)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={"Change Order Approval": "No"}), "R28").status, PM_PASS)
+        self.assertEqual(self._pm_result(pm_project(custom_fields={}), "R28").status, PM_SKIP)
+
+    def test_new_pm_rules_respect_allowlist_and_stay_out_of_first_live_set(self) -> None:
+        summary = self._run_pm_audit(
+            [pm_project(custom_fields={"Under HOA": "Yes", "HOA Approval": ""})],
+            pm_audit_enabled_rule_ids=["R8"],
+        )
+        rule_ids = [result.rule_id for result in summary.project_audits[0].results]
+        self.assertEqual(rule_ids, ["R8"])
+        self.assertEqual(summary.fail_count, 1)
+        first_live = self._run_pm_audit([pm_project()], pm_audit_enabled_rule_ids=["R1", "R13", "R17"])
+        first_live_ids = {result.rule_id for result in first_live.project_audits[0].results}
+        self.assertTrue({"R8", "R9", "R10", "R16", "R18", "R19", "R20", "R21", "R22", "R23", "R24", "R25", "R26", "R27", "R28"}.isdisjoint(first_live_ids))
+
     def test_pm_missing_or_unsafe_data_returns_skip(self) -> None:
         project = pm_project(custom_fields={}, custom_fields_available=False, tasks=[], tasks_available=False)
         summary = self._run_pm_audit([project])
@@ -1426,6 +1642,21 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(skip_by_rule["R13"], PM_SKIP)
         self.assertEqual(skip_by_rule["R15"], PM_SKIP)
         self.assertEqual(skip_by_rule["R17"], PM_SKIP)
+        self.assertEqual(skip_by_rule["R8"], PM_SKIP)
+        self.assertEqual(skip_by_rule["R9"], PM_SKIP)
+        self.assertEqual(skip_by_rule["R10"], PM_PASS)
+        self.assertEqual(skip_by_rule["R16"], PM_PASS)
+        self.assertEqual(skip_by_rule["R18"], PM_SKIP)
+        self.assertEqual(skip_by_rule["R19"], PM_SKIP)
+        self.assertEqual(skip_by_rule["R20"], PM_PASS)
+        self.assertEqual(skip_by_rule["R21"], PM_PASS)
+        self.assertEqual(skip_by_rule["R22"], PM_SKIP)
+        self.assertEqual(skip_by_rule["R23"], PM_SKIP)
+        self.assertEqual(skip_by_rule["R24"], PM_SKIP)
+        self.assertEqual(skip_by_rule["R25"], PM_SKIP)
+        self.assertEqual(skip_by_rule["R26"], PM_SKIP)
+        self.assertEqual(skip_by_rule["R27"], PM_SKIP)
+        self.assertEqual(skip_by_rule["R28"], PM_SKIP)
 
     def test_pm_out_of_scope_project_type_is_not_evaluated(self) -> None:
         project = pm_project(project_type_id="recall", project_type_name="Recall", raw={"id": "pm-recall", "projectTypeId": "recall", "status": "Scheduled"})

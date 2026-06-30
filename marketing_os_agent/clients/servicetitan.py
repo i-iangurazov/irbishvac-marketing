@@ -175,6 +175,8 @@ class ServiceTitanProject:
     custom_fields_available: bool = False
     tasks: list[ServiceTitanProjectTask] = field(default_factory=list)
     tasks_available: bool = False
+    invoices: list[dict[str, Any]] = field(default_factory=list)
+    invoices_available: bool = False
     url: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -271,8 +273,10 @@ class ServiceTitanClient:
             "skipped_out_of_scope": 0,
             "projects_evaluated": 0,
             "tasks_loaded": 0,
+            "invoices_loaded": 0,
         }
         projects: list[ServiceTitanProject] = []
+        fetch_invoices = self._should_fetch_pm_project_invoices()
         for record in records:
             project = parse_service_titan_project(
                 record,
@@ -293,7 +297,20 @@ class ServiceTitanClient:
             else:
                 tasks, tasks_available = self.query_pm_project_tasks(project.project_id, max_tasks=remaining_tasks)
             stats["tasks_loaded"] += len(tasks)
-            projects.append(replace(project, tasks=tasks, tasks_available=tasks_available))
+            invoices: list[dict[str, Any]] = []
+            invoices_available = False
+            if fetch_invoices:
+                invoices, invoices_available = self.query_pm_project_invoices(project)
+                stats["invoices_loaded"] += len(invoices)
+            projects.append(
+                replace(
+                    project,
+                    tasks=tasks,
+                    tasks_available=tasks_available,
+                    invoices=invoices,
+                    invoices_available=invoices_available,
+                )
+            )
         stats["projects_evaluated"] = len(projects)
         self.last_pm_audit_stats = stats
         return projects
@@ -337,6 +354,48 @@ class ServiceTitanClient:
         if max_tasks is not None:
             records = records[:max(0, max_tasks)]
         return [parse_service_titan_project_task(record) for record in records], True
+
+    def query_pm_project_invoices(self, project: ServiceTitanProject) -> tuple[list[dict[str, Any]], bool]:
+        if not project.job_ids:
+            return [], False
+        invoices: list[dict[str, Any]] = []
+        available = False
+        seen: set[str] = set()
+        for job_id in project.job_ids:
+            if not job_id:
+                continue
+            try:
+                records = self._get_paginated(
+                    self._tenant_path("accounting", "invoices"),
+                    {
+                        "jobId": job_id,
+                        "pageSize": "50",
+                        "includeTotal": "true",
+                    },
+                    related_category="pm_project_invoices",
+                )
+            except ServiceTitanApiError as exc:
+                logger.warning("servicetitan_pm_invoices_unavailable", extra={"project_id": project.project_id, "status": exc.status})
+                continue
+            except Exception as exc:
+                logger.warning("servicetitan_pm_invoices_failed", extra={"project_id": project.project_id, "error_message": str(exc)})
+                continue
+            available = True
+            for record in records:
+                if not _pm_invoice_matches_project(record, project, job_id):
+                    continue
+                invoice_id = str(_raw_value(record, ("id", "invoiceId", "number", "invoiceNumber")) or "")
+                dedupe_key = invoice_id or f"{job_id}:{len(invoices)}"
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                invoices.append(record)
+        return invoices, available
+
+    def _should_fetch_pm_project_invoices(self) -> bool:
+        invoice_rule_ids = {"R18", "R22", "R27"}
+        enabled = {rule_id.strip().upper() for rule_id in self.settings.pm_audit_enabled_rule_ids if rule_id.strip()}
+        return not enabled or bool(enabled & invoice_rule_ids)
 
     def _employee_name_map(self) -> dict[str, str]:
         names: dict[str, str] = {}
@@ -1482,6 +1541,16 @@ def _pm_project_matches_scope(project: ServiceTitanProject, project_type_ids: se
         if any(keyword in text for keyword in exclude_keywords):
             return False
     return True
+
+
+def _pm_invoice_matches_project(record: dict[str, Any], project: ServiceTitanProject, job_id: str) -> bool:
+    invoice_project_id = str(_raw_value(record, ("projectId", "project.id")) or "")
+    invoice_job_id = str(_raw_value(record, ("jobId", "job.id")) or "")
+    if invoice_project_id and project.project_id and invoice_project_id != project.project_id:
+        return False
+    if invoice_job_id and invoice_job_id != job_id:
+        return False
+    return bool(invoice_project_id or invoice_job_id)
 
 
 def _records_from_response(data: dict[str, Any] | list[Any]) -> list[dict[str, Any]]:

@@ -37,6 +37,24 @@ PM_AUDIT_MAX_TASKS=500
 PM_AUDIT_ENABLED_RULE_IDS_JSON=[]
 PM_AUDIT_SOLD_BY_FIELD_NAMES=["Sold By","Sold by","Comfort Advisor","Sold By CA"]
 PM_AUDIT_PERMIT_FIELD_NAMES=["PERMIT","Permit","Permit Number","Permit #","Permit Status"]
+PM_AUDIT_HOA_FIELD_NAMES=["HOA Approval","Under HOA","HOA Status","HOA"]
+PM_AUDIT_HOA_ZIP_LIST=[]
+PM_AUDIT_ASBESTOS_FIELD_NAMES=["Asbestos","Asbestos Status","Asbestos Check"]
+PM_AUDIT_ASBESTOS_YEAR_CUTOFF=
+PM_AUDIT_REVIEW_REQUESTED_FIELD_NAMES=["Review Requested","Review request","Review Sent"]
+PM_AUDIT_ON_HOLD_MAX_DAYS=30
+PM_AUDIT_ON_HOLD_REASON_FIELD_NAMES=["On Hold Reason","Hold Reason","Hold Notes"]
+PM_AUDIT_HOMEOWNER_AUTH_WITHIN_HOURS=2
+PM_AUDIT_HOMEOWNER_AUTH_FORM_NAMES=["Homeowner Authorization","Homeowner Authorization Form"]
+PM_AUDIT_COMPLETION_REPORT_FORM_NAMES=["Installation Completion Report","Completion Report"]
+PM_AUDIT_EQUIPMENT_FIELD_NAMES=["Equipment Registered","Equipment Status","Equipment Registration"]
+PM_AUDIT_DEPOSIT_BEFORE_INSTALL_DAYS=7
+PM_AUDIT_DEPOSIT_LINE_ITEM_NAMES=["Deposit","Project Deposit","Installation Deposit"]
+PM_AUDIT_PERMIT_BEFORE_INSTALL_DAYS=10
+PM_AUDIT_PROJECT_LEFT_OPEN_DAYS=7
+PM_AUDIT_REBATE_FIELD_NAMES=["Rebate","Rebate Status","Rebate Approval"]
+PM_AUDIT_CREW_FIELD_NAMES=["Crew","Install Crew","Team"]
+PM_AUDIT_CHANGE_ORDER_FIELD_NAMES=["Change Order","Change Order Approval","Additional Work Approval","Written Approval"]
 PM_AUDIT_SLACK_CHANNEL_ID=
 PM_AUDIT_TEST_SEND=false
 SERVICE_TITAN_PROJECT_URL_TEMPLATE=https://go.servicetitan.com/#/project/{project_id}
@@ -73,22 +91,23 @@ WARNING: Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` only for one-off ServiceTitan au
 Supported IDs:
 
 ```json
-["R1","R3","R4","R6","R7","R11","R13","R15","R17"]
+["R1","R3","R4","R6","R7","R8","R9","R10","R11","R13","R15","R16","R17","R18","R19","R20","R21","R22","R23","R24","R25","R26","R27","R28"]
 ```
 
 First scheduled live set:
 
 ```env
-PM_AUDIT_ENABLED_RULE_IDS_JSON=["R1","R4","R13","R17"]
+PM_AUDIT_ENABLED_RULE_IDS_JSON=["R1","R13","R17"]
 ```
 
-Run this allowlist in dry-run before enabling the app scheduler. If R4 produces a high stale-status count, keep R4 out of scheduled live messages and use `["R1","R13","R17"]` until Jane confirms the status timestamp semantics and threshold.
+Run this allowlist in dry-run before enabling or changing the app scheduler. R4 and the new R8-R28 rules are implemented for dry-run validation, but they should stay out of first scheduled live messages until Jane confirms alert quality and field availability.
 
 Do not include these in the first scheduled PM messages:
 
 - R3 PM assigned: currently noisy and needs more review.
 - R6 Sold By: re-pointed to Project Details, but needs another dry-run to confirm realistic empty rates.
 - R7 Permit: re-pointed to Project Details PERMIT, but needs another dry-run to confirm field availability.
+- R8-R10, R16, and R18-R28: implemented skip-safe for dry-run validation only.
 - R11 Tasks applied: task-count proxy is useful, but not in Jane's first live set.
 - R15 No stale tasks: useful later, but not in Jane's first live set.
 
@@ -119,12 +138,27 @@ The v1 implementation uses project type first. It fetches project metadata, filt
 | R4 | Status set and current | Fails when project status is empty. Passes when status exists. If a status last-updated timestamp is available and older than `PM_AUDIT_STATUS_STALE_DAYS` while the project has open tasks, fails as stale; if that timestamp is missing, it does not guess. |
 | R6 | Comfort Advisor / Sold By set | Reads Project Details `Sold By` using `PM_AUDIT_SOLD_BY_FIELD_NAMES`; skips when none of the configured fields exist, fails when a configured field exists but is empty. Valid non-empty values include Comfort Advisor names, `HVAC Service`, and `Plumbing Service`. Keep dry-run until revalidation confirms realistic empty rates. |
 | R7 | Permit field present | Reads Project Details `PERMIT` using `PM_AUDIT_PERMIT_FIELD_NAMES`; skips when the PERMIT section/fields are unavailable, fails when configured permit data exists but is empty. Does not use the separate ServiceTitan Permits module in v1.1. |
+| R8 | HOA approval status set | Uses configured HOA fields only. Passes when HOA is not required or approval/status is present; fails only when a structured field shows HOA is required and approval/status is blank; skips when requirement/status cannot be determined. |
+| R9 | Asbestos check recorded | Requires `PM_AUDIT_ASBESTOS_YEAR_CUTOFF`, replacement signal, structure/system age, and configured asbestos field. Missing or ambiguous data skips. |
+| R10 | Review-requested flag set | Fails completed/closed projects only when a configured Review Requested field exists and is false/blank; skips when the field/status is unavailable. |
 | R11 | Tasks applied / task count present | Uses task count as a v1 proxy for task-template application; fails when no project tasks exist after `PM_AUDIT_TASK_TEMPLATE_GRACE_HOURS`; skips when the timestamp needed for the grace period is unavailable. |
 | R13 | Every task has an assignee | Fails when any project task has no assignee. |
 | R15 | No stale open tasks | Fails when an open task with a due date is more than `PM_AUDIT_TASK_OVERDUE_DAYS` past due. Open tasks without due dates are ignored for stale-task failure. |
+| R16 | On-hold has a reason | Fails only when status is On Hold beyond `PM_AUDIT_ON_HOLD_MAX_DAYS` and a structured on-hold reason field exists but is blank. Raw notes are ignored. |
 | R17 | Completed projects are closed out | Fails when a completed project still has open tasks. |
+| R18 | Payment order | Uses structured payment milestone fields when available. Skips when deposit/first/final milestones or timestamps cannot be identified safely. |
+| R19 | Homeowner Authorization timing | Uses structured crew-arrival and Homeowner Authorization timestamps. Skips when forms/timestamps are not safely project-scoped. |
+| R20 | Installation Completion Report green | Checks structured completion-report status for completed installs. Skips when the report is unavailable or not safely scoped. |
+| R21 | Equipment registered | Checks configured structured equipment registration fields on completed projects. Skips when unavailable. |
+| R22 | Deposit before install | Uses linked project/job invoices only. Passes when structured payment is confirmed before install, fails when scoped invoice data shows no payment inside the configured window, and skips if invoice/payment/date linkage is unclear. |
+| R23 | Permit before install | Uses Project Details PERMIT fields inside the configured pre-install window. Customer-pulled permit is honored only when structured permit-owner data says customer. |
+| R24 | Equipment confirmed before scheduling | Uses configured equipment fields for scheduled installs. Skips when the field is unavailable. |
+| R25 | Rebate confirmed before scheduling | Uses configured rebate fields. Skips when applicability or status is unavailable. |
+| R26 | Crew assigned before scheduling | Uses configured crew fields for scheduled installs. Skips when the field is unavailable. |
+| R27 | Project left open too long | Uses structured completion/final-payment signals only. Skips when those signals are unavailable. |
+| R28 | Change order missing written approval | Uses configured structured change-order fields only. Raw notes are ignored. |
 
-First live candidates after validation are R1 project type, R4 status present/current, R13 task assignee, and R17 completed-with-open-tasks. R3, R6, R7, R11, and R15 should stay dry-run pending revalidation.
+First live candidates after validation are R1 project type, R13 task assignee, and R17 completed-with-open-tasks. R3, R4, R6, R7, R8-R10, R11, R15, and R16-R28 should stay dry-run pending revalidation.
 
 ## Main App Scheduler
 
@@ -145,7 +179,7 @@ PM_AUDIT_RUN_ON_STARTUP=true
 PM_AUDIT_DRY_RUN=false
 PM_AUDIT_SLACK_CHANNEL_ID=C0BDZ5E4GJU
 PM_AUDIT_TEST_SEND=false
-PM_AUDIT_ENABLED_RULE_IDS_JSON=[]
+PM_AUDIT_ENABLED_RULE_IDS_JSON=["R1","R13","R17"]
 PM_AUDIT_MAX_PROJECTS=50
 PM_AUDIT_PROJECT_PAGE_SIZE=50
 PM_AUDIT_MAX_TASKS=500
@@ -264,9 +298,9 @@ Email and office-number notifications:
 - No Gmail inbox reader, Dialpad integration, SMS parser, or office-number ingestion path was found.
 - If deposit notifications must come from email/SMS, implement that as a separate read-only integration with strict PII filtering and message dedupe.
 
-## Rules Intentionally Skipped
+## Dry-Run Only Rules
 
-These are not implemented in v1 because discovery found missing, unsafe, or business-unconfirmed data:
+These are implemented as skip-safe rules, but should remain out of scheduled live allowlists until dry-run validation confirms field availability and Jane approves alert quality:
 
 - R8 HOA approval status set
 - R9 Asbestos check recorded
@@ -278,6 +312,11 @@ These are not implemented in v1 because discovery found missing, unsafe, or busi
 - R21 Equipment registered
 - R22 Deposit before install
 - R23 Permit before install
+- R24 Equipment confirmed before scheduling
+- R25 Rebate confirmed before scheduling
+- R26 Crew assigned before scheduling
+- R27 Project left open too long
+- R28 Change order missing written approval
 
 ## Slack / Dry-Run Output
 
