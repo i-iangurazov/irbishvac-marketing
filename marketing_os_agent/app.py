@@ -120,6 +120,7 @@ class AgentApp:
         self._validate_timezone()
         self._log_service_titan_startup_config()
         self._log_service_titan_weekly_summary_config()
+        self._log_pm_audit_config()
 
         scheduler = Scheduler(self.settings, self.db)
         scheduler.register(ScheduledJob("monday_push", monday_8am, self.run_monday_push))
@@ -135,6 +136,8 @@ class AgentApp:
                     self.run_service_titan_weekly_summary,
                 )
             )
+        if self.settings.pm_audit_enabled and self.settings.pm_audit_schedule_enabled:
+            scheduler.register(ScheduledJob("pm_audit", self.should_run_pm_audit_at, self.run_pm_audit_scheduled))
 
         http_server = AgentHttpServer(
             "0.0.0.0",
@@ -154,6 +157,15 @@ class AgentApp:
                     target=ServiceTitanAuditLoop(self.settings, self.run_service_titan_audit_once).run_loop,
                     args=(stop_event,),
                     name="servicetitan-audit",
+                    daemon=True,
+                )
+            )
+        if self.settings.pm_audit_enabled and self.settings.pm_audit_run_on_startup:
+            threads.append(
+                threading.Thread(
+                    target=self._pm_audit_startup_loop,
+                    args=(stop_event,),
+                    name="pm-audit-startup",
                     daemon=True,
                 )
             )
@@ -191,6 +203,35 @@ class AgentApp:
                 "slack_channel_configured": bool(channel),
             },
         )
+
+    def _log_pm_audit_config(self) -> None:
+        if not self.settings.pm_audit_enabled:
+            logger.info("pm_audit_skipped_disabled")
+            return
+        channel = self.settings.pm_audit_slack_channel_id
+        if self.settings.pm_audit_schedule_enabled:
+            logger.info(
+                "pm_audit_scheduler_enabled",
+                extra={
+                    "dry_run": self.settings.pm_audit_dry_run,
+                    "run_hour": self.settings.pm_audit_run_hour,
+                    "run_minute": self.settings.pm_audit_run_minute,
+                    "weekdays_only": self.settings.pm_audit_weekdays_only,
+                    "enabled_rules": self.settings.pm_audit_enabled_rule_ids,
+                    "slack_channel": channel or "<missing>",
+                },
+            )
+        else:
+            logger.info("pm_audit_scheduler_disabled", extra={"enabled": self.settings.pm_audit_enabled})
+        if self.settings.pm_audit_run_on_startup:
+            logger.info(
+                "pm_audit_startup_run_enabled",
+                extra={
+                    "dry_run": self.settings.pm_audit_dry_run,
+                    "enabled_rules": self.settings.pm_audit_enabled_rule_ids,
+                    "slack_channel": channel or "<missing>",
+                },
+            )
 
     def _log_service_titan_weekly_summary_config(self) -> None:
         if not self.settings.service_titan_weekly_summary_enabled:
@@ -230,6 +271,66 @@ class AgentApp:
 
     def run_pm_audit_once(self, now: datetime | None = None) -> PMAuditSummary:
         return self.pm_audit.run_once(now)
+
+    def should_run_pm_audit_at(self, now: datetime) -> bool:
+        if not self.settings.pm_audit_enabled or not self.settings.pm_audit_schedule_enabled:
+            return False
+        if self.settings.pm_audit_weekdays_only and now.weekday() >= 5:
+            return False
+        return now.hour == self.settings.pm_audit_run_hour and now.minute == self.settings.pm_audit_run_minute
+
+    def run_pm_audit_scheduled(self, now: datetime | None = None) -> PMAuditSummary | None:
+        return self.run_pm_audit_automatic("scheduled", now)
+
+    def run_pm_audit_automatic(self, trigger: str, now: datetime | None = None) -> PMAuditSummary | None:
+        if not self.settings.pm_audit_enabled:
+            logger.info("pm_audit_skipped_disabled", extra={"trigger": trigger})
+            return None
+        local_now = self._pm_audit_local_now(now)
+        run_date = local_now.date().isoformat()
+        marker_key = "pm_audit_auto_last_run_date"
+        if self.db.get_kv(marker_key) == run_date:
+            logger.info("pm_audit_skipped_already_ran_today", extra={"trigger": trigger, "date": run_date})
+            return None
+        self.db.set_kv(marker_key, run_date)
+        logger.info(
+            "pm_audit_started",
+            extra={
+                "trigger": trigger,
+                "dry_run": self.settings.pm_audit_dry_run,
+                "slack_channel": self.settings.pm_audit_slack_channel_id or "<missing>",
+                "enabled_rules": self.settings.pm_audit_enabled_rule_ids,
+            },
+        )
+        summary = self.run_pm_audit_once(local_now.astimezone(timezone.utc))
+        if self.settings.pm_audit_dry_run:
+            logger.info("pm_audit_skipped_dry_run", extra={"trigger": trigger, "failures": summary.fail_count})
+        elif summary.fail_count == 0:
+            logger.info("pm_audit_skipped_no_failures", extra={"trigger": trigger, "projects": summary.projects_evaluated})
+        logger.info(
+            "pm_audit_finished",
+            extra={
+                "trigger": trigger,
+                "status": summary.status,
+                "projects": summary.projects_evaluated,
+                "fails": summary.fail_count,
+                "skips": summary.skip_count,
+                "slack_sent": summary.alerts_sent,
+            },
+        )
+        return summary
+
+    def _pm_audit_local_now(self, now: datetime | None = None) -> datetime:
+        tz = ZoneInfo(self.settings.timezone)
+        return (now or datetime.now(tz)).astimezone(tz)
+
+    def _pm_audit_startup_loop(self, stop_event: threading.Event) -> None:
+        if stop_event.wait(5):
+            return
+        try:
+            self.run_pm_audit_automatic("startup")
+        except Exception:
+            logger.exception("pm_audit_startup_failed")
 
     def pm_audit_slack_test_text(self) -> tuple[bool, str]:
         send = self.settings.pm_audit_test_send

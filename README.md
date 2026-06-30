@@ -229,17 +229,17 @@ Use `python3 -m marketing_os_agent servicetitan-runtime-diagnostics` on Render t
 
 ## PM Audit Agent
 
-The Project Management Audit Agent is implemented as a separate one-time, read-only command and is disabled by default:
+The Project Management Audit Agent is implemented as a read-only PM install audit path. It is disabled by default and can run either manually or from the main app scheduler:
 
 ```bash
 python3 -m marketing_os_agent pm-audit-once
 ```
 
-Enable only for validation with `PM_AUDIT_ENABLED=true`; keep `PM_AUDIT_DRY_RUN=true` until Jane approves the rules and output. V1 audits only PM install projects with project type `Standard Install` or `Construction & Remodel`, filters those project types before loading project tasks, and caps validation with `PM_AUDIT_MAX_PROJECTS` / `PM_AUDIT_MAX_TASKS`. It implements R1, R3, R4, R6, R7, R11, R13, R15, and R17 from [docs/pm-audit-agent-discovery.md](docs/pm-audit-agent-discovery.md). R6 reads Project Details `Sold By`; R7 reads Project Details `PERMIT`; both should stay dry-run until another validation confirms realistic empty rates. Passes and skips stay silent; dry-run prints grouped failures by PM and sends no Slack.
+For validation, use `PM_AUDIT_ENABLED=true` and `PM_AUDIT_DRY_RUN=true`. For approved PM live sends, set `PM_AUDIT_DRY_RUN=false` and `PM_AUDIT_SLACK_CHANNEL_ID` to the PM channel. V1 audits only PM install projects with project type `Standard Install` or `Construction & Remodel`, filters those project types before loading project tasks, and caps validation with `PM_AUDIT_MAX_PROJECTS` / `PM_AUDIT_MAX_TASKS`. It implements R1, R3, R4, R6, R7, R11, R13, R15, and R17 from [docs/pm-audit-agent-discovery.md](docs/pm-audit-agent-discovery.md). R6 reads Project Details `Sold By`; R7 reads Project Details `PERMIT`; both should stay out of restricted live allowlists until validation confirms realistic empty rates. Passes and skips stay silent; dry-run prints grouped failures by PM and sends no Slack.
 
 PM Audit can use a separate test Slack channel with `PM_AUDIT_SLACK_CHANNEL_ID` and `PM_AUDIT_TEST_SEND=true` via `python3 -m marketing_os_agent pm-audit-test-slack`. The PM test command uses synthetic project numbers only and does not fall back to the live ServiceTitan audit channel.
 
-PM Audit is not part of the web service startup loop. Use a Render Cron Job for scheduled PM Audit. The first safe scheduled set should use `PM_AUDIT_ENABLED_RULE_IDS_JSON='["R1","R4","R13","R17"]'`; keep R3/R6/R7/R11/R15 out of scheduled live messages until Jane reviews more dry-run output.
+PM Audit can run from the main app scheduler when `PM_AUDIT_SCHEDULE_ENABLED=true`. The existing Render command stays `python -m marketing_os_agent run`; no Render Cron Job is required. Set `PM_AUDIT_RUN_ON_STARTUP=true` to run once after deploy/restart, then use `PM_AUDIT_RUN_HOUR`, `PM_AUDIT_RUN_MINUTE`, and `PM_AUDIT_WEEKDAYS_ONLY` for daily scheduling. PM Audit sends only to `PM_AUDIT_SLACK_CHANNEL_ID`; it does not use `SLACK_ALERT_CHANNEL_ID`.
 
 See [docs/servicetitan-operations-audit.md](docs/servicetitan-operations-audit.md) for setup, required scopes, dedupe behavior, adding rules, manual QA, known field limitations, and Render deployment notes.
 

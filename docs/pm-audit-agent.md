@@ -1,6 +1,6 @@
 # PM Audit Agent V1
 
-The Project Management Audit Agent is a read-only ServiceTitan audit path for PM install projects. It is disabled by default and does not run in the continuous ServiceTitan operations audit loop.
+The Project Management Audit Agent is a read-only ServiceTitan audit path for PM install projects. It is disabled by default, separate from the continuous ServiceTitan operations audit loop, and can run manually or from the main app scheduler.
 
 ## Command
 
@@ -21,11 +21,16 @@ Default behavior:
 
 ```env
 PM_AUDIT_ENABLED=false
+PM_AUDIT_SCHEDULE_ENABLED=false
+PM_AUDIT_RUN_ON_STARTUP=false
 PM_AUDIT_DRY_RUN=true
 PM_AUDIT_STATUS_STALE_DAYS=14
 PM_AUDIT_TASK_OVERDUE_DAYS=3
 PM_AUDIT_PM_ASSIGNMENT_GRACE_HOURS=24
 PM_AUDIT_TASK_TEMPLATE_GRACE_HOURS=48
+PM_AUDIT_RUN_HOUR=8
+PM_AUDIT_RUN_MINUTE=0
+PM_AUDIT_WEEKDAYS_ONLY=true
 PM_AUDIT_PROJECT_PAGE_SIZE=50
 PM_AUDIT_MAX_PROJECTS=100
 PM_AUDIT_MAX_TASKS=500
@@ -36,11 +41,11 @@ PM_AUDIT_SLACK_CHANNEL_ID=
 PM_AUDIT_TEST_SEND=false
 ```
 
-Live PM Slack sends use `PM_AUDIT_SLACK_CHANNEL_ID` when provided. If PM live sending is explicitly enabled and that channel is empty, PM falls back to the existing ServiceTitan Slack channel. PM test sends do not fall back to the live ServiceTitan audit channel.
+Live PM Slack sends require `PM_AUDIT_SLACK_CHANNEL_ID`. PM does not send to `SLACK_ALERT_CHANNEL_ID`.
 
 ```env
 SLACK_BOT_TOKEN=...
-SLACK_ALERT_CHANNEL_ID=...
+PM_AUDIT_SLACK_CHANNEL_ID=C0BDZ5E4GJU
 ```
 
 Use this PM-only test command with synthetic project data:
@@ -51,7 +56,7 @@ python3 -m marketing_os_agent pm-audit-test-slack
 
 It sends only when `PM_AUDIT_TEST_SEND=true`, `PM_AUDIT_SLACK_CHANNEL_ID` is set, and the bot token is configured.
 
-Do not set `PM_AUDIT_DRY_RUN=false` until Jane has reviewed dry-run output.
+Use `PM_AUDIT_DRY_RUN=true` for validation. Set `PM_AUDIT_DRY_RUN=false` only for approved PM live sends to `PM_AUDIT_SLACK_CHANNEL_ID`.
 
 `PM_AUDIT_DRY_RUN=true` is separate from `SERVICE_TITAN_AUDIT_DRY_RUN=true`. For PM-only dry-run validation in Render, set `PM_AUDIT_ENABLED=true` and keep `PM_AUDIT_DRY_RUN=true`; do not change the live ServiceTitan audit dry-run setting unless intentionally pausing Sales/HVAC/Plumbing ServiceTitan alerts.
 
@@ -76,7 +81,7 @@ First scheduled live set:
 PM_AUDIT_ENABLED_RULE_IDS_JSON=["R1","R4","R13","R17"]
 ```
 
-Run this allowlist in dry-run before creating the Cron Job. If R4 produces a high stale-status count, keep R4 out of scheduled live messages and use `["R1","R13","R17"]` until Jane confirms the status timestamp semantics and threshold.
+Run this allowlist in dry-run before enabling the app scheduler. If R4 produces a high stale-status count, keep R4 out of scheduled live messages and use `["R1","R13","R17"]` until Jane confirms the status timestamp semantics and threshold.
 
 Do not include these in the first scheduled PM messages:
 
@@ -120,24 +125,35 @@ The v1 implementation uses project type first. It fetches project metadata, filt
 
 First live candidates after validation are R1 project type, R4 status present/current, R13 task assignee, and R17 completed-with-open-tasks. R3, R6, R7, R11, and R15 should stay dry-run pending revalidation.
 
-## Render Cron Job
+## Main App Scheduler
 
-PM Audit is not registered in the web app startup loop. Deploying the web service does not run `pm-audit-once`; use a Render Cron Job for scheduled PM checks.
-
-Recommended first Cron command:
+PM Audit is registered in the main app runner. The existing Render command stays:
 
 ```bash
-PM_AUDIT_ENABLED=true \
-PM_AUDIT_DRY_RUN=false \
-PM_AUDIT_TEST_SEND=false \
-PM_AUDIT_ENABLED_RULE_IDS_JSON='["R1","R4","R13","R17"]' \
-PM_AUDIT_MAX_PROJECTS=50 \
-PM_AUDIT_PROJECT_PAGE_SIZE=50 \
-PM_AUDIT_MAX_TASKS=500 \
-python3 -m marketing_os_agent pm-audit-once
+python -m marketing_os_agent run
 ```
 
-Start with once daily on weekdays. Do not run more frequently until Jane confirms alert quality. Do not set `SERVICE_TITAN_AUDIT_DRY_RUN=true` for PM Cron; it is unrelated and would pause live Sales/HVAC/Plumbing ServiceTitan alerts.
+No Render Cron Job is required.
+
+Working PM Audit Render env:
+
+```env
+PM_AUDIT_ENABLED=true
+PM_AUDIT_SCHEDULE_ENABLED=true
+PM_AUDIT_RUN_ON_STARTUP=true
+PM_AUDIT_DRY_RUN=false
+PM_AUDIT_SLACK_CHANNEL_ID=C0BDZ5E4GJU
+PM_AUDIT_TEST_SEND=false
+PM_AUDIT_ENABLED_RULE_IDS_JSON=[]
+PM_AUDIT_MAX_PROJECTS=50
+PM_AUDIT_PROJECT_PAGE_SIZE=50
+PM_AUDIT_MAX_TASKS=500
+PM_AUDIT_RUN_HOUR=8
+PM_AUDIT_RUN_MINUTE=0
+PM_AUDIT_WEEKDAYS_ONLY=true
+```
+
+`PM_AUDIT_RUN_ON_STARTUP=true` runs PM Audit shortly after deploy/restart. `PM_AUDIT_SCHEDULE_ENABLED=true` runs it at the configured daily time. A persisted daily marker prevents repeated automatic sends from restart loops; manual `pm-audit-once` remains allowed. Do not set `SERVICE_TITAN_AUDIT_DRY_RUN=true` for PM Audit; it is unrelated and would pause live Sales/HVAC/Plumbing ServiceTitan alerts.
 
 ## Rules Intentionally Skipped
 

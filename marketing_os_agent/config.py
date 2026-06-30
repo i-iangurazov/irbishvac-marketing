@@ -170,11 +170,16 @@ class Settings:
     service_titan_weekly_summary_hour: int
     service_titan_weekly_summary_lookback_days: int
     pm_audit_enabled: bool
+    pm_audit_schedule_enabled: bool
+    pm_audit_run_on_startup: bool
     pm_audit_dry_run: bool
     pm_audit_status_stale_days: int
     pm_audit_task_overdue_days: int
     pm_audit_pm_assignment_grace_hours: int
     pm_audit_task_template_grace_hours: int
+    pm_audit_run_hour: int
+    pm_audit_run_minute: int
+    pm_audit_weekdays_only: bool
     pm_audit_project_page_size: int
     pm_audit_max_projects: int
     pm_audit_max_tasks: int
@@ -335,11 +340,16 @@ class Settings:
             service_titan_weekly_summary_hour=_hour_env("SERVICE_TITAN_WEEKLY_SUMMARY_HOUR", 8),
             service_titan_weekly_summary_lookback_days=max(1, _int_env("SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS", 7)),
             pm_audit_enabled=_bool_env("PM_AUDIT_ENABLED", False),
+            pm_audit_schedule_enabled=_bool_env("PM_AUDIT_SCHEDULE_ENABLED", False),
+            pm_audit_run_on_startup=_bool_env("PM_AUDIT_RUN_ON_STARTUP", False),
             pm_audit_dry_run=_bool_env("PM_AUDIT_DRY_RUN", True),
             pm_audit_status_stale_days=max(1, _int_env("PM_AUDIT_STATUS_STALE_DAYS", 14)),
             pm_audit_task_overdue_days=max(1, _int_env("PM_AUDIT_TASK_OVERDUE_DAYS", 3)),
             pm_audit_pm_assignment_grace_hours=max(0, _int_env("PM_AUDIT_PM_ASSIGNMENT_GRACE_HOURS", 24)),
             pm_audit_task_template_grace_hours=max(0, _int_env("PM_AUDIT_TASK_TEMPLATE_GRACE_HOURS", 48)),
+            pm_audit_run_hour=_hour_env("PM_AUDIT_RUN_HOUR", 8),
+            pm_audit_run_minute=max(0, min(59, _int_env("PM_AUDIT_RUN_MINUTE", 0))),
+            pm_audit_weekdays_only=_bool_env("PM_AUDIT_WEEKDAYS_ONLY", True),
             pm_audit_project_page_size=max(1, _int_env("PM_AUDIT_PROJECT_PAGE_SIZE", 50)),
             pm_audit_max_projects=max(1, _int_env("PM_AUDIT_MAX_PROJECTS", 100)),
             pm_audit_max_tasks=max(0, _int_env("PM_AUDIT_MAX_TASKS", 500)),

@@ -277,11 +277,11 @@ class PMAuditService:
         }
         if not self.settings.pm_audit_dry_run:
             required["SLACK_BOT_TOKEN"] = self.settings.slack_bot_token
-            required["PM_AUDIT_SLACK_CHANNEL_ID or SLACK_ALERT_CHANNEL_ID"] = self._alert_channel()
+            required["PM_AUDIT_SLACK_CHANNEL_ID"] = self._alert_channel()
         return [key for key, value in required.items() if not value]
 
     def _alert_channel(self) -> str:
-        return self.settings.pm_audit_slack_channel_id or self.settings.slack_alert_channel_id
+        return self.settings.pm_audit_slack_channel_id
 
 
 def _run_pm_rules(project: ServiceTitanProject, settings: Settings, now: datetime) -> list[PMRuleResult]:

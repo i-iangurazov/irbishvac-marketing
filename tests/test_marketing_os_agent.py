@@ -79,6 +79,8 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         service_titan_weekly_summary_hour=8,
         service_titan_weekly_summary_lookback_days=7,
         pm_audit_enabled=False,
+        pm_audit_schedule_enabled=False,
+        pm_audit_run_on_startup=False,
         pm_audit_dry_run=True,
         pm_audit_status_stale_days=14,
         pm_audit_task_overdue_days=3,
@@ -87,6 +89,9 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         pm_audit_project_page_size=50,
         pm_audit_max_projects=100,
         pm_audit_max_tasks=500,
+        pm_audit_run_hour=8,
+        pm_audit_run_minute=0,
+        pm_audit_weekdays_only=True,
         pm_audit_enabled_rule_ids=[],
         pm_audit_sold_by_field_names=["Sold By", "Sold by", "Comfort Advisor", "Sold By CA"],
         pm_audit_permit_field_names=["PERMIT", "Permit", "Permit Number", "Permit #", "Permit Status"],
@@ -1003,10 +1008,23 @@ class MarketingOsAgentTests(unittest.TestCase):
                     return result
         raise AssertionError(f"PM rule not found: {rule_id}")
 
+    def _pm_app(self, projects: list[ServiceTitanProject], **overrides: object) -> AgentApp:
+        audit_settings = settings(self.h.settings.sqlite_path, **overrides)
+        app = AgentApp(audit_settings)
+        app.db = self.h.db
+        app.slack = self.h.slack
+        app.pm_audit = PMAuditService(audit_settings, FakePMServiceTitan(projects), self.h.slack)
+        return app
+
     def test_pm_audit_defaults_disabled(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path)
         self.assertFalse(audit_settings.pm_audit_enabled)
+        self.assertFalse(audit_settings.pm_audit_schedule_enabled)
+        self.assertFalse(audit_settings.pm_audit_run_on_startup)
         self.assertTrue(audit_settings.pm_audit_dry_run)
+        self.assertEqual(audit_settings.pm_audit_run_hour, 8)
+        self.assertEqual(audit_settings.pm_audit_run_minute, 0)
+        self.assertTrue(audit_settings.pm_audit_weekdays_only)
         self.assertEqual(audit_settings.pm_audit_project_page_size, 50)
         self.assertEqual(audit_settings.pm_audit_max_projects, 100)
         self.assertEqual(audit_settings.pm_audit_max_tasks, 500)
@@ -1046,6 +1064,125 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.status, "disabled")
         self.assertEqual(summary.projects_scanned, 0)
         self.assertEqual(self.h.slack.messages, [])
+
+    def test_pm_audit_scheduler_should_run_when_enabled(self) -> None:
+        app = self._pm_app(
+            [pm_project()],
+            pm_audit_enabled=True,
+            pm_audit_schedule_enabled=True,
+            pm_audit_run_hour=8,
+            pm_audit_run_minute=15,
+            pm_audit_weekdays_only=True,
+        )
+        self.assertTrue(app.should_run_pm_audit_at(datetime(2026, 6, 30, 8, 15, tzinfo=timezone.utc)))
+        self.assertFalse(app.should_run_pm_audit_at(datetime(2026, 6, 30, 8, 16, tzinfo=timezone.utc)))
+        self.assertFalse(app.should_run_pm_audit_at(datetime(2026, 6, 28, 8, 15, tzinfo=timezone.utc)))
+
+    def test_pm_audit_scheduler_does_not_run_when_disabled(self) -> None:
+        app = self._pm_app(
+            [pm_project()],
+            pm_audit_enabled=True,
+            pm_audit_schedule_enabled=False,
+            pm_audit_run_hour=8,
+            pm_audit_run_minute=0,
+        )
+        self.assertFalse(app.should_run_pm_audit_at(datetime(2026, 6, 30, 8, 0, tzinfo=timezone.utc)))
+        disabled = self._pm_app([pm_project()], pm_audit_enabled=False, pm_audit_schedule_enabled=True)
+        self.assertIsNone(disabled.run_pm_audit_automatic("scheduled", datetime(2026, 6, 30, 8, tzinfo=timezone.utc)))
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_pm_audit_startup_run_runs_when_enabled(self) -> None:
+        app = self._pm_app(
+            [pm_project("pm-startup", custom_fields={"Sold By": "", "Permit": "P-1"})],
+            pm_audit_enabled=True,
+            pm_audit_run_on_startup=True,
+            pm_audit_dry_run=True,
+        )
+        summary = app.run_pm_audit_automatic("startup", datetime(2026, 6, 30, 8, tzinfo=timezone.utc))
+        self.assertIsNotNone(summary)
+        self.assertGreater(summary.fail_count, 0)
+        self.assertEqual(summary.alerts_would_send, 1)
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_pm_audit_automatic_dry_run_sends_no_slack(self) -> None:
+        app = self._pm_app(
+            [pm_project("pm-auto-dry", custom_fields={"Sold By": "", "Permit": "P-1"})],
+            pm_audit_enabled=True,
+            pm_audit_schedule_enabled=True,
+            pm_audit_dry_run=True,
+        )
+        summary = app.run_pm_audit_automatic("scheduled", datetime(2026, 6, 30, 8, tzinfo=timezone.utc))
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary.alerts_would_send, 1)
+        self.assertEqual(summary.alerts_sent, 0)
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_pm_audit_automatic_sends_to_pm_channel_not_alert_channel(self) -> None:
+        app = self._pm_app(
+            [pm_project("pm-auto-live", custom_fields={"Sold By": "", "Permit": "P-1"})],
+            pm_audit_enabled=True,
+            pm_audit_schedule_enabled=True,
+            pm_audit_dry_run=False,
+            pm_audit_slack_channel_id="C-PM",
+            slack_alert_channel_id="C-LIVE",
+            slack_bot_token="xoxb-test",
+        )
+        summary = app.run_pm_audit_automatic("scheduled", datetime(2026, 6, 30, 8, tzinfo=timezone.utc))
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary.alerts_sent, 1)
+        self.assertEqual(self.h.slack.messages[0][0], "C-PM")
+        self.assertNotEqual(self.h.slack.messages[0][0], "C-LIVE")
+
+    def test_pm_audit_live_requires_pm_channel_and_does_not_fallback(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            pm_audit_enabled=True,
+            pm_audit_dry_run=False,
+            pm_audit_slack_channel_id="",
+            slack_alert_channel_id="C-LIVE",
+            slack_bot_token="xoxb-test",
+        )
+        summary = PMAuditService(
+            audit_settings,
+            FakePMServiceTitan([pm_project("pm-no-pm-channel", custom_fields={"Sold By": "", "Permit": "P-1"})]),
+            self.h.slack,
+        ).run_once(datetime(2026, 6, 30, 8, tzinfo=timezone.utc))
+        self.assertEqual(summary.status, "config_error")
+        self.assertIn("PM_AUDIT_SLACK_CHANNEL_ID", summary.config_errors)
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_pm_audit_scheduled_dedupes_same_date(self) -> None:
+        app = self._pm_app(
+            [pm_project("pm-dedupe", custom_fields={"Sold By": "", "Permit": "P-1"})],
+            pm_audit_enabled=True,
+            pm_audit_schedule_enabled=True,
+            pm_audit_dry_run=False,
+            pm_audit_slack_channel_id="C-PM",
+            slack_bot_token="xoxb-test",
+        )
+        first = app.run_pm_audit_automatic("scheduled", datetime(2026, 6, 30, 8, tzinfo=timezone.utc))
+        second = app.run_pm_audit_automatic("scheduled", datetime(2026, 6, 30, 9, tzinfo=timezone.utc))
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(len(self.h.slack.messages), 1)
+        self.assertEqual(self.h.db.get_kv("pm_audit_auto_last_run_date"), "2026-06-30")
+
+    def test_manual_pm_audit_once_ignores_automatic_daily_dedupe(self) -> None:
+        self.h.db.set_kv("pm_audit_auto_last_run_date", "2026-06-30")
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            pm_audit_enabled=True,
+            pm_audit_dry_run=False,
+            pm_audit_slack_channel_id="C-PM",
+            slack_bot_token="xoxb-test",
+        )
+        summary = PMAuditService(
+            audit_settings,
+            FakePMServiceTitan([pm_project("pm-manual", custom_fields={"Sold By": "", "Permit": "P-1"})]),
+            self.h.slack,
+        ).run_once(datetime(2026, 6, 30, 10, tzinfo=timezone.utc))
+        self.assertEqual(summary.alerts_sent, 1)
+        self.assertEqual(self.h.slack.messages[0][0], "C-PM")
 
     def test_pm_audit_filters_project_types_before_task_enrichment(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path, pm_audit_project_page_size=50, pm_audit_max_projects=10, pm_audit_max_tasks=10)
