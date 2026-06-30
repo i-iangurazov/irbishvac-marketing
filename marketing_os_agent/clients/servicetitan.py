@@ -167,6 +167,7 @@ class ServiceTitanProject:
     target_completion_date: datetime | None
     actual_completion_date: datetime | None
     business_unit_ids: list[str] = field(default_factory=list)
+    business_unit_names: list[str] = field(default_factory=list)
     job_ids: list[str] = field(default_factory=list)
     project_manager_ids: list[str] = field(default_factory=list)
     project_manager_names: list[str] = field(default_factory=list)
@@ -273,7 +274,13 @@ class ServiceTitanClient:
         }
         projects: list[ServiceTitanProject] = []
         for record in records:
-            project = parse_service_titan_project(record, project_type_names, project_status_names, employee_names)
+            project = parse_service_titan_project(
+                record,
+                project_type_names,
+                project_status_names,
+                employee_names,
+                self.settings.servicetitan_project_url_template,
+            )
             if not _pm_project_matches_scope(project, project_type_ids, exclude_keywords):
                 stats["skipped_out_of_scope"] += 1
                 continue
@@ -1392,12 +1399,14 @@ def parse_service_titan_project(
     project_type_names: dict[str, str],
     project_status_names: dict[str, str],
     employee_names: dict[str, str],
+    project_url_template: str = "https://go.servicetitan.com/#/project/{project_id}",
 ) -> ServiceTitanProject:
-    project_id = str(_raw_value(payload, ("id", "projectId")) or "")
+    project_id = str(_raw_value(payload, ("projectId", "id")) or "")
     project_type_id = str(_raw_value(payload, ("projectTypeId", "projectType.id", "type.id")) or "")
     status_id = str(_raw_value(payload, ("statusId", "projectStatus.id", "status.id")) or "")
     status = _display_value(_raw_value(payload, ("status", "projectStatus.name", "status.name"))) or project_status_names.get(status_id, "")
     project_manager_ids = _id_list(_raw_value(payload, ("projectManagerIds", "projectManagerId", "projectManagers")))
+    business_units = _raw_value(payload, ("businessUnits", "businessUnit", "businessUnitNames", "businessUnitName"))
     custom_fields, custom_fields_available = _project_custom_fields(payload)
     return ServiceTitanProject(
         project_id=project_id,
@@ -1412,15 +1421,27 @@ def parse_service_titan_project(
         start_date=_parse_datetime(_raw_value(payload, ("startDate", "installDate", "scheduledStart", "installationDate"))),
         target_completion_date=_parse_datetime(_raw_value(payload, ("targetCompletionDate", "targetCompletedOn"))),
         actual_completion_date=_parse_datetime(_raw_value(payload, ("actualCompletionDate", "completedOn", "closedOn"))),
-        business_unit_ids=_id_list(_raw_value(payload, ("businessUnitIds", "businessUnits"))),
+        business_unit_ids=_id_list(_raw_value(payload, ("businessUnitIds", "businessUnits", "businessUnit"))),
+        business_unit_names=_name_list(business_units),
         job_ids=_id_list(_raw_value(payload, ("jobIds", "jobs"))),
         project_manager_ids=project_manager_ids,
         project_manager_names=[employee_names[identifier] for identifier in project_manager_ids if identifier in employee_names],
         custom_fields=custom_fields,
         custom_fields_available=custom_fields_available,
-        url=f"https://go.servicetitan.com/#/Project/Index/{project_id}" if project_id else "",
+        url=_build_project_url(project_url_template, project_id),
         raw=payload,
     )
+
+
+def _build_project_url(project_url_template: str, project_id: str) -> str:
+    if not project_id:
+        return ""
+    template = project_url_template or "https://go.servicetitan.com/#/project/{project_id}"
+    try:
+        return template.format(project_id=project_id)
+    except KeyError:
+        logger.warning("servicetitan_project_url_template_invalid", extra={"project_id": project_id})
+        return ""
 
 
 def parse_service_titan_project_task(payload: dict[str, Any]) -> ServiceTitanProjectTask:
@@ -1454,6 +1475,7 @@ def _pm_project_matches_scope(project: ServiceTitanProject, project_type_ids: se
                 project.project_type_name,
                 project.status,
                 *project.business_unit_ids,
+                *project.business_unit_names,
             )
             if value
         ).lower()
@@ -1804,6 +1826,18 @@ def _id_list(value: Any) -> list[str]:
     result: list[str] = []
     for item in values:
         raw = _raw_value(item, ("id", "estimateId", "value")) if isinstance(item, dict) else item
+        if raw is not None and str(raw).strip():
+            result.append(str(raw))
+    return _dedupe_strings(result)
+
+
+def _name_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    for item in values:
+        raw = _raw_value(item, ("name", "displayName", "businessUnitName", "value")) if isinstance(item, dict) else item
         if raw is not None and str(raw).strip():
             result.append(str(raw))
     return _dedupe_strings(result)

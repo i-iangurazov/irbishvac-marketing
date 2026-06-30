@@ -157,6 +157,7 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         servicetitan_base_url="https://api.servicetitan.io",
         servicetitan_auth_url="https://auth.servicetitan.io/connect/token",
         servicetitan_job_url_template="https://go.servicetitan.com/#/Job/Index/{job_id}",
+        servicetitan_project_url_template="https://go.servicetitan.com/#/project/{project_id}",
         smtp_host="",
         smtp_port=587,
         smtp_user="",
@@ -581,7 +582,7 @@ def pm_project(project_id: str = "pm-1001", **overrides: object) -> ServiceTitan
         custom_fields_available=True,
         tasks=[pm_task(project_id=project_id)],
         tasks_available=True,
-        url=f"https://go.servicetitan.com/#/Project/Index/{project_id}",
+        url=f"https://go.servicetitan.com/#/project/{project_id}",
         raw={"id": project_id, "projectTypeId": "63812999", "status": "Scheduled"},
     )
     base.update(overrides)
@@ -1033,6 +1034,7 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertIn("PERMIT", audit_settings.pm_audit_permit_field_names)
         self.assertIn("Permit Number", audit_settings.pm_audit_permit_field_names)
         self.assertFalse(audit_settings.pm_audit_test_send)
+        self.assertEqual(audit_settings.servicetitan_project_url_template, "https://go.servicetitan.com/#/project/{project_id}")
 
     def test_pm_audit_passes_bounded_config_to_client(self) -> None:
         audit_settings = settings(
@@ -1432,6 +1434,33 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(summary.skipped_out_of_scope, 1)
         self.assertEqual(summary.rules_evaluated, 0)
 
+    def test_pm_explicit_service_sales_warranty_recall_labels_are_skipped(self) -> None:
+        projects = [
+            pm_project("pm-service", business_unit_names=["HVAC Service"]),
+            pm_project("pm-sales", business_unit_names=["HVAC Sales"]),
+            pm_project("pm-warranty", project_type_name="Warranty"),
+            pm_project("pm-recall", project_type_name="Recall"),
+        ]
+        summary = self._run_pm_audit(projects)
+        self.assertEqual(summary.in_scope_projects, 0)
+        self.assertEqual(summary.skipped_out_of_scope, 4)
+        self.assertEqual(summary.rules_evaluated, 0)
+
+    def test_pm_parser_preserves_business_unit_names_when_available(self) -> None:
+        parsed = parse_service_titan_project(
+            {
+                "id": "pm-install",
+                "projectTypeId": "63812999",
+                "status": "Scheduled",
+                "businessUnits": [{"id": "1809", "name": "HVAC - Install"}],
+            },
+            {"63812999": "Standard Install"},
+            {},
+            {},
+        )
+        self.assertEqual(parsed.business_unit_ids, ["1809"])
+        self.assertEqual(parsed.business_unit_names, ["HVAC - Install"])
+
     def test_pm_summary_groups_failures_by_pm_and_omits_pii(self) -> None:
         jane_project = pm_project(
             "pm-jane",
@@ -1462,7 +1491,7 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertIn("Field: Permit", text)
         self.assertIn("• Project #127623148 — Task overdue", text)
         self.assertIn("Field: T-884", text)
-        self.assertIn("Link: https://go.servicetitan.com/#/Project/Index/pm-gerson", text)
+        self.assertIn("Link: https://go.servicetitan.com/#/project/pm-gerson", text)
         self.assertIn("Summary:", text)
         for pii in ("Sensitive Customer", "private raw notes", "address", "phone", "email"):
             self.assertNotIn(pii, text)
@@ -1487,6 +1516,63 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertIn("Completed project has open tasks", text)
         self.assertNotIn("No PM assigned", text)
         self.assertNotIn("Sensitive Customer", text)
+
+    def test_pm_project_parser_uses_project_url_template_not_job_link(self) -> None:
+        parsed = parse_service_titan_project(
+            {
+                "id": "131747228",
+                "projectId": "31970134",
+                "number": "131747228",
+                "projectTypeId": "63812999",
+                "status": "Scheduled",
+                "jobIds": ["131747228"],
+            },
+            {"63812999": "Standard Install"},
+            {},
+            {},
+            "https://go.servicetitan.com/#/project/{project_id}",
+        )
+        self.assertEqual(parsed.project_number, "131747228")
+        self.assertEqual(parsed.url, "https://go.servicetitan.com/#/project/31970134")
+        self.assertNotIn("#/Job/Index/131747228", parsed.url)
+
+    def test_pm_slack_formatter_uses_project_link_not_job_link(self) -> None:
+        project = pm_project(
+            "31970134",
+            project_number="131747228",
+            job_ids=["131747228"],
+            custom_fields={"Sold By": "", "Permit": "P-1"},
+            url="https://go.servicetitan.com/#/project/31970134",
+        )
+        summary = self._run_pm_audit([project], pm_audit_enabled_rule_ids=["R6"])
+        text = summary.alert_text(datetime(2026, 6, 24, tzinfo=timezone.utc), "UTC")
+        self.assertIn("Project #131747228", text)
+        self.assertIn("Link: https://go.servicetitan.com/#/project/31970134", text)
+        self.assertNotIn("#/Job/Index/131747228", text)
+
+    def test_pm_missing_project_id_omits_link_instead_of_using_job_link(self) -> None:
+        parsed = parse_service_titan_project(
+            {
+                "number": "131747228",
+                "projectTypeId": "63812999",
+                "status": "Scheduled",
+                "jobIds": ["131747228"],
+            },
+            {"63812999": "Standard Install"},
+            {},
+            {},
+            "https://go.servicetitan.com/#/project/{project_id}",
+        )
+        self.assertEqual(parsed.project_number, "131747228")
+        self.assertEqual(parsed.url, "")
+        summary = self._run_pm_audit(
+            [replace(parsed, custom_fields={"Sold By": "", "Permit": "P-1"}, custom_fields_available=True, tasks=[pm_task(project_id="")], tasks_available=True)],
+            pm_audit_enabled_rule_ids=["R6"],
+        )
+        text = summary.alert_text(datetime(2026, 6, 24, tzinfo=timezone.utc), "UTC")
+        self.assertIn("Project #131747228", text)
+        self.assertNotIn("Link:", text)
+        self.assertNotIn("#/Job/Index/131747228", text)
 
     def test_pm_dry_run_summary_includes_top_fail_and_skip_reasons(self) -> None:
         current_task = pm_task(due_at=datetime(2026, 6, 30, tzinfo=timezone.utc), status="To Do", is_closed=False)

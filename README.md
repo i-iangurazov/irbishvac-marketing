@@ -241,6 +241,8 @@ PM Audit can use a separate test Slack channel with `PM_AUDIT_SLACK_CHANNEL_ID` 
 
 PM Audit can run from the main app scheduler when `PM_AUDIT_SCHEDULE_ENABLED=true`. The existing Render command stays `python -m marketing_os_agent run`; no Render Cron Job is required. Set `PM_AUDIT_RUN_ON_STARTUP=true` to run once after deploy/restart, then use `PM_AUDIT_RUN_HOUR`, `PM_AUDIT_RUN_MINUTE`, and `PM_AUDIT_WEEKDAYS_ONLY` for daily scheduling. PM Audit sends only to `PM_AUDIT_SLACK_CHANNEL_ID`; it does not use `SLACK_ALERT_CHANNEL_ID`.
 
+PM project links use `SERVICE_TITAN_PROJECT_URL_TEMPLATE`, which defaults to `https://go.servicetitan.com/#/project/{project_id}`. PM Audit does not use `SERVICETITAN_JOB_URL_TEMPLATE`.
+
 See [docs/servicetitan-operations-audit.md](docs/servicetitan-operations-audit.md) for setup, required scopes, dedupe behavior, adding rules, manual QA, known field limitations, and Render deployment notes.
 
 ## Manual Testing

@@ -39,6 +39,7 @@ PM_AUDIT_SOLD_BY_FIELD_NAMES=["Sold By","Sold by","Comfort Advisor","Sold By CA"
 PM_AUDIT_PERMIT_FIELD_NAMES=["PERMIT","Permit","Permit Number","Permit #","Permit Status"]
 PM_AUDIT_SLACK_CHANNEL_ID=
 PM_AUDIT_TEST_SEND=false
+SERVICE_TITAN_PROJECT_URL_TEMPLATE=https://go.servicetitan.com/#/project/{project_id}
 ```
 
 Live PM Slack sends require `PM_AUDIT_SLACK_CHANNEL_ID`. PM does not send to `SLACK_ALERT_CHANNEL_ID`.
@@ -155,6 +156,49 @@ PM_AUDIT_WEEKDAYS_ONLY=true
 
 `PM_AUDIT_RUN_ON_STARTUP=true` runs PM Audit shortly after deploy/restart. `PM_AUDIT_SCHEDULE_ENABLED=true` runs it at the configured daily time. A persisted daily marker prevents repeated automatic sends from restart loops; manual `pm-audit-once` remains allowed. Do not set `SERVICE_TITAN_AUDIT_DRY_RUN=true` for PM Audit; it is unrelated and would pause live Sales/HVAC/Plumbing ServiceTitan alerts.
 
+## Project Links
+
+PM Audit links to ServiceTitan Project pages, not Job pages.
+
+```env
+SERVICE_TITAN_PROJECT_URL_TEMPLATE=https://go.servicetitan.com/#/project/{project_id}
+```
+
+The alert text displays the project number, but the URL is built from the actual ServiceTitan project ID. If the project ID is missing, PM Audit omits the link instead of guessing with a linked job ID. PM Audit does not use `SERVICETITAN_JOB_URL_TEMPLATE`.
+
+## Projects View Scope Notes
+
+Jane's manual report flow is:
+
+```text
+Projects -> date range -> Install -> Electrical/HVAC/Plumbing -> Apply -> Search
+```
+
+Read-only API discovery found these project-level fields in the Projects endpoint:
+
+- `projectTypeId`
+- `status` / `statusId`
+- `createdOn`
+- `modifiedOn`
+- `startDate`
+- `businessUnitIds`
+- `jobIds`
+
+The Projects endpoint sample did not expose embedded trade, department, job type, or business-unit names directly. Business-unit names can be joined from `/settings/v2/tenant/{tenant}/business-units`; linked job type and job business-unit details can be joined from bounded `/jpm/v2/tenant/{tenant}/jobs` samples.
+
+Current PM scope still uses project type first: `63812999` Standard Install and `63813000` Construction & Remodel. PM Audit also skips records with explicit Service, Sales, Warranty, Recall, Maintenance, Internal, or R&D labels when those classification labels are present. No hard-coded install business-unit allowlist was added with the project-link fix.
+
+Recommended future scope tightening, after Jane confirms it matches the Projects report view:
+
+- project type is Standard Install or Construction & Remodel;
+- project `businessUnitIds` includes only install BUs:
+  - `1809` HVAC - Install;
+  - `64313020` Plumbing - Install;
+  - `64569731` Electrical - Install;
+- exclude Service, Sales, Warranty, Recall, Maintenance, Internal/R&D.
+
+Do not add automatic classification/tagging writes without explicit write-mode approval.
+
 ## Rules Intentionally Skipped
 
 These are not implemented in v1 because discovery found missing, unsafe, or business-unconfirmed data:
@@ -183,14 +227,14 @@ Jane
 • Project #127623147 — Missing permit field
   Field: Permit
   Action: Fill Project Details PERMIT information
-  Link: https://go.servicetitan.com/#/Project/Index/127623147
+  Link: https://go.servicetitan.com/#/project/127623147
 
 Gerson
 • Project #127623148 — Task overdue
   Field: Task #884
   Action: Update or close overdue task
   Due: Jun 20
-  Link: https://go.servicetitan.com/#/Project/Index/127623148
+  Link: https://go.servicetitan.com/#/project/127623148
 
 Summary: Jane 1 issue · Gerson 1 issue
 Totals: 25 projects evaluated · 2 fails · 6 skips

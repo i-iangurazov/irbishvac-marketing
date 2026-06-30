@@ -21,7 +21,9 @@ PM_RULESET = "PM Audit"
 PM_INSTALL_PROJECT_TYPE_IDS = {"63812999", "63813000"}
 PM_INSTALL_PROJECT_TYPE_NAMES = {"standard install", "construction & remodel", "construction and remodel"}
 PM_OUT_OF_SCOPE_KEYWORDS = (
+    "service",
     "service call",
+    "sales",
     "warranty",
     "recall",
     "home care plan",
@@ -40,13 +42,13 @@ Jane
 • Project #PM-TEST-1001 — Missing PM task template
   Field: Tasks
   Action: Apply PM task template
-  Link: https://go.servicetitan.com/#/Project/Index/PM-TEST-1001
+  Link: https://go.servicetitan.com/#/project/PM-TEST-1001
 
 Gerson
 • Project #PM-TEST-1002 — Task has no assignee
   Field: Task #PM-TASK-884
   Action: Assign task owner
-  Link: https://go.servicetitan.com/#/Project/Index/PM-TEST-1002
+  Link: https://go.servicetitan.com/#/project/PM-TEST-1002
 
 Summary: Jane 1 issue · Gerson 1 issue"""
 
@@ -481,7 +483,11 @@ def _result(
 
 
 def _is_explicitly_out_of_scope(project: ServiceTitanProject) -> bool:
-    text = " ".join(value for value in (project.project_type_name, project.status, *project.business_unit_ids) if value).lower()
+    text = " ".join(
+        value
+        for value in (project.project_type_name, project.status, *project.business_unit_ids, *project.business_unit_names)
+        if value
+    ).lower()
     return any(keyword in text for keyword in PM_OUT_OF_SCOPE_KEYWORDS)
 
 

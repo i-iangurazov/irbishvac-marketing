@@ -252,6 +252,7 @@ class Settings:
     servicetitan_base_url: str
     servicetitan_auth_url: str
     servicetitan_job_url_template: str
+    servicetitan_project_url_template: str
 
     smtp_host: str
     smtp_port: int
@@ -424,6 +425,7 @@ class Settings:
             servicetitan_base_url=service_titan_base_url,
             servicetitan_auth_url=_env("SERVICETITAN_AUTH_URL", "https://auth.servicetitan.io/connect/token"),
             servicetitan_job_url_template=_env("SERVICETITAN_JOB_URL_TEMPLATE"),
+            servicetitan_project_url_template=_env("SERVICE_TITAN_PROJECT_URL_TEMPLATE", "https://go.servicetitan.com/#/project/{project_id}"),
             smtp_host=_env("SMTP_HOST"),
             smtp_port=_int_env("SMTP_PORT", 587),
             smtp_user=_env("SMTP_USER"),
