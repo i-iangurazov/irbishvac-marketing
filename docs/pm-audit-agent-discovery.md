@@ -35,6 +35,8 @@ PM dry-run uses `PM_AUDIT_DRY_RUN=true`, which is separate from `SERVICE_TITAN_A
 | `/equipments/v2/tenant/{tenant}/installed-equipment` | 404 | Not available for PM equipment-registration proof. |
 | `/accounting/v2/tenant/{tenant}/invoices` | Available | Some rows expose `projectId`; project filters were not reliable in the sample. |
 | `/accounting/v2/tenant/{tenant}/payments` | Available | Payment rows did not expose `projectId` in the sample. |
+| `/accounting/v2/tenant/{tenant}/export/invoice-items` | Available, but filtered sample returned overbroad pages | Do not use as PM deposit evidence until scoped filtering is proven. |
+| `/accounting/v2/tenant/{tenant}/export/payments` | Available, but filtered sample returned overbroad pages | Do not use as PM deposit evidence until scoped filtering is proven. |
 | `/jpm/v2/tenant/{tenant}/jobs` | Available | Linked install jobs expose `projectId`, `businessUnitId`, `jobTypeId`, `invoiceId`, `soldById`. |
 | `/settings/v2/tenant/{tenant}/technicians` | Available | Internal person ID/name mapping. |
 | `/settings/v2/tenant/{tenant}/employees` | Available | Internal person ID/name mapping. |
@@ -116,6 +118,10 @@ Task keyword signals found in the bounded sample:
 - Installed equipment endpoint returned 404; equipment registration cannot be verified directly.
 - Payments did not expose `projectId` in the sample. Payment-order rules need more work through invoices/linked jobs.
 - Invoice project filtering appeared unreliable; broad invoice records sometimes include `projectId`, but project-filtered calls returned unscoped pages.
+- Job-filtered invoice calls were reliable in a bounded deposit probe. The safe relationship is project `jobIds` -> `/accounting/invoices?jobId=...`.
+- Export invoice-item and payment endpoints returned overbroad pages in a bounded deposit probe and should not be used for PM rule evidence yet.
+- Scoped invoice rows expose total, balance, invoice date, `paidOn` when fully paid, and sometimes `depositedOn`. Partial payments can be inferred from `total - balance`, but partial payment date was not reliably available.
+- Payment moved from a deposit invoice to an install invoice was not detectable from the safe sampled fields.
 - Task template applied was not found directly. Task presence can be checked, but template identity cannot.
 - On-hold reason text was not found. `Hold` status and `subStatusId` exist, but reason semantics need confirmation.
 
@@ -163,7 +169,7 @@ Install-like job context seen in recent raw jobs:
 | R19 | Homeowner Authorization timing | Yes | Authorization form timestamp | Form name observed, but forms unscoped | Not available safely | High | Skip for now |
 | R20 | Installation Completion Report green | Yes | ICR status | Form name observed, but forms unscoped | Not available safely | High | Skip for now |
 | R21 | Equipment registered | No | Equipment registration/status | Project custom field `Equipment Status`; installed equipment endpoint 404 | Partial | Medium/high | Skip for now |
-| R22 | Deposit before install | Yes | Deposit/payment date and install date | Tasks/invoices partially available; payments not project-scoped | Partial | High | Skip or dry-run only after invoice/job mapping |
+| R22 | Deposit before install | Yes | Deposit/payment amount/date, install date, linked invoices | Project `jobIds` -> `/accounting/invoices?jobId=...` gives invoice total/balance and sometimes `paidOn`/`depositedOn`; payment/export filters were not reliable | Partial | Medium/high because partial payment date and moved-payment history may be missing | Dry-run only; skip when invoice/payment linkage is unclear |
 | R23 | Permit before install | Yes | Permit date/status and install date | Project custom field `Permit`; project `startDate` | Partial | Medium until permit field value/date semantics are checked | Dry-run only |
 
 ## Recommended PM Audit V1 Scope

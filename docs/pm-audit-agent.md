@@ -199,6 +199,71 @@ Recommended future scope tightening, after Jane confirms it matches the Projects
 
 Do not add automatic classification/tagging writes without explicit write-mode approval.
 
+## Deposit Tracking Discovery
+
+Discovery date: 2026-06-30.
+
+Business rule under review:
+
+- deposit is required before install scheduling;
+- expected deposit is `$1,000` or `10%` of job total, whichever is less;
+- deposit is created as a project invoice in ServiceTitan;
+- after payment arrives, PM removes the Deposit service line and moves payment to the installation invoice.
+
+Read-only ServiceTitan discovery found a partially reliable structured path:
+
+```text
+project -> project.jobIds -> accounting invoices filtered by jobId
+```
+
+Trusted data observed from `/accounting/v2/tenant/{tenant}/invoices?jobId=...`:
+
+- invoice ID;
+- invoice `projectId`;
+- linked job ID;
+- invoice total;
+- invoice balance;
+- `paidOn` when fully paid;
+- `depositedOn` when available;
+- invoice date;
+- nested invoice item names/totals.
+
+Unreliable or unsafe for v1:
+
+- `/accounting/v2/tenant/{tenant}/invoices?projectId=...` returned rows, but sampled rows did not match the requested project ID.
+- `/accounting/v2/tenant/{tenant}/export/invoice-items?invoiceIds=...` returned overbroad pages and ignored filters in the sample.
+- `/accounting/v2/tenant/{tenant}/payments` and `/accounting/v2/tenant/{tenant}/export/payments` returned payment-shaped rows, but sampled `invoiceId` / `projectId` filters did not produce reliable invoice-linked matches.
+- No safe structured signal was found for "payment moved from deposit invoice to install invoice."
+
+What can be inferred safely today:
+
+- A linked project/job invoice with `total > balance` indicates some payment has been applied.
+- A fully paid invoice may expose `paidOn` and sometimes `depositedOn`.
+- A partial deposit may appear only as `invoice total - invoice balance`; the payment date may not be available from the scoped invoice row.
+- Deposit line-item detection is not reliable after PM removes the Deposit service line.
+
+Recommended R22 dry-run behavior:
+
+- evaluate only when project install date exists;
+- evaluate only when linked job invoices can be fetched by `jobId`;
+- pass if structured invoice data shows payment applied before the configured deposit deadline;
+- skip if invoice relationship, payment amount, or payment date cannot be determined safely;
+- do not fail based on unscoped payment/export endpoints.
+
+Recommended deposit-received notification behavior:
+
+- keep disabled until a reliable payment event source is mapped;
+- trigger only when a newly detected payment can be linked to a project or invoice;
+- use PM Slack channel only;
+- include project number, invoice ID, amount, status/date if available, and project link;
+- do not include customer name, address, phone, email, or raw notes.
+
+Email and office-number notifications:
+
+- This repo currently has outbound SMTP email support for reports/tests.
+- No Gmail inbox reader, Dialpad integration, SMS parser, or office-number ingestion path was found.
+- If deposit notifications must come from email/SMS, implement that as a separate read-only integration with strict PII filtering and message dedupe.
+
 ## Rules Intentionally Skipped
 
 These are not implemented in v1 because discovery found missing, unsafe, or business-unconfirmed data:
