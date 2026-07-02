@@ -35,6 +35,9 @@ PM_AUDIT_PROJECT_PAGE_SIZE=50
 PM_AUDIT_MAX_PROJECTS=100
 PM_AUDIT_MAX_TASKS=500
 PM_AUDIT_ENABLED_RULE_IDS_JSON=[]
+PM_AUDIT_INSTALL_BUSINESS_UNIT_IDS_JSON=["1809","64313020","64569731"]
+PM_AUDIT_INSTALL_BUSINESS_UNIT_NAMES_JSON=["HVAC - Install","Plumbing - Install","Electrical - Install"]
+PM_AUDIT_INCLUDE_CLIENT_NAME=false
 PM_AUDIT_SOLD_BY_FIELD_NAMES=["Sold By","Sold by","Comfort Advisor","Sold By CA"]
 PM_AUDIT_PERMIT_FIELD_NAMES=["PERMIT","Permit","Permit Number","Permit #","Permit Status"]
 PM_AUDIT_HOA_FIELD_NAMES=["HOA Approval","Under HOA","HOA Status","HOA"]
@@ -127,6 +130,14 @@ Out of scope:
 - Free diagnostic
 - Internal / R&D
 
+PM Audit also filters projects to install business units before loading tasks or invoices. Defaults are:
+
+- `1809` / HVAC - Install
+- `64313020` / Plumbing - Install
+- `64569731` / Electrical - Install
+
+This prevents Service, Sales, Warranty, Recall, Maintenance, and other non-install projects from skewing PM reports when ServiceTitan marks them with a broad project type such as Standard Install. If ServiceTitan only exposes business-unit names, `PM_AUDIT_INSTALL_BUSINESS_UNIT_NAMES_JSON` is used as a fallback. Projects with no matching install BU are skipped before task/invoice enrichment.
+
 The v1 implementation uses project type first. It fetches project metadata, filters to the PM install project types, then loads tasks only for the bounded in-scope project set. Use `PM_AUDIT_MAX_PROJECTS` and `PM_AUDIT_MAX_TASKS` to keep dry-run validation fast and predictable. If data is missing or uncertain, rules return `skip` rather than failing.
 
 ## Rules Implemented
@@ -160,6 +171,8 @@ The v1 implementation uses project type first. It fetches project metadata, filt
 
 First live candidates after validation are R1 project type, R13 task assignee, and R17 completed-with-open-tasks. R3, R4, R6, R7, R8-R10, R11, R15, and R16-R28 should stay dry-run pending revalidation.
 
+R4 stale-status failures are intentionally not part of the first live allowlist because dry-run validation showed stale status can be noisy when ServiceTitan status data is inconsistent.
+
 ## Main App Scheduler
 
 PM Audit is registered in the main app runner. The existing Render command stays:
@@ -180,6 +193,8 @@ PM_AUDIT_DRY_RUN=false
 PM_AUDIT_SLACK_CHANNEL_ID=C0BDZ5E4GJU
 PM_AUDIT_TEST_SEND=false
 PM_AUDIT_ENABLED_RULE_IDS_JSON=["R1","R13","R17"]
+PM_AUDIT_INSTALL_BUSINESS_UNIT_IDS_JSON=["1809","64313020","64569731"]
+PM_AUDIT_INCLUDE_CLIENT_NAME=false
 PM_AUDIT_MAX_PROJECTS=50
 PM_AUDIT_PROJECT_PAGE_SIZE=50
 PM_AUDIT_MAX_TASKS=500
@@ -321,6 +336,8 @@ These are implemented as skip-safe rules, but should remain out of scheduled liv
 ## Slack / Dry-Run Output
 
 PM output is grouped by PM and excludes customer names, addresses, phone numbers, emails, raw notes, raw descriptions, and customer summaries.
+
+If PM leadership approves client names in the private PM audit channel, set `PM_AUDIT_INCLUDE_CLIENT_NAME=true`. This adds a single `Client:` line to PM failure blocks. It remains `false` by default.
 
 Example:
 

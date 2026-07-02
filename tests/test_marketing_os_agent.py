@@ -93,6 +93,9 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         pm_audit_run_minute=0,
         pm_audit_weekdays_only=True,
         pm_audit_enabled_rule_ids=[],
+        pm_audit_install_business_unit_ids=["1809", "64313020", "64569731"],
+        pm_audit_install_business_unit_names=["HVAC - Install", "Plumbing - Install", "Electrical - Install"],
+        pm_audit_include_client_name=False,
         pm_audit_sold_by_field_names=["Sold By", "Sold by", "Comfort Advisor", "Sold By CA"],
         pm_audit_permit_field_names=["PERMIT", "Permit", "Permit Number", "Permit #", "Permit Status"],
         pm_audit_hoa_field_names=["HOA Approval", "Under HOA", "HOA Status", "HOA"],
@@ -1048,6 +1051,9 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(audit_settings.pm_audit_max_projects, 100)
         self.assertEqual(audit_settings.pm_audit_max_tasks, 500)
         self.assertEqual(audit_settings.pm_audit_enabled_rule_ids, [])
+        self.assertEqual(audit_settings.pm_audit_install_business_unit_ids, ["1809", "64313020", "64569731"])
+        self.assertIn("Electrical - Install", audit_settings.pm_audit_install_business_unit_names)
+        self.assertFalse(audit_settings.pm_audit_include_client_name)
         self.assertIn("Comfort Advisor", audit_settings.pm_audit_sold_by_field_names)
         self.assertIn("PERMIT", audit_settings.pm_audit_permit_field_names)
         self.assertIn("Permit Number", audit_settings.pm_audit_permit_field_names)
@@ -1076,6 +1082,7 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(client.query_kwargs["max_projects"], 12)
         self.assertEqual(client.query_kwargs["max_tasks"], 34)
         self.assertEqual(client.query_kwargs["project_type_ids"], {"63812999", "63813000"})
+        self.assertEqual(client.query_kwargs["business_unit_ids"], {"1809", "64313020", "64569731"})
 
     def test_pm_audit_dry_run_does_not_send_slack(self) -> None:
         project = pm_project("pm-dry-run", custom_fields={"Sold by": "Advisor One", "Permit": ""})
@@ -1224,6 +1231,47 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual([project.project_id for project in projects], ["pm-install"])
         self.assertEqual(client.task_calls, ["pm-install"])
         self.assertEqual(client.last_pm_audit_stats["raw_projects_fetched"], 2)
+        self.assertEqual(client.last_pm_audit_stats["skipped_out_of_scope"], 1)
+
+    def test_pm_audit_filters_install_business_units_before_task_enrichment(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path, pm_audit_project_page_size=50, pm_audit_max_projects=10, pm_audit_max_tasks=10)
+        records = [
+            {
+                "id": "pm-hvac-service",
+                "projectTypeId": "63812999",
+                "status": "Scheduled",
+                "businessUnitIds": ["1810"],
+            },
+            {
+                "id": "pm-hvac-install",
+                "projectTypeId": "63812999",
+                "status": "Scheduled",
+                "businessUnitIds": ["1809"],
+            },
+            {
+                "id": "pm-electrical-install",
+                "projectTypeId": "63812999",
+                "status": "Scheduled",
+                "businessUnits": [{"id": "64569731", "name": "Electrical - Install"}],
+            },
+        ]
+        client = FilteringPMServiceTitan(
+            audit_settings,
+            records,
+            {
+                "pm-hvac-install": [pm_task(project_id="pm-hvac-install")],
+                "pm-electrical-install": [pm_task(project_id="pm-electrical-install")],
+            },
+        )
+        projects = client.query_pm_projects(
+            project_type_ids={"63812999"},
+            business_unit_ids={"1809", "64313020", "64569731"},
+            business_unit_names={"HVAC - Install", "Plumbing - Install", "Electrical - Install"},
+            max_projects=10,
+            max_tasks=10,
+        )
+        self.assertEqual([project.project_id for project in projects], ["pm-hvac-install", "pm-electrical-install"])
+        self.assertEqual(client.task_calls, ["pm-hvac-install", "pm-electrical-install"])
         self.assertEqual(client.last_pm_audit_stats["skipped_out_of_scope"], 1)
 
     def test_pm_audit_respects_max_project_and_task_limits(self) -> None:
@@ -1691,6 +1739,34 @@ class MarketingOsAgentTests(unittest.TestCase):
         )
         self.assertEqual(parsed.business_unit_ids, ["1809"])
         self.assertEqual(parsed.business_unit_names, ["HVAC - Install"])
+
+    def test_pm_parser_preserves_client_name_without_showing_by_default(self) -> None:
+        parsed = parse_service_titan_project(
+            {
+                "id": "pm-client",
+                "projectTypeId": "63812999",
+                "status": "Scheduled",
+                "customer": {"name": "Sensitive Customer"},
+            },
+            {"63812999": "Standard Install"},
+            {},
+            {},
+        )
+        self.assertEqual(parsed.client_name, "Sensitive Customer")
+        project = replace(parsed, custom_fields={"Sold By": "", "Permit": "P-1"}, custom_fields_available=True, tasks=[pm_task(project_id="pm-client")], tasks_available=True)
+        summary = self._run_pm_audit([project], pm_audit_enabled_rule_ids=["R6"])
+        self.assertNotIn("Sensitive Customer", summary.alert_text(datetime(2026, 6, 24, tzinfo=timezone.utc), "UTC"))
+
+    def test_pm_alert_can_include_client_name_when_opted_in(self) -> None:
+        project = pm_project(
+            "pm-client-opt-in",
+            project_number="130000111",
+            client_name="Sensitive Customer",
+            custom_fields={"Sold By": "", "Permit": "P-1"},
+        )
+        summary = self._run_pm_audit([project], pm_audit_enabled_rule_ids=["R6"], pm_audit_include_client_name=True)
+        text = summary.alert_text(datetime(2026, 6, 24, tzinfo=timezone.utc), "UTC")
+        self.assertIn("Client: Sensitive Customer", text)
 
     def test_pm_summary_groups_failures_by_pm_and_omits_pii(self) -> None:
         jane_project = pm_project(

@@ -168,6 +168,7 @@ class ServiceTitanProject:
     actual_completion_date: datetime | None
     business_unit_ids: list[str] = field(default_factory=list)
     business_unit_names: list[str] = field(default_factory=list)
+    client_name: str = ""
     job_ids: list[str] = field(default_factory=list)
     project_manager_ids: list[str] = field(default_factory=list)
     project_manager_names: list[str] = field(default_factory=list)
@@ -250,6 +251,8 @@ class ServiceTitanClient:
         self,
         *,
         project_type_ids: set[str] | None = None,
+        business_unit_ids: set[str] | None = None,
+        business_unit_names: set[str] | None = None,
         exclude_keywords: tuple[str, ...] = (),
         max_projects: int | None = None,
         max_tasks: int | None = None,
@@ -285,7 +288,7 @@ class ServiceTitanClient:
                 employee_names,
                 self.settings.servicetitan_project_url_template,
             )
-            if not _pm_project_matches_scope(project, project_type_ids, exclude_keywords):
+            if not _pm_project_matches_scope(project, project_type_ids, business_unit_ids, business_unit_names, exclude_keywords):
                 stats["skipped_out_of_scope"] += 1
                 continue
             stats["in_scope_projects"] += 1
@@ -1482,6 +1485,7 @@ def parse_service_titan_project(
         actual_completion_date=_parse_datetime(_raw_value(payload, ("actualCompletionDate", "completedOn", "closedOn"))),
         business_unit_ids=_id_list(_raw_value(payload, ("businessUnitIds", "businessUnits", "businessUnit"))),
         business_unit_names=_name_list(business_units),
+        client_name=str(_raw_value(payload, ("customer.name", "customer.displayName", "client.name", "clientName", "customerName")) or "").strip(),
         job_ids=_id_list(_raw_value(payload, ("jobIds", "jobs"))),
         project_manager_ids=project_manager_ids,
         project_manager_names=[employee_names[identifier] for identifier in project_manager_ids if identifier in employee_names],
@@ -1524,9 +1528,22 @@ def parse_service_titan_project_task(payload: dict[str, Any]) -> ServiceTitanPro
     )
 
 
-def _pm_project_matches_scope(project: ServiceTitanProject, project_type_ids: set[str] | None, exclude_keywords: tuple[str, ...]) -> bool:
+def _pm_project_matches_scope(
+    project: ServiceTitanProject,
+    project_type_ids: set[str] | None,
+    business_unit_ids: set[str] | None,
+    business_unit_names: set[str] | None,
+    exclude_keywords: tuple[str, ...],
+) -> bool:
     if project_type_ids is not None and project.project_type_id not in project_type_ids:
         return False
+    if business_unit_ids or business_unit_names:
+        business_unit_matched = bool(business_unit_ids and set(project.business_unit_ids) & business_unit_ids)
+        normalized_allowed = {_normalize_key(value) for value in (business_unit_names or set())}
+        normalized_project = {_normalize_key(value) for value in project.business_unit_names}
+        business_unit_matched = business_unit_matched or bool(normalized_allowed and normalized_project & normalized_allowed)
+        if not business_unit_matched:
+            return False
     if exclude_keywords:
         text = " ".join(
             value

@@ -194,6 +194,9 @@ class Settings:
     pm_audit_max_projects: int
     pm_audit_max_tasks: int
     pm_audit_enabled_rule_ids: list[str]
+    pm_audit_install_business_unit_ids: list[str]
+    pm_audit_install_business_unit_names: list[str]
+    pm_audit_include_client_name: bool
     pm_audit_sold_by_field_names: list[str]
     pm_audit_permit_field_names: list[str]
     pm_audit_hoa_field_names: list[str]
@@ -383,6 +386,15 @@ class Settings:
             pm_audit_max_projects=max(1, _int_env("PM_AUDIT_MAX_PROJECTS", 100)),
             pm_audit_max_tasks=max(0, _int_env("PM_AUDIT_MAX_TASKS", 500)),
             pm_audit_enabled_rule_ids=_json_string_list_env("PM_AUDIT_ENABLED_RULE_IDS_JSON", []),
+            pm_audit_install_business_unit_ids=_json_string_list_env(
+                "PM_AUDIT_INSTALL_BUSINESS_UNIT_IDS_JSON",
+                ["1809", "64313020", "64569731"],
+            ),
+            pm_audit_install_business_unit_names=_json_string_list_env(
+                "PM_AUDIT_INSTALL_BUSINESS_UNIT_NAMES_JSON",
+                ["HVAC - Install", "Plumbing - Install", "Electrical - Install"],
+            ),
+            pm_audit_include_client_name=_bool_env("PM_AUDIT_INCLUDE_CLIENT_NAME", False),
             pm_audit_sold_by_field_names=_json_string_list_env(
                 "PM_AUDIT_SOLD_BY_FIELD_NAMES",
                 ["Sold By", "Sold by", "Comfort Advisor", "Sold By CA"],

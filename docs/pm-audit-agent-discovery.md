@@ -148,6 +148,15 @@ Install-like job context seen in recent raw jobs:
 - Plumbing Installation job type: `130772825`
 - Install jobs often carry `projectId` and `invoiceId`.
 
+Implementation update: PM Audit now filters projects to install business units before loading tasks or invoices:
+
+```env
+PM_AUDIT_INSTALL_BUSINESS_UNIT_IDS_JSON=["1809","64313020","64569731"]
+PM_AUDIT_INSTALL_BUSINESS_UNIT_NAMES_JSON=["HVAC - Install","Plumbing - Install","Electrical - Install"]
+```
+
+This is the guard against broad `Standard Install` project categorization and unassigned-PM records that do not belong in Jane's install report view.
+
 ## PM Rules Matrix
 
 | Rule | Name | Core | Data needed | Endpoint/field found | Readiness | False-positive risk | MVP recommendation |

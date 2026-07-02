@@ -96,6 +96,7 @@ class PMAuditSummary:
     alerts_sent: int = 0
     alerts_would_send: int = 0
     errors: int = 0
+    include_client_name: bool = False
     config_errors: list[str] = field(default_factory=list)
     project_audits: list[PMProjectAudit] = field(default_factory=list)
 
@@ -155,8 +156,9 @@ class PMAuditSummary:
                     counts[result.issue] += 1
         return counts.most_common(limit)
 
-    def alert_text(self, now: datetime | None = None, timezone_name: str = "UTC") -> str:
+    def alert_text(self, now: datetime | None = None, timezone_name: str = "UTC", include_client_name: bool | None = None) -> str:
         now = now or datetime.now(timezone.utc)
+        include_client_name = self.include_client_name if include_client_name is None else include_client_name
         local_now = now.astimezone(ZoneInfo(timezone_name))
         groups: dict[str, list[str]] = {}
         clean_counts: dict[str, int] = {}
@@ -165,7 +167,7 @@ class PMAuditSummary:
             if audit.failures:
                 groups.setdefault(pm, [])
                 for failure in audit.failures:
-                    groups[pm].append(_failure_block(audit.project, failure, timezone_name))
+                    groups[pm].append(_failure_block(audit.project, failure, timezone_name, include_client_name=include_client_name))
             elif not audit.skipped_out_of_scope:
                 clean_counts[pm] = clean_counts.get(pm, 0) + 1
 
@@ -193,7 +195,11 @@ class PMAuditService:
 
     def run_once(self, now: datetime | None = None, *, require_enabled: bool = True) -> PMAuditSummary:
         now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        summary = PMAuditSummary(enabled=self.settings.pm_audit_enabled, dry_run=self.settings.pm_audit_dry_run)
+        summary = PMAuditSummary(
+            enabled=self.settings.pm_audit_enabled,
+            dry_run=self.settings.pm_audit_dry_run,
+            include_client_name=self.settings.pm_audit_include_client_name,
+        )
         if require_enabled and not self.settings.pm_audit_enabled:
             summary.status = "disabled"
             logger.info("pm_audit_disabled")
@@ -208,6 +214,8 @@ class PMAuditService:
         try:
             projects = self.client.query_pm_projects(
                 project_type_ids=PM_INSTALL_PROJECT_TYPE_IDS,
+                business_unit_ids=set(self.settings.pm_audit_install_business_unit_ids),
+                business_unit_names=set(self.settings.pm_audit_install_business_unit_names),
                 exclude_keywords=PM_OUT_OF_SCOPE_KEYWORDS,
                 max_projects=self.settings.pm_audit_max_projects,
                 max_tasks=self.settings.pm_audit_max_tasks,
@@ -1048,12 +1056,14 @@ def _permit_owner_is_customer(project: ServiceTitanProject) -> bool:
     return False
 
 
-def _failure_block(project: ServiceTitanProject, result: PMRuleResult, timezone_name: str) -> str:
+def _failure_block(project: ServiceTitanProject, result: PMRuleResult, timezone_name: str, *, include_client_name: bool = False) -> str:
     lines = [
         f"• Project #{project.project_number or project.project_id} — {_short_issue(result)}",
         f"  Field: {result.task_number or result.field}",
         f"  Action: {_action_for_rule(result.rule_id)}",
     ]
+    if include_client_name and project.client_name:
+        lines.insert(1, f"  Client: {project.client_name}")
     if result.due_at:
         lines.append(f"  Due: {_format_date(result.due_at, timezone_name)}")
     elif result.install_date or project.start_date:
