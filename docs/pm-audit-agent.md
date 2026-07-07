@@ -51,8 +51,12 @@ PM_AUDIT_HOMEOWNER_AUTH_WITHIN_HOURS=2
 PM_AUDIT_HOMEOWNER_AUTH_FORM_NAMES=["Homeowner Authorization","Homeowner Authorization Form"]
 PM_AUDIT_COMPLETION_REPORT_FORM_NAMES=["Installation Completion Report","Completion Report"]
 PM_AUDIT_EQUIPMENT_FIELD_NAMES=["Equipment Registered","Equipment Status","Equipment Registration"]
+PM_AUDIT_DEPOSIT_FIXED_AMOUNT=1000
+PM_AUDIT_DEPOSIT_PERCENT=0.10
 PM_AUDIT_DEPOSIT_BEFORE_INSTALL_DAYS=7
+PM_AUDIT_DEPOSIT_ROUNDING_TOLERANCE=5
 PM_AUDIT_DEPOSIT_LINE_ITEM_NAMES=["Deposit","Project Deposit","Installation Deposit"]
+PM_AUDIT_DEPOSIT_PAYMENT_STATUS_VALUES=["Paid","Posted","Succeeded","Completed","Received"]
 PM_AUDIT_PERMIT_BEFORE_INSTALL_DAYS=10
 PM_AUDIT_PROJECT_LEFT_OPEN_DAYS=7
 PM_AUDIT_REBATE_FIELD_NAMES=["Rebate","Rebate Status","Rebate Approval"]
@@ -161,7 +165,7 @@ The v1 implementation uses project type first. It fetches project metadata, filt
 | R19 | Homeowner Authorization timing | Uses structured crew-arrival and Homeowner Authorization timestamps. Skips when forms/timestamps are not safely project-scoped. |
 | R20 | Installation Completion Report green | Checks structured completion-report status for completed installs. Skips when the report is unavailable or not safely scoped. |
 | R21 | Equipment registered | Checks configured structured equipment registration fields on completed projects. Skips when unavailable. |
-| R22 | Deposit before install | Uses linked project/job invoices only. Passes when structured payment is confirmed before install, fails when scoped invoice data shows no payment inside the configured window, and skips if invoice/payment/date linkage is unclear. |
+| R22 | Deposit before install | Uses linked project/job invoices, configured deposit line-item names, invoice balances/payments, and configured payment status values. Expected deposit is `min(PM_AUDIT_DEPOSIT_FIXED_AMOUNT, job_total * PM_AUDIT_DEPOSIT_PERCENT)`. Passes when confirmed deposit paid amount meets expected amount within `PM_AUDIT_DEPOSIT_ROUNDING_TOLERANCE`, fails when no confirmed deposit exists or it is below the required amount, and skips when project total, deposit line, invoice relationship, or payment status is unclear. |
 | R23 | Permit before install | Uses Project Details PERMIT fields inside the configured pre-install window. Customer-pulled permit is honored only when structured permit-owner data says customer. |
 | R24 | Equipment confirmed before scheduling | Uses configured equipment fields for scheduled installs. Skips when the field is unavailable. |
 | R25 | Rebate confirmed before scheduling | Uses configured rebate fields. Skips when applicability or status is unavailable. |
@@ -291,13 +295,28 @@ What can be inferred safely today:
 - A partial deposit may appear only as `invoice total - invoice balance`; the payment date may not be available from the scoped invoice row.
 - Deposit line-item detection is not reliable after PM removes the Deposit service line.
 
-Recommended R22 dry-run behavior:
+Implemented R22 behavior:
 
 - evaluate only when project install date exists;
 - evaluate only when linked job invoices can be fetched by `jobId`;
-- pass if structured invoice data shows payment applied before the configured deposit deadline;
-- skip if invoice relationship, payment amount, or payment date cannot be determined safely;
+- identify deposit invoices by `PM_AUDIT_DEPOSIT_LINE_ITEM_NAMES`;
+- calculate expected deposit as `$1,000` or `10%` of job total, whichever is less;
+- pass if structured payment/balance/status data shows paid deposit amount meets the expected amount within the rounding tolerance;
+- fail if the deposit is missing or below the required amount;
+- skip if invoice relationship, project total, deposit line item, payment amount, or payment status cannot be determined safely;
 - do not fail based on unscoped payment/export endpoints.
+
+R22 can be validated by itself with:
+
+```env
+PM_AUDIT_ENABLED_RULE_IDS_JSON=["R22"]
+```
+
+or combined with the current safe scheduled set:
+
+```env
+PM_AUDIT_ENABLED_RULE_IDS_JSON=["R1","R13","R17","R22"]
+```
 
 Recommended deposit-received notification behavior:
 

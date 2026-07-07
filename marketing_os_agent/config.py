@@ -210,8 +210,12 @@ class Settings:
     pm_audit_homeowner_auth_form_names: list[str]
     pm_audit_completion_report_form_names: list[str]
     pm_audit_equipment_field_names: list[str]
+    pm_audit_deposit_fixed_amount: float
+    pm_audit_deposit_percent: float
     pm_audit_deposit_before_install_days: int
+    pm_audit_deposit_rounding_tolerance: float
     pm_audit_deposit_line_item_names: list[str]
+    pm_audit_deposit_payment_status_values: list[str]
     pm_audit_permit_before_install_days: int
     pm_audit_project_left_open_days: int
     pm_audit_rebate_field_names: list[str]
@@ -435,10 +439,17 @@ class Settings:
                 "PM_AUDIT_EQUIPMENT_FIELD_NAMES",
                 ["Equipment Registered", "Equipment Status", "Equipment Registration"],
             ),
+            pm_audit_deposit_fixed_amount=max(0.0, _float_env("PM_AUDIT_DEPOSIT_FIXED_AMOUNT", 1000.0)),
+            pm_audit_deposit_percent=max(0.0, _float_env("PM_AUDIT_DEPOSIT_PERCENT", 0.10)),
             pm_audit_deposit_before_install_days=max(1, _int_env("PM_AUDIT_DEPOSIT_BEFORE_INSTALL_DAYS", 7)),
+            pm_audit_deposit_rounding_tolerance=max(0.0, _float_env("PM_AUDIT_DEPOSIT_ROUNDING_TOLERANCE", 5.0)),
             pm_audit_deposit_line_item_names=_json_string_list_env(
                 "PM_AUDIT_DEPOSIT_LINE_ITEM_NAMES",
                 ["Deposit", "Project Deposit", "Installation Deposit"],
+            ),
+            pm_audit_deposit_payment_status_values=_json_string_list_env(
+                "PM_AUDIT_DEPOSIT_PAYMENT_STATUS_VALUES",
+                ["Paid", "Posted", "Succeeded", "Completed", "Received"],
             ),
             pm_audit_permit_before_install_days=max(1, _int_env("PM_AUDIT_PERMIT_BEFORE_INSTALL_DAYS", 10)),
             pm_audit_project_left_open_days=max(1, _int_env("PM_AUDIT_PROJECT_LEFT_OPEN_DAYS", 7)),

@@ -178,7 +178,7 @@ This is the guard against broad `Standard Install` project categorization and un
 | R19 | Homeowner Authorization timing | Yes | Authorization form timestamp | Structured project/job-scoped form timestamps only | Implemented skip-safe; unscoped forms skip | High | Dry-run only |
 | R20 | Installation Completion Report green | Yes | ICR status | Structured project/job-scoped form/report status only | Implemented skip-safe; unscoped forms skip | High | Dry-run only |
 | R21 | Equipment registered | No | Equipment registration/status | Configured project fields such as `Equipment Status`; installed equipment endpoint 404 | Implemented skip-safe | Medium/high | Dry-run only |
-| R22 | Deposit before install | Yes | Deposit/payment amount/date, install date, linked invoices | Project `jobIds` -> `/accounting/invoices?jobId=...` gives invoice total/balance and sometimes `paidOn`/`depositedOn`; payment/export filters were not reliable | Partial | Medium/high because partial payment date and moved-payment history may be missing | Dry-run only; skip when invoice/payment linkage is unclear |
+| R22 | Deposit before install | Yes | Deposit line item, job total, paid deposit amount/status, install date, linked invoices | Project `jobIds` -> `/accounting/invoices?jobId=...` gives invoice total/balance, line items, invoice status, and sometimes `paidOn`/`depositedOn`; payment/export filters were not reliable | Implemented amount-based, skip-safe | Medium because moved-payment history may be missing | Controlled R22 allowlist; skip when invoice/payment linkage is unclear |
 | R23 | Permit before install | Yes | Permit date/status and install date | Project Details PERMIT fields plus project `startDate` | Implemented skip-safe | Medium until permit field value/date semantics are checked | Dry-run only |
 | R24 | Equipment confirmed before scheduling | No | Scheduled install date, equipment readiness | Configured equipment fields when available | Implemented skip-safe | Medium until field semantics are confirmed | Dry-run only |
 | R25 | Rebate confirmed before scheduling | No | Rebate applicability/status, scheduled install | Configured rebate fields when available | Implemented skip-safe | Medium/high until applicability is reliable | Dry-run only |
@@ -219,7 +219,7 @@ Dry-run only for initial rollout:
 - R19 Homeowner Authorization timing until forms are safely project/job-scoped.
 - R20 Installation Completion Report green until forms are safely project/job-scoped.
 - R21 equipment registered until ServiceTitan exposes reliable equipment registration or Jane accepts `Equipment Status` as evidence.
-- R22 deposit before install until project/job-linked invoice/payment mapping is proven.
+- R22 deposit before install can be validated with `PM_AUDIT_ENABLED_RULE_IDS_JSON=["R22"]`; keep controlled until Jane confirms alert quality from linked invoice/payment data.
 - R23 permit before install until permit field value/date semantics are confirmed.
 - R24 equipment confirmation until equipment status field semantics are confirmed.
 - R25 rebate confirmation until rebate applicability/status fields are confirmed.

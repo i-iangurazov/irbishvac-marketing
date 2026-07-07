@@ -61,10 +61,20 @@ class PMRuleResult:
     issue: str
     field: str
     action: str
+    details: tuple[str, ...] = ()
     due_at: datetime | None = None
     install_date: datetime | None = None
     task_number: str = ""
     skipped_open_tasks_without_due: int = 0
+
+
+@dataclass(frozen=True)
+class _DepositAssessment:
+    status: str
+    issue: str
+    expected_amount: float | None = None
+    paid_amount: float | None = None
+    job_total: float | None = None
 
 
 @dataclass
@@ -622,17 +632,49 @@ def _rule_equipment_registered(project: ServiceTitanProject, settings: Settings)
 def _rule_deposit_before_install(project: ServiceTitanProject, settings: Settings, now: datetime) -> PMRuleResult:
     if project.start_date is None:
         return _result("R22", "Deposit before install", PM_SKIP, "Install date unavailable.", "Deposit")
-    deadline = project.start_date.astimezone(timezone.utc) - timedelta(days=settings.pm_audit_deposit_before_install_days)
-    if now < deadline:
-        return _result("R22", "Deposit before install", PM_PASS, "Install is not inside deposit confirmation window.", "Deposit", install_date=project.start_date)
     if not project.invoices_available:
         return _result("R22", "Deposit before install", PM_SKIP, "Linked project invoice data unavailable.", "Deposit", install_date=project.start_date)
-    deposit_status = _deposit_confirmation(project, settings)
-    if deposit_status == "confirmed":
-        return _result("R22", "Deposit before install", PM_PASS, "Structured deposit payment is confirmed.", "Deposit", install_date=project.start_date)
-    if deposit_status == "missing":
-        return _result("R22", "Deposit before install", PM_FAIL, "No structured deposit payment confirmation found inside the configured window.", "Deposit", install_date=project.start_date)
-    return _result("R22", "Deposit before install", PM_SKIP, "Deposit payment amount or date cannot be determined safely.", "Deposit", install_date=project.start_date)
+    assessment = _deposit_assessment(project, settings)
+    details = _deposit_details(assessment)
+    if assessment.status == "confirmed":
+        return _result(
+            "R22",
+            "Deposit before install",
+            PM_PASS,
+            "Structured deposit payment meets the required amount.",
+            "Deposit",
+            install_date=project.start_date,
+            details=details,
+        )
+    if assessment.status == "missing":
+        return _result(
+            "R22",
+            "Deposit before install",
+            PM_FAIL,
+            "Deposit missing before install.",
+            "Deposit",
+            install_date=project.start_date,
+            details=details,
+        )
+    if assessment.status == "partial":
+        return _result(
+            "R22",
+            "Deposit before install",
+            PM_FAIL,
+            "Deposit below required amount.",
+            "Deposit",
+            install_date=project.start_date,
+            details=details,
+        )
+    return _result(
+        "R22",
+        "Deposit before install",
+        PM_SKIP,
+        assessment.issue,
+        "Deposit",
+        install_date=project.start_date,
+        details=details,
+    )
 
 
 def _rule_permit_before_install(project: ServiceTitanProject, settings: Settings, now: datetime) -> PMRuleResult:
@@ -736,6 +778,7 @@ def _result(
     install_date: datetime | None = None,
     task_number: str = "",
     skipped_open_tasks_without_due: int = 0,
+    details: tuple[str, ...] = (),
 ) -> PMRuleResult:
     return PMRuleResult(
         rule_id=rule_id,
@@ -744,6 +787,7 @@ def _result(
         issue=issue,
         field=field,
         action="Review the PM project in ServiceTitan and correct the missing or stale operational field.",
+        details=details,
         due_at=due_at,
         install_date=install_date,
         task_number=task_number,
@@ -1002,36 +1046,187 @@ def _name_matches(value: str, names: list[str]) -> bool:
     return any(_normalize(name) == normalized for name in names)
 
 
-def _deposit_confirmation(project: ServiceTitanProject, settings: Settings) -> str:
-    totals = [_money_value(invoice, ("total", "invoiceTotal", "summary.total")) for invoice in project.invoices]
-    balances = [_money_value(invoice, ("balance", "invoiceBalance", "summary.balance")) for invoice in project.invoices]
-    positive_totals = [value for value in totals if value is not None and value > 0]
-    if not positive_totals:
-        return "unclear"
-    expected = min(1000.0, max(positive_totals) * 0.10)
+def _deposit_assessment(project: ServiceTitanProject, settings: Settings) -> _DepositAssessment:
+    job_total = _deposit_job_total(project)
+    if job_total is None or job_total <= 0:
+        return _DepositAssessment("unclear", "Project/job total unavailable.")
+    expected = min(settings.pm_audit_deposit_fixed_amount, job_total * settings.pm_audit_deposit_percent)
     if expected <= 0:
-        return "unclear"
+        return _DepositAssessment("unclear", "Expected deposit cannot be calculated.", job_total=job_total)
 
-    any_paid_without_date = False
-    for invoice in project.invoices:
-        total = _money_value(invoice, ("total", "invoiceTotal", "summary.total"))
-        balance = _money_value(invoice, ("balance", "invoiceBalance", "summary.balance"))
-        if total is None or balance is None:
+    deposit_invoices = [invoice for invoice in project.invoices if _invoice_has_deposit_line(invoice, settings.pm_audit_deposit_line_item_names)]
+    if not deposit_invoices:
+        return _DepositAssessment(
+            "unclear",
+            "Deposit invoice/line item cannot be identified.",
+            expected_amount=expected,
+            job_total=job_total,
+        )
+
+    paid_amount = 0.0
+    payment_data_available = False
+    for invoice in deposit_invoices:
+        invoice_paid_amount = _deposit_paid_amount(invoice, settings.pm_audit_deposit_payment_status_values, project.start_date)
+        if invoice_paid_amount is None:
             continue
-        paid_amount = max(0.0, total - balance)
-        if paid_amount < expected:
-            continue
-        paid_at = _parse_datetime(_nested_raw_value(invoice, ("paidOn", "depositedOn", "paymentDate", "date")))
-        if paid_at is None:
-            any_paid_without_date = True
-            continue
-        if project.start_date and paid_at.astimezone(timezone.utc) <= project.start_date.astimezone(timezone.utc):
-            return "confirmed"
-    if any_paid_without_date:
-        return "unclear"
-    if any(value is not None for value in balances):
-        return "missing"
-    return "unclear"
+        payment_data_available = True
+        paid_amount += max(0.0, invoice_paid_amount)
+
+    if not payment_data_available:
+        return _DepositAssessment(
+            "unclear",
+            "Deposit payment data unavailable or payment status unclear.",
+            expected_amount=expected,
+            job_total=job_total,
+        )
+
+    if paid_amount + settings.pm_audit_deposit_rounding_tolerance >= expected:
+        return _DepositAssessment(
+            "confirmed",
+            "Structured deposit payment meets the required amount.",
+            expected_amount=expected,
+            paid_amount=paid_amount,
+            job_total=job_total,
+        )
+    if paid_amount > 0:
+        return _DepositAssessment(
+            "partial",
+            "Deposit below required amount.",
+            expected_amount=expected,
+            paid_amount=paid_amount,
+            job_total=job_total,
+        )
+    return _DepositAssessment(
+        "missing",
+        "Deposit missing before install.",
+        expected_amount=expected,
+        paid_amount=paid_amount,
+        job_total=job_total,
+    )
+
+
+def _deposit_job_total(project: ServiceTitanProject) -> float | None:
+    raw_total = _money_value(
+        project.raw,
+        (
+            "jobTotal",
+            "projectTotal",
+            "contractTotal",
+            "soldAmount",
+            "total",
+            "summary.total",
+        ),
+    )
+    invoice_totals = [
+        _money_value(invoice, ("total", "invoiceTotal", "summary.total", "subtotal", "amount"))
+        for invoice in project.invoices
+    ]
+    totals = [value for value in [raw_total, *invoice_totals] if value is not None and value > 0]
+    return max(totals) if totals else None
+
+
+def _invoice_has_deposit_line(invoice: dict[str, object], line_item_names: list[str]) -> bool:
+    aliases = [_normalize(value) for value in line_item_names if value.strip()]
+    if not aliases:
+        return False
+    return any(alias in _normalize(text) for text in _invoice_line_texts(invoice) for alias in aliases)
+
+
+def _invoice_line_texts(invoice: dict[str, object]) -> list[str]:
+    texts: list[str] = []
+    nested = _nested_raw_value(invoice, ("lineItems", "items", "invoiceItems"))
+    if isinstance(nested, list):
+        for item in nested:
+            if isinstance(item, dict):
+                texts.extend(_invoice_line_texts(item))
+            elif item:
+                texts.append(str(item))
+    direct_parts = [
+        _nested_raw_value(invoice, ("name",)),
+        _nested_raw_value(invoice, ("description",)),
+        _nested_raw_value(invoice, ("itemName",)),
+        _nested_raw_value(invoice, ("displayName",)),
+        _nested_raw_value(invoice, ("code",)),
+        _nested_raw_value(invoice, ("sku",)),
+        _nested_raw_value(invoice, ("service.name",)),
+    ]
+    direct_text = " ".join(str(part) for part in direct_parts if part)
+    if direct_text:
+        texts.append(direct_text)
+    return texts
+
+
+def _deposit_paid_amount(invoice: dict[str, object], accepted_statuses: list[str], install_date: datetime | None) -> float | None:
+    payments = _nested_raw_value(invoice, ("payments", "paymentRecords", "transactions"))
+    if isinstance(payments, list):
+        total = 0.0
+        saw_payment = False
+        saw_unclear_status = False
+        for payment in payments:
+            if not isinstance(payment, dict):
+                continue
+            amount = _money_value(payment, ("amount", "total", "paymentAmount", "appliedAmount"))
+            if amount is None:
+                continue
+            status = str(_nested_raw_value(payment, ("status", "paymentStatus", "status.name", "state")) or "")
+            paid_at = _parse_datetime(_nested_raw_value(payment, ("paidOn", "postedOn", "depositedOn", "paymentDate", "createdOn")))
+            if paid_at and install_date and paid_at.astimezone(timezone.utc) > install_date.astimezone(timezone.utc):
+                saw_payment = True
+                continue
+            if _payment_status_accepted(status, accepted_statuses) or paid_at:
+                saw_payment = True
+                total += amount
+            elif status:
+                saw_payment = True
+            else:
+                saw_unclear_status = True
+        if saw_unclear_status and total <= 0:
+            return None
+        if saw_payment:
+            return total
+
+    explicit_paid = _money_value(invoice, ("paymentTotal", "paymentsTotal", "paidAmount", "amountPaid"))
+    invoice_total = _money_value(invoice, ("total", "invoiceTotal", "summary.total", "subtotal", "amount"))
+    invoice_balance = _money_value(invoice, ("balance", "invoiceBalance", "summary.balance", "remainingBalance", "amountDue"))
+    paid_from_balance = None
+    if invoice_total is not None and invoice_balance is not None:
+        paid_from_balance = max(0.0, invoice_total - invoice_balance)
+
+    invoice_status = str(_nested_raw_value(invoice, ("status", "invoiceStatus", "status.name", "state")) or "")
+    payment_date = _parse_datetime(_nested_raw_value(invoice, ("paidOn", "depositedOn", "paymentDate", "postedOn")))
+    if payment_date and install_date and payment_date.astimezone(timezone.utc) > install_date.astimezone(timezone.utc):
+        return 0.0
+    has_payment_date = bool(payment_date)
+    if explicit_paid is not None:
+        if _payment_status_accepted(invoice_status, accepted_statuses) or has_payment_date or paid_from_balance is not None:
+            return max(0.0, explicit_paid)
+        return None
+    if paid_from_balance is not None:
+        return paid_from_balance
+    if invoice_total is not None and (_payment_status_accepted(invoice_status, accepted_statuses) or has_payment_date):
+        return max(0.0, invoice_total)
+    if invoice_status:
+        return 0.0
+    return None
+
+
+def _payment_status_accepted(status: str, accepted_statuses: list[str]) -> bool:
+    normalized = _normalize(status)
+    if not normalized:
+        return False
+    accepted = {_normalize(value) for value in accepted_statuses if value.strip()}
+    return normalized in accepted or any(value and value in normalized for value in accepted)
+
+
+def _deposit_details(assessment: _DepositAssessment) -> tuple[str, ...]:
+    details: list[str] = []
+    if assessment.job_total is not None:
+        details.append(f"Job total: {_format_money(assessment.job_total)}")
+    if assessment.expected_amount is not None:
+        details.append(f"Expected deposit: {_format_money(assessment.expected_amount)}")
+    if assessment.paid_amount is not None:
+        details.append(f"Paid deposit: {_format_money(assessment.paid_amount)}")
+    return tuple(details)
 
 
 def _money_value(source: dict[str, object], names: tuple[str, ...]) -> float | None:
@@ -1058,12 +1253,13 @@ def _permit_owner_is_customer(project: ServiceTitanProject) -> bool:
 
 def _failure_block(project: ServiceTitanProject, result: PMRuleResult, timezone_name: str, *, include_client_name: bool = False) -> str:
     lines = [
-        f"• Project #{project.project_number or project.project_id} — {_short_issue(result)}",
+        _pm_project_header(project, result, include_client_name=include_client_name),
         f"  Field: {result.task_number or result.field}",
-        f"  Action: {_action_for_rule(result.rule_id)}",
     ]
-    if include_client_name and project.client_name:
+    if include_client_name and result.rule_id != "R22" and project.client_name:
         lines.insert(1, f"  Client: {project.client_name}")
+    lines.extend(f"  {detail}" for detail in result.details)
+    lines.append(f"  Action: {_action_for_rule(result.rule_id)}")
     if result.due_at:
         lines.append(f"  Due: {_format_date(result.due_at, timezone_name)}")
     elif result.install_date or project.start_date:
@@ -1071,6 +1267,13 @@ def _failure_block(project: ServiceTitanProject, result: PMRuleResult, timezone_
     if project.url:
         lines.append(f"  Link: {project.url}")
     return "\n".join(lines)
+
+
+def _pm_project_header(project: ServiceTitanProject, result: PMRuleResult, *, include_client_name: bool) -> str:
+    header = f"• Project #{project.project_number or project.project_id}"
+    if result.rule_id == "R22" and project.client_name:
+        header = f"{header} — {project.client_name}"
+    return f"{header} — {_short_issue(result)}"
 
 
 def _pm_summary(groups: dict[str, list[str]], clean_counts: dict[str, int]) -> str:
@@ -1103,7 +1306,7 @@ def _short_issue(result: PMRuleResult) -> str:
         "R19": "Homeowner Authorization late",
         "R20": "Completion Report not green",
         "R21": "Equipment not registered",
-        "R22": "Deposit missing before install",
+        "R22": "Deposit below required amount" if "below" in _normalize(result.issue) else "Deposit missing before install",
         "R23": "Permit missing before install",
         "R24": "Equipment not confirmed",
         "R25": "Rebate not confirmed",
@@ -1147,6 +1350,10 @@ def _action_for_rule(rule_id: str) -> str:
 def _format_date(value: datetime, timezone_name: str) -> str:
     local = value.astimezone(ZoneInfo(timezone_name))
     return local.strftime("%b %d").replace(" 0", " ")
+
+
+def _format_money(value: float) -> str:
+    return f"${value:,.2f}"
 
 
 def _normalize(value: str) -> str:

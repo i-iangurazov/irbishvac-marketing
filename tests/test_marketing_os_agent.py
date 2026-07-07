@@ -109,8 +109,12 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         pm_audit_homeowner_auth_form_names=["Homeowner Authorization", "Homeowner Authorization Form"],
         pm_audit_completion_report_form_names=["Installation Completion Report", "Completion Report"],
         pm_audit_equipment_field_names=["Equipment Registered", "Equipment Status", "Equipment Registration"],
+        pm_audit_deposit_fixed_amount=1000.0,
+        pm_audit_deposit_percent=0.10,
         pm_audit_deposit_before_install_days=7,
+        pm_audit_deposit_rounding_tolerance=5.0,
         pm_audit_deposit_line_item_names=["Deposit", "Project Deposit", "Installation Deposit"],
+        pm_audit_deposit_payment_status_values=["Paid", "Posted", "Succeeded", "Completed", "Received"],
         pm_audit_permit_before_install_days=10,
         pm_audit_project_left_open_days=7,
         pm_audit_rebate_field_names=["Rebate", "Rebate Status", "Rebate Approval"],
@@ -1063,7 +1067,12 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(audit_settings.pm_audit_on_hold_max_days, 30)
         self.assertEqual(audit_settings.pm_audit_homeowner_auth_within_hours, 2)
         self.assertIn("Installation Completion Report", audit_settings.pm_audit_completion_report_form_names)
+        self.assertEqual(audit_settings.pm_audit_deposit_fixed_amount, 1000.0)
+        self.assertEqual(audit_settings.pm_audit_deposit_percent, 0.10)
         self.assertEqual(audit_settings.pm_audit_deposit_before_install_days, 7)
+        self.assertEqual(audit_settings.pm_audit_deposit_rounding_tolerance, 5.0)
+        self.assertIn("Project Deposit", audit_settings.pm_audit_deposit_line_item_names)
+        self.assertIn("Received", audit_settings.pm_audit_deposit_payment_status_values)
         self.assertEqual(audit_settings.pm_audit_permit_before_install_days, 10)
         self.assertEqual(audit_settings.pm_audit_project_left_open_days, 7)
         self.assertFalse(audit_settings.pm_audit_test_send)
@@ -1607,17 +1616,125 @@ class MarketingOsAgentTests(unittest.TestCase):
 
     def test_pm_r22_deposit_before_install_pass_fail_skip(self) -> None:
         install_date = datetime(2026, 6, 28, tzinfo=timezone.utc)
-        invoice_paid = {"id": "inv-1", "projectId": "pm-deposit", "jobId": "job-1", "total": 10000, "balance": 9000, "paidOn": "2026-06-20T00:00:00+00:00"}
-        invoice_unpaid = {"id": "inv-2", "projectId": "pm-deposit", "jobId": "job-1", "total": 10000, "balance": 10000}
+
+        def invoice(total: object = 10000, balance: object = 9000, *, line_name: str = "Project Deposit", status: str = "Paid") -> dict[str, object]:
+            return {
+                "id": "inv-1",
+                "projectId": "pm-deposit",
+                "jobId": "job-1",
+                "total": total,
+                "balance": balance,
+                "status": status,
+                "paidOn": "2026-06-20T00:00:00+00:00" if status == "Paid" else "",
+                "lineItems": [{"name": line_name, "amount": 1000}],
+            }
+
         self.assertEqual(
-            self._pm_result(pm_project("pm-deposit", start_date=install_date, invoices=[invoice_paid], invoices_available=True), "R22").status,
+            self._pm_result(pm_project("pm-deposit", start_date=install_date, invoices=[invoice()], invoices_available=True), "R22").status,
             PM_PASS,
         )
         self.assertEqual(
-            self._pm_result(pm_project("pm-deposit", start_date=install_date, invoices=[invoice_unpaid], invoices_available=True), "R22").status,
+            self._pm_result(pm_project("pm-deposit", start_date=install_date, invoices=[invoice(balance=10000, status="Open")], invoices_available=True), "R22").status,
             PM_FAIL,
         )
         self.assertEqual(self._pm_result(pm_project("pm-deposit", start_date=install_date, invoices=[], invoices_available=False), "R22").status, PM_SKIP)
+
+    def test_pm_r22_expected_deposit_uses_lesser_of_fixed_or_percent(self) -> None:
+        install_date = datetime(2026, 6, 28, tzinfo=timezone.utc)
+        smaller_job = {
+            "id": "inv-small",
+            "total": 5000,
+            "balance": 4500,
+            "status": "Paid",
+            "lineItems": [{"name": "Deposit"}],
+        }
+        large_job = {
+            "id": "inv-large",
+            "total": 50000,
+            "balance": 49000,
+            "status": "Paid",
+            "lineItems": [{"name": "Deposit"}],
+        }
+        small_result = self._pm_result(pm_project("pm-small-deposit", start_date=install_date, invoices=[smaller_job], invoices_available=True), "R22")
+        large_result = self._pm_result(pm_project("pm-large-deposit", start_date=install_date, invoices=[large_job], invoices_available=True), "R22")
+        self.assertEqual(small_result.status, PM_PASS)
+        self.assertIn("Expected deposit: $500.00", small_result.details)
+        self.assertEqual(large_result.status, PM_PASS)
+        self.assertIn("Expected deposit: $1,000.00", large_result.details)
+
+    def test_pm_r22_fails_partial_deposit_below_tolerance(self) -> None:
+        install_date = datetime(2026, 6, 28, tzinfo=timezone.utc)
+        partial_invoice = {
+            "id": "inv-partial",
+            "total": 10000,
+            "balance": 9500,
+            "status": "Partially Paid",
+            "lineItems": [{"name": "Installation Deposit"}],
+        }
+        result = self._pm_result(pm_project("pm-partial-deposit", start_date=install_date, invoices=[partial_invoice], invoices_available=True), "R22")
+        self.assertEqual(result.status, PM_FAIL)
+        self.assertIn("below required", result.issue)
+        self.assertIn("Paid deposit: $500.00", result.details)
+
+    def test_pm_r22_respects_rounding_tolerance(self) -> None:
+        install_date = datetime(2026, 6, 28, tzinfo=timezone.utc)
+        within_tolerance = {
+            "id": "inv-tolerance",
+            "total": 10000,
+            "balance": 9004,
+            "status": "Partially Paid",
+            "lineItems": [{"name": "Deposit"}],
+        }
+        result = self._pm_result(pm_project("pm-tolerance-deposit", start_date=install_date, invoices=[within_tolerance], invoices_available=True), "R22")
+        self.assertEqual(result.status, PM_PASS)
+        self.assertIn("Paid deposit: $996.00", result.details)
+
+    def test_pm_r22_skips_when_required_structured_data_is_missing(self) -> None:
+        install_date = datetime(2026, 6, 28, tzinfo=timezone.utc)
+        no_job_total = {"id": "inv-no-total", "balance": 0, "status": "Paid", "lineItems": [{"name": "Deposit"}]}
+        no_deposit_line = {"id": "inv-no-line", "total": 10000, "balance": 9000, "status": "Paid", "lineItems": [{"name": "Install labor"}]}
+        unclear_payment = {"id": "inv-no-pay-data", "total": 10000, "status": "", "lineItems": [{"name": "Deposit"}]}
+        self.assertEqual(self._pm_result(pm_project("pm-no-total", start_date=install_date, invoices=[no_job_total], invoices_available=True), "R22").status, PM_SKIP)
+        self.assertEqual(self._pm_result(pm_project("pm-no-line", start_date=install_date, invoices=[no_deposit_line], invoices_available=True), "R22").status, PM_SKIP)
+        self.assertEqual(self._pm_result(pm_project("pm-no-pay-data", start_date=install_date, invoices=[unclear_payment], invoices_available=True), "R22").status, PM_SKIP)
+
+    def test_pm_r22_runs_alone_with_allowlist_and_formats_safe_slack(self) -> None:
+        install_date = datetime(2026, 6, 28, tzinfo=timezone.utc)
+        invoice_unpaid = {
+            "id": "inv-unpaid",
+            "total": 10000,
+            "balance": 10000,
+            "status": "Open",
+            "lineItems": [{"name": "Project Deposit"}],
+        }
+        project = pm_project(
+            "31970134",
+            project_number="31970134",
+            client_name="Client Example",
+            start_date=install_date,
+            invoices=[invoice_unpaid],
+            invoices_available=True,
+            raw={
+                "id": "31970134",
+                "projectTypeId": "63812999",
+                "status": "Scheduled",
+                "address": "private address",
+                "phone": "555-123-4567",
+                "email": "private@example.com",
+                "notes": "private raw notes",
+            },
+        )
+        summary = self._run_pm_audit([project], pm_audit_enabled_rule_ids=["R22"])
+        rule_ids = [result.rule_id for result in summary.project_audits[0].results]
+        text = summary.alert_text(datetime(2026, 6, 24, tzinfo=timezone.utc), "UTC")
+        self.assertEqual(rule_ids, ["R22"])
+        self.assertEqual(summary.fail_count, 1)
+        self.assertIn("Project #31970134 — Client Example — Deposit missing before install", text)
+        self.assertIn("Expected deposit: $1,000.00", text)
+        self.assertIn("Paid deposit: $0.00", text)
+        self.assertIn("Link: https://go.servicetitan.com/#/project/31970134", text)
+        for forbidden in ("private address", "555-123-4567", "private@example.com", "private raw notes"):
+            self.assertNotIn(forbidden, text)
 
     def test_pm_r23_permit_before_install_pass_fail_skip(self) -> None:
         install_date = datetime(2026, 6, 28, tzinfo=timezone.utc)
