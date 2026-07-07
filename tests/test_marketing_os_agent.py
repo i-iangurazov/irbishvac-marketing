@@ -4063,6 +4063,21 @@ class MarketingOsAgentTests(unittest.TestCase):
         )
         self.assertEqual(maintenance.status, RESULT_NOT_APPLICABLE)
 
+        sold_work_visit = rule.run(
+            plumbing_job(
+                "131543565",
+                estimate_count=0,
+                invoice_total=997.20,
+                invoice_balance=997.20,
+                payment_total=0.0,
+                payments_count=0,
+                repair_sold=True,
+            ),
+            audit_settings,
+        )
+        self.assertEqual(sold_work_visit.status, RESULT_NOT_APPLICABLE)
+        self.assertIn("sold/performed repair work", sold_work_visit.explanation)
+
         insufficient = rule.run(
             plumbing_job(
                 estimate_count=None,

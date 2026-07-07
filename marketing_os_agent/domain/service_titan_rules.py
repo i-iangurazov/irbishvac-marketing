@@ -1459,6 +1459,7 @@ def _plumbing_three_options(job: ServiceTitanJob, settings: Settings, rule: Audi
         "payment_total": job.payment_total,
         "payments_count": job.payments_count,
         "invoice_status": job.invoice_status,
+        "repair_sold": job.repair_sold,
         "billing_no_charge_signal": has_no_charge_signal,
         "billing_charge_signal": has_charge_signal,
     }
@@ -1467,6 +1468,14 @@ def _plumbing_three_options(job: ServiceTitanJob, settings: Settings, rule: Audi
             job,
             RESULT_NOT_APPLICABLE,
             "Structured invoice data shows a zero-dollar no-charge job; Plumbing options rule does not apply.",
+            rule.action,
+            billing_metadata,
+        )
+    if job.repair_sold:
+        return rule.result(
+            job,
+            RESULT_NOT_APPLICABLE,
+            "Structured invoice line items show sold/performed repair work; Plumbing options rule applies to diagnostic/estimate visits, not follow-up work appointments.",
             rule.action,
             billing_metadata,
         )

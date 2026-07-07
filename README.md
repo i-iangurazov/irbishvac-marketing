@@ -213,7 +213,7 @@ The ServiceTitan Operations Audit Agent is disabled by default and runs in the s
 
 - Sales / Comfort Advisor Audit: three options, Sales photos when scoped photos are available, and first-half appointment-window arrival.
 - HVAC Service Audit: three options, payment on completed jobs, diagnosis/service form, photos when scoped photos are available, and arrival-window checks.
-- Plumbing Service Audit: three options, payment on completed jobs, diagnosis/service form, photos when scoped photos are available, and arrival-window checks. It is disabled by default and not approved for live alerts yet. The Plumbing options rule excludes Water Heater Maintenance and zero-dollar no-charge jobs; positive-invoice diagnostic jobs still need business confirmation before live alerts.
+- Plumbing Service Audit: three options, payment on completed jobs, diagnosis/service form, photos when scoped photos are available, and arrival-window checks. It is disabled by default and not approved for live alerts yet. The Plumbing options rule excludes Water Heater Maintenance, zero-dollar/no-charge jobs, and structured sold/performed repair-work visits; positive-invoice diagnostic/estimate visits still need business confirmation before live alerts.
 - `job_left_open_after_visit` is available as an opt-in rule for jobs left open after an appointment end time plus `SERVICE_TITAN_OPEN_JOB_GRACE_MINUTES`; it is disabled unless enabled in `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON`.
 - Legacy Technician Compliance and Dispatcher / Job Quality Audit remain behind explicit flags and should stay disabled until reviewed.
 
