@@ -30,6 +30,7 @@ from marketing_os_agent.config import Settings, load_dotenv
 from marketing_os_agent.app import AgentApp
 from marketing_os_agent.__main__ import _settings_error_diagnostics_text
 from marketing_os_agent.domain.campaign_health import CampaignHealthService
+from marketing_os_agent.domain.install_audit import INSTALL_FAIL, INSTALL_PASS, INSTALL_SKIP, InstallAuditService, active_install_audit_rules
 from marketing_os_agent.domain.owner_mapping import OwnerResolver
 from marketing_os_agent.domain.pm_audit import PM_FAIL, PM_PASS, PM_SKIP, PMAuditService
 from marketing_os_agent.domain.reports import ReportService, month_bounds, select_campaigns_starting_between, week_bounds
@@ -122,6 +123,27 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         pm_audit_change_order_field_names=["Change Order", "Change Order Approval", "Additional Work Approval", "Written Approval"],
         pm_audit_slack_channel_id="",
         pm_audit_test_send=False,
+        install_audit_enabled=False,
+        install_audit_dry_run=True,
+        install_audit_run_on_startup=False,
+        install_audit_schedule_enabled=False,
+        install_audit_slack_channel_id="",
+        install_audit_business_unit_ids=[],
+        install_audit_rule_ids=[],
+        install_audit_max_appointments=100,
+        install_audit_lookback_days=7,
+        install_audit_lookahead_days=2,
+        install_audit_run_hour=8,
+        install_audit_run_minute=0,
+        install_audit_weekdays_only=True,
+        install_audit_first_day_collect_pct=50.0,
+        install_audit_final_day_collect_pct=100.0,
+        install_audit_deposit_reminder_lead_days=1,
+        install_audit_completion_photos_min=1,
+        install_audit_arrival_grace_min=15,
+        install_audit_meal_break_after_hours=5.0,
+        install_audit_second_meal_after_hours=10.0,
+        install_audit_meal_break_min_minutes=30,
         notifications_test_send=False,
         anthropic_api_key="",
         claude_model="claude-test",
@@ -506,6 +528,112 @@ def st_job(
     )
 
 
+def install_job(
+    job_id: str = "install-1001",
+    *,
+    status: str = "In Progress",
+    business_unit_id: str = "install-bu",
+    technician_name: str = "Install Lead",
+    start: datetime | None = datetime(2026, 6, 24, 8, tzinfo=timezone.utc),
+    end: datetime | None = datetime(2026, 6, 24, 16, tzinfo=timezone.utc),
+    appointments: list[dict[str, object]] | None = None,
+    forms: list[dict[str, object]] | None = None,
+    forms_available: bool = True,
+    arrived_at: datetime | None = datetime(2026, 6, 24, 8, tzinfo=timezone.utc),
+    arrived_field_available: bool = True,
+    invoices: list[dict[str, object]] | None = None,
+    invoice_total: float | None = 10000.0,
+    invoice_balance: float | None = 10000.0,
+    payment_total: float | None = 0.0,
+    financing: str | None = "No",
+    deposit_waived: str | None = None,
+    photo_count: int | None = 1,
+    photos_available: bool = True,
+    equipment_count: int | None = 1,
+    equipment_complete: bool | None = True,
+    equipment_available: bool = True,
+    purchase_orders_count: int | None = 1,
+    purchase_orders_available: bool = True,
+    ply_data_available: bool = True,
+    clock_in_at: datetime | None = datetime(2026, 6, 24, 8, tzinfo=timezone.utc),
+    clock_out_at: datetime | None = datetime(2026, 6, 24, 16, tzinfo=timezone.utc),
+    lunch_break_minutes: int | None = 30,
+    time_available: bool = True,
+    review_requested: str | None = "Sent",
+    raw_extra: dict[str, object] | None = None,
+) -> ServiceTitanJob:
+    if appointments is None and start is not None:
+        appointments = [{"id": f"appt-{job_id}", "arrivalWindowStart": start.isoformat(), "arrivalWindowEnd": end.isoformat() if end else ""}]
+    if forms is None and forms_available:
+        forms = [
+            {"name": "Homeowner Authorization Form", "status": "Completed"},
+            {"name": "Installation Completion Form", "status": "Completed"},
+        ]
+    custom_fields: list[dict[str, object]] = []
+    if financing is not None:
+        custom_fields.append({"name": "Financing", "value": financing})
+    if deposit_waived is not None:
+        custom_fields.append({"name": "Deposit Waived", "value": deposit_waived})
+    if review_requested is not None:
+        custom_fields.append({"name": "Review Requested", "value": review_requested})
+    raw = {
+        "id": job_id,
+        "appointments": appointments or [],
+        "invoices": invoices if invoices is not None else [],
+        "customFields": custom_fields,
+        **(raw_extra or {}),
+    }
+    if forms_available:
+        raw["forms"] = forms or []
+    present_fields = {"status", "business_unit", "job_type", "arrival_window", "technician"}
+    if arrived_field_available:
+        present_fields.add("arrived_at")
+    if forms_available:
+        present_fields.add("forms")
+    if photos_available:
+        present_fields.add("photos")
+    if equipment_available:
+        present_fields.add("equipment")
+    if purchase_orders_available:
+        present_fields.add("purchase_orders")
+    if invoice_total is not None or invoice_balance is not None or payment_total is not None or invoices is not None:
+        present_fields.update({"payments", "invoice_line_items", "invoice_status"})
+    if time_available:
+        present_fields.update({"clock_in", "clock_out", "lunch_break"})
+    return replace(
+        st_job(
+            job_id,
+            status=status,
+            technician_name=technician_name,
+            business_unit_id=business_unit_id,
+            business_unit_name="HVAC - Install",
+            job_type_id="install-type",
+            job_type_name="Install",
+            department="Install",
+            trade="HVAC",
+            workflow="Install",
+            arrival_window_start=start,
+            arrival_window_end=end,
+            arrived_at=arrived_at,
+            invoice_total=invoice_total,
+            invoice_balance=invoice_balance,
+            payment_total=payment_total,
+            payments_count=1 if payment_total else 0,
+            photo_count=photo_count,
+            equipment_count=equipment_count,
+            equipment_complete=equipment_complete,
+            purchase_orders_count=purchase_orders_count,
+            ply_data_available=ply_data_available,
+            clock_in_at=clock_in_at,
+            clock_out_at=clock_out_at,
+            lunch_break_minutes=lunch_break_minutes,
+            present_fields=present_fields,
+        ),
+        raw=raw,
+        operational_data={str(item["name"]): str(item["value"]) for item in custom_fields},
+    )
+
+
 def sales_job(job_id: str = "sales-1001", **overrides: object) -> ServiceTitanJob:
     base = dict(
         business_unit_id="bu-sales",
@@ -793,6 +921,32 @@ class FakePMServiceTitan:
         return self.projects
 
 
+class FakeInstallServiceTitan:
+    def __init__(self, jobs: list[ServiceTitanJob] | None = None, fail: bool = False) -> None:
+        self.jobs = jobs or []
+        self.fail = fail
+        self.query_kwargs: dict[str, object] = {}
+        self.last_install_audit_stats: dict[str, int] = {
+            "raw_jobs_fetched": len(self.jobs),
+            "jobs_skipped_out_of_scope": 0,
+            "jobs_enriched": len(self.jobs),
+        }
+
+    def query_install_audit_jobs(self, **kwargs: object) -> list[ServiceTitanJob]:
+        self.query_kwargs = kwargs
+        if self.fail:
+            raise ServiceTitanApiError(503, {"message": "unavailable"})
+        business_unit_ids = set(kwargs.get("business_unit_ids") or set())
+        jobs = [job for job in self.jobs if not business_unit_ids or job.business_unit_id in business_unit_ids]
+        self.last_install_audit_stats = {
+            "raw_jobs_fetched": len(self.jobs),
+            "jobs_skipped_out_of_scope": len(self.jobs) - len(jobs),
+            "jobs_enriched": len(jobs),
+        }
+        max_appointments = int(kwargs.get("max_appointments") or len(jobs) or 1)
+        return jobs[:max_appointments]
+
+
 class FilteringPMServiceTitan(ServiceTitanClient):
     def __init__(self, audit_settings: Settings, records: list[dict[str, object]], tasks_by_project: dict[str, list[ServiceTitanProjectTask]]) -> None:
         super().__init__(audit_settings)
@@ -1042,6 +1196,34 @@ class MarketingOsAgentTests(unittest.TestCase):
         app.pm_audit = PMAuditService(audit_settings, FakePMServiceTitan(projects), self.h.slack)
         return app
 
+    def _run_install_audit(self, jobs: list[ServiceTitanJob], **overrides: object):
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            install_audit_enabled=True,
+            install_audit_dry_run=True,
+            install_audit_business_unit_ids=["install-bu"],
+            **overrides,
+        )
+        return InstallAuditService(audit_settings, self.h.db, FakeInstallServiceTitan(jobs), self.h.slack).run_once(
+            datetime(2026, 6, 24, 17, tzinfo=timezone.utc),
+            require_enabled=False,
+        )
+
+    def _install_result(self, job: ServiceTitanJob, rule_id: str, **overrides: object):
+        summary = self._run_install_audit([job], install_audit_rule_ids=[rule_id], **overrides)
+        for result in summary.results:
+            if result.rule_id == rule_id:
+                return result
+        raise AssertionError(f"Install rule not found: {rule_id}")
+
+    def _install_app(self, jobs: list[ServiceTitanJob], **overrides: object) -> AgentApp:
+        audit_settings = settings(self.h.settings.sqlite_path, **overrides)
+        app = AgentApp(audit_settings)
+        app.db = self.h.db
+        app.slack = self.h.slack
+        app.install_audit = InstallAuditService(audit_settings, self.h.db, FakeInstallServiceTitan(jobs), self.h.slack)
+        return app
+
     def test_pm_audit_defaults_disabled(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path)
         self.assertFalse(audit_settings.pm_audit_enabled)
@@ -1077,6 +1259,247 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(audit_settings.pm_audit_project_left_open_days, 7)
         self.assertFalse(audit_settings.pm_audit_test_send)
         self.assertEqual(audit_settings.servicetitan_project_url_template, "https://go.servicetitan.com/#/project/{project_id}")
+
+    def test_install_audit_defaults_disabled(self) -> None:
+        audit_settings = settings(self.h.settings.sqlite_path)
+        self.assertFalse(audit_settings.install_audit_enabled)
+        self.assertTrue(audit_settings.install_audit_dry_run)
+        self.assertFalse(audit_settings.install_audit_run_on_startup)
+        self.assertFalse(audit_settings.install_audit_schedule_enabled)
+        self.assertEqual(audit_settings.install_audit_slack_channel_id, "")
+        self.assertEqual(audit_settings.install_audit_business_unit_ids, [])
+        self.assertEqual(audit_settings.install_audit_rule_ids, [])
+        self.assertEqual(audit_settings.install_audit_max_appointments, 100)
+        self.assertEqual(audit_settings.install_audit_lookback_days, 7)
+        self.assertEqual(audit_settings.install_audit_lookahead_days, 2)
+        self.assertEqual(audit_settings.install_audit_run_hour, 8)
+        self.assertEqual(audit_settings.install_audit_run_minute, 0)
+        self.assertTrue(audit_settings.install_audit_weekdays_only)
+        self.assertEqual(audit_settings.install_audit_first_day_collect_pct, 50.0)
+        self.assertEqual(audit_settings.install_audit_final_day_collect_pct, 100.0)
+        self.assertEqual(audit_settings.install_audit_deposit_reminder_lead_days, 1)
+        self.assertEqual(audit_settings.install_audit_completion_photos_min, 1)
+        self.assertEqual(audit_settings.install_audit_arrival_grace_min, 15)
+        self.assertEqual(audit_settings.install_audit_meal_break_after_hours, 5.0)
+        self.assertEqual(audit_settings.install_audit_second_meal_after_hours, 10.0)
+        self.assertEqual(audit_settings.install_audit_meal_break_min_minutes, 30)
+
+    def test_install_audit_manual_command_path_runs_when_auto_disabled(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            install_audit_enabled=False,
+            install_audit_dry_run=True,
+            install_audit_business_unit_ids=["install-bu"],
+            install_audit_rule_ids=["I1"],
+        )
+        app = AgentApp(audit_settings)
+        app.db = self.h.db
+        app.install_audit = InstallAuditService(audit_settings, self.h.db, FakeInstallServiceTitan([install_job(status="Completed")]), self.h.slack)
+        summary = app.run_install_audit_once(datetime(2026, 6, 24, 17, tzinfo=timezone.utc))
+        self.assertEqual(summary.status, "completed")
+        self.assertEqual(summary.rules_evaluated, 1)
+        self.assertEqual(summary.pass_count, 1)
+
+    def test_install_audit_scheduler_startup_and_daily_dedupe(self) -> None:
+        app = self._install_app(
+            [install_job("install-auto", status="In Progress", end=datetime(2026, 6, 24, 12, tzinfo=timezone.utc))],
+            install_audit_enabled=True,
+            install_audit_schedule_enabled=True,
+            install_audit_dry_run=True,
+            install_audit_business_unit_ids=["install-bu"],
+            install_audit_rule_ids=["I1"],
+            install_audit_run_hour=8,
+            install_audit_run_minute=15,
+            install_audit_weekdays_only=True,
+        )
+        self.assertTrue(app.should_run_install_audit_at(datetime(2026, 6, 24, 8, 15, tzinfo=timezone.utc)))
+        self.assertFalse(app.should_run_install_audit_at(datetime(2026, 6, 24, 8, 16, tzinfo=timezone.utc)))
+        first = app.run_install_audit_automatic("startup", datetime(2026, 6, 24, 8, 15, tzinfo=timezone.utc))
+        second = app.run_install_audit_automatic("scheduled", datetime(2026, 6, 24, 9, 0, tzinfo=timezone.utc))
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(self.h.db.get_kv("install_audit_auto_last_run_date"), "2026-06-24")
+        self.assertEqual(self.h.slack.messages, [])
+
+    def test_install_audit_allowlist_and_first_enabled_rules(self) -> None:
+        summary = self._run_install_audit(
+            [install_job("install-allowlist", status="Completed")],
+            install_audit_rule_ids=["I1", "I2", "I3", "I7", "I8"],
+        )
+        self.assertEqual({result.rule_id for result in summary.results}, {"I1", "I2", "I3", "I7", "I8"})
+        default_rules = {rule.rule_id for rule in active_install_audit_rules(settings(self.h.settings.sqlite_path))}
+        self.assertIn("I11", default_rules)
+        self.assertNotIn("I12", default_rules)
+
+    def test_install_i1_pass_fail_skip(self) -> None:
+        self.assertEqual(self._install_result(install_job(status="Completed"), "I1").status, INSTALL_PASS)
+        fail = self._install_result(install_job(status="In Progress", end=datetime(2026, 6, 24, 12, tzinfo=timezone.utc)), "I1")
+        self.assertEqual(fail.status, INSTALL_FAIL)
+        self.assertIn("job status is still", fail.issue)
+        future = self._install_result(
+            install_job(
+                status="In Progress",
+                end=datetime(2026, 6, 25, 16, tzinfo=timezone.utc),
+                forms=[{"name": "Installation Completion Form", "status": "Pending"}],
+            ),
+            "I1",
+        )
+        self.assertEqual(future.status, INSTALL_SKIP)
+
+    def test_install_i2_and_i3_form_rules_pass_fail_skip(self) -> None:
+        complete = install_job(status="Completed")
+        self.assertEqual(self._install_result(complete, "I2").status, INSTALL_PASS)
+        self.assertEqual(self._install_result(complete, "I3").status, INSTALL_PASS)
+
+        missing_completion = install_job(status="Completed", forms=[{"name": "Homeowner Authorization Form", "status": "Completed"}])
+        self.assertEqual(self._install_result(missing_completion, "I2").status, INSTALL_FAIL)
+        missing_auth = install_job(status="In Progress", forms=[{"name": "Installation Completion Form", "status": "Completed"}])
+        self.assertEqual(self._install_result(missing_auth, "I3").status, INSTALL_FAIL)
+
+        forms_unavailable = install_job(status="Completed", forms_available=False, forms=[])
+        self.assertEqual(self._install_result(forms_unavailable, "I2").status, INSTALL_SKIP)
+        not_started = install_job(status="Scheduled", arrived_at=None, clock_in_at=None, forms=[{"name": "Homeowner Authorization Form", "status": "Completed"}])
+        self.assertEqual(self._install_result(not_started, "I3").status, INSTALL_SKIP)
+
+    def test_install_i4_and_i5_arrival_rules_pass_fail_skip(self) -> None:
+        self.assertEqual(self._install_result(install_job(arrived_at=datetime(2026, 6, 24, 8, 5, tzinfo=timezone.utc)), "I4").status, INSTALL_PASS)
+        self.assertEqual(self._install_result(install_job(arrived_at=datetime(2026, 6, 24, 8, 5, tzinfo=timezone.utc)), "I5").status, INSTALL_PASS)
+        missing_arrival = install_job(arrived_at=None, arrived_field_available=True, start=datetime(2026, 6, 24, 8, tzinfo=timezone.utc))
+        self.assertEqual(self._install_result(missing_arrival, "I4").status, INSTALL_FAIL)
+        late = install_job(arrived_at=datetime(2026, 6, 24, 8, 20, tzinfo=timezone.utc), start=datetime(2026, 6, 24, 8, tzinfo=timezone.utc))
+        self.assertEqual(self._install_result(late, "I5").status, INSTALL_FAIL)
+        future = install_job(arrived_at=None, arrived_field_available=True, start=datetime(2026, 6, 25, 8, tzinfo=timezone.utc), end=datetime(2026, 6, 25, 16, tzinfo=timezone.utc))
+        self.assertEqual(self._install_result(future, "I4").status, INSTALL_SKIP)
+        self.assertEqual(self._install_result(missing_arrival, "I5").status, INSTALL_SKIP)
+
+    def test_install_i6_meal_break_pass_fail_skip(self) -> None:
+        self.assertEqual(self._install_result(install_job(lunch_break_minutes=30), "I6").status, INSTALL_PASS)
+        no_break = install_job(lunch_break_minutes=0, raw_extra={"onDutyMealAgreement": "No"})
+        fail = self._install_result(no_break, "I6")
+        self.assertEqual(fail.status, INSTALL_FAIL)
+        self.assertIn("no 30-min meal break", fail.issue)
+        unknown_agreement = install_job(lunch_break_minutes=0)
+        self.assertEqual(self._install_result(unknown_agreement, "I6").status, INSTALL_SKIP)
+        unavailable = install_job(time_available=False, clock_in_at=None, clock_out_at=None, lunch_break_minutes=None)
+        self.assertEqual(self._install_result(unavailable, "I6").status, INSTALL_SKIP)
+        short_day = install_job(clock_in_at=datetime(2026, 6, 24, 8, tzinfo=timezone.utc), clock_out_at=datetime(2026, 6, 24, 12, tzinfo=timezone.utc), lunch_break_minutes=0)
+        self.assertEqual(self._install_result(short_day, "I6").status, INSTALL_SKIP)
+
+    def test_install_i7_deposit_reminder_pass_fail_skip(self) -> None:
+        start = datetime(2026, 6, 25, 8, tzinfo=timezone.utc)
+        invoice_paid = {"id": "inv-dep", "total": 1000, "balance": 0, "status": "Paid", "lineItems": [{"name": "Project Deposit"}]}
+        paid = install_job(status="Scheduled", start=start, end=datetime(2026, 6, 25, 16, tzinfo=timezone.utc), invoices=[invoice_paid], financing="No")
+        self.assertEqual(
+            self._install_result(paid, "I7", install_audit_deposit_reminder_lead_days=1).status,
+            INSTALL_PASS,
+        )
+        missing = install_job(status="Scheduled", start=start, end=datetime(2026, 6, 25, 16, tzinfo=timezone.utc), invoices=[], financing="No")
+        self.assertEqual(
+            self._install_result(missing, "I7", install_audit_deposit_reminder_lead_days=1).status,
+            INSTALL_FAIL,
+        )
+        financed = install_job(status="Scheduled", start=start, end=datetime(2026, 6, 25, 16, tzinfo=timezone.utc), invoices=[], financing="Approved")
+        self.assertEqual(self._install_result(financed, "I7", install_audit_deposit_reminder_lead_days=1).status, INSTALL_SKIP)
+        unclear = install_job(status="Scheduled", start=start, end=datetime(2026, 6, 25, 16, tzinfo=timezone.utc), financing=None)
+        self.assertEqual(self._install_result(unclear, "I7", install_audit_deposit_reminder_lead_days=1).status, INSTALL_SKIP)
+
+    def test_install_i8_payment_milestone_pass_fail_skip(self) -> None:
+        final_fail = install_job(
+            status="Completed",
+            start=datetime(2026, 6, 23, 8, tzinfo=timezone.utc),
+            end=datetime(2026, 6, 23, 16, tzinfo=timezone.utc),
+            invoice_total=10000,
+            invoice_balance=1000,
+            payment_total=9000,
+            financing="No",
+        )
+        self.assertEqual(self._install_result(final_fail, "I8").status, INSTALL_FAIL)
+
+        multi_day = [
+            {"id": "day1", "arrivalWindowStart": "2026-06-23T08:00:00+00:00", "arrivalWindowEnd": "2026-06-23T16:00:00+00:00"},
+            {"id": "day2", "arrivalWindowStart": "2026-06-25T08:00:00+00:00", "arrivalWindowEnd": "2026-06-25T16:00:00+00:00"},
+        ]
+        day1_short = install_job(status="In Progress", appointments=multi_day, invoice_total=10000, invoice_balance=6000, payment_total=4000, financing="No")
+        result = self._install_result(day1_short, "I8")
+        self.assertEqual(result.status, INSTALL_FAIL)
+        self.assertEqual(result.severity, "medium")
+        day1_paid = install_job(status="In Progress", appointments=multi_day, invoice_total=10000, invoice_balance=4000, payment_total=6000, financing="No")
+        self.assertEqual(self._install_result(day1_paid, "I8").status, INSTALL_PASS)
+        same_day = install_job(status="In Progress", invoice_total=10000, invoice_balance=10000, payment_total=0, financing="No")
+        self.assertEqual(self._install_result(same_day, "I8").status, INSTALL_SKIP)
+        financed = install_job(status="Completed", invoice_total=10000, invoice_balance=10000, payment_total=0, financing="Approved")
+        self.assertEqual(self._install_result(financed, "I8").status, INSTALL_SKIP)
+
+    def test_install_i9_i10_i11_i12_skip_when_data_unavailable(self) -> None:
+        job = install_job(
+            status="Completed",
+            photos_available=False,
+            photo_count=None,
+            purchase_orders_available=False,
+            ply_data_available=False,
+            purchase_orders_count=None,
+            equipment_available=False,
+            equipment_count=None,
+            equipment_complete=None,
+            review_requested=None,
+        )
+        self.assertEqual(self._install_result(job, "I9").status, INSTALL_SKIP)
+        self.assertEqual(self._install_result(job, "I10").status, INSTALL_SKIP)
+        self.assertEqual(self._install_result(job, "I11").status, INSTALL_SKIP)
+        self.assertEqual(self._install_result(job, "I12").status, INSTALL_SKIP)
+
+    def test_install_audit_live_slack_uses_install_channel_and_omits_customer_pii(self) -> None:
+        pii_job = install_job(
+            "install-pii",
+            status="In Progress",
+            end=datetime(2026, 6, 24, 12, tzinfo=timezone.utc),
+            raw_extra={
+                "customer": {"name": "Private Customer", "email": "private@example.com", "phone": "555-1212"},
+                "summary": "Raw customer summary with 123 Main St",
+            },
+        )
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            install_audit_enabled=True,
+            install_audit_dry_run=False,
+            install_audit_slack_channel_id="C-INSTALL",
+            pm_audit_slack_channel_id="C-PM",
+            slack_alert_channel_id="C-LIVE",
+            slack_bot_token="xoxb-test",
+            install_audit_business_unit_ids=["install-bu"],
+            install_audit_rule_ids=["I1"],
+        )
+        summary = InstallAuditService(audit_settings, self.h.db, FakeInstallServiceTitan([pii_job]), self.h.slack).run_once(
+            datetime(2026, 6, 24, 17, tzinfo=timezone.utc),
+            require_enabled=True,
+        )
+        self.assertEqual(summary.alerts_sent, 1)
+        self.assertEqual(self.h.slack.messages[0][0], "C-INSTALL")
+        text = self.h.slack.messages[0][1]
+        self.assertIn("HIGH - Installs: Job Not Marked Complete", text)
+        for forbidden in ("Private Customer", "private@example.com", "555-1212", "123 Main St", "Raw customer summary"):
+            self.assertNotIn(forbidden, text)
+
+    def test_install_audit_does_not_change_sales_hvac_plumbing_or_pm_r22(self) -> None:
+        before = [rule.rule_id for rule in active_service_titan_rules(settings(self.h.settings.sqlite_path))]
+        after = [
+            rule.rule_id
+            for rule in active_service_titan_rules(
+                settings(
+                    self.h.settings.sqlite_path,
+                    install_audit_enabled=True,
+                    install_audit_business_unit_ids=["install-bu"],
+                    install_audit_rule_ids=["I1", "I2", "I3", "I7", "I8"],
+                )
+            )
+        ]
+        self.assertEqual(after, before)
+        install_date = datetime(2026, 6, 28, tzinfo=timezone.utc)
+        deposit_invoice = {"id": "inv-1", "total": 10000, "balance": 9000, "status": "Paid", "lineItems": [{"name": "Project Deposit"}]}
+        self.assertEqual(
+            self._pm_result(pm_project("pm-r22-intact", start_date=install_date, invoices=[deposit_invoice], invoices_available=True), "R22").status,
+            PM_PASS,
+        )
 
     def test_pm_audit_passes_bounded_config_to_client(self) -> None:
         audit_settings = settings(

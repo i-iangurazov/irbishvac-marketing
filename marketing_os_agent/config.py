@@ -223,6 +223,27 @@ class Settings:
     pm_audit_change_order_field_names: list[str]
     pm_audit_slack_channel_id: str
     pm_audit_test_send: bool
+    install_audit_enabled: bool
+    install_audit_dry_run: bool
+    install_audit_run_on_startup: bool
+    install_audit_schedule_enabled: bool
+    install_audit_slack_channel_id: str
+    install_audit_business_unit_ids: list[str]
+    install_audit_rule_ids: list[str]
+    install_audit_max_appointments: int
+    install_audit_lookback_days: int
+    install_audit_lookahead_days: int
+    install_audit_run_hour: int
+    install_audit_run_minute: int
+    install_audit_weekdays_only: bool
+    install_audit_first_day_collect_pct: float
+    install_audit_final_day_collect_pct: float
+    install_audit_deposit_reminder_lead_days: int
+    install_audit_completion_photos_min: int
+    install_audit_arrival_grace_min: int
+    install_audit_meal_break_after_hours: float
+    install_audit_second_meal_after_hours: float
+    install_audit_meal_break_min_minutes: int
     notifications_test_send: bool
 
     anthropic_api_key: str
@@ -467,6 +488,27 @@ class Settings:
             ),
             pm_audit_slack_channel_id=_env("PM_AUDIT_SLACK_CHANNEL_ID"),
             pm_audit_test_send=_bool_env("PM_AUDIT_TEST_SEND", False),
+            install_audit_enabled=_bool_env("INSTALL_AUDIT_ENABLED", False),
+            install_audit_dry_run=_bool_env("INSTALL_AUDIT_DRY_RUN", True),
+            install_audit_run_on_startup=_bool_env("INSTALL_AUDIT_RUN_ON_STARTUP", False),
+            install_audit_schedule_enabled=_bool_env("INSTALL_AUDIT_SCHEDULE_ENABLED", False),
+            install_audit_slack_channel_id=_env("INSTALL_AUDIT_SLACK_CHANNEL_ID"),
+            install_audit_business_unit_ids=_json_string_list_env("INSTALL_AUDIT_BUSINESS_UNIT_IDS", []),
+            install_audit_rule_ids=_json_string_list_env("INSTALL_AUDIT_RULE_IDS_JSON", []),
+            install_audit_max_appointments=max(1, _int_env("INSTALL_AUDIT_MAX_APPOINTMENTS", 100)),
+            install_audit_lookback_days=max(0, _int_env("INSTALL_AUDIT_LOOKBACK_DAYS", 7)),
+            install_audit_lookahead_days=max(0, _int_env("INSTALL_AUDIT_LOOKAHEAD_DAYS", 2)),
+            install_audit_run_hour=_hour_env("INSTALL_AUDIT_RUN_HOUR", 8),
+            install_audit_run_minute=max(0, min(59, _int_env("INSTALL_AUDIT_RUN_MINUTE", 0))),
+            install_audit_weekdays_only=_bool_env("INSTALL_AUDIT_WEEKDAYS_ONLY", True),
+            install_audit_first_day_collect_pct=max(0.0, _float_env("INSTALL_AUDIT_FIRST_DAY_COLLECT_PCT", 50.0)),
+            install_audit_final_day_collect_pct=max(0.0, _float_env("INSTALL_AUDIT_FINAL_DAY_COLLECT_PCT", 100.0)),
+            install_audit_deposit_reminder_lead_days=max(0, _int_env("INSTALL_AUDIT_DEPOSIT_REMINDER_LEAD_DAYS", 1)),
+            install_audit_completion_photos_min=max(0, _int_env("INSTALL_AUDIT_COMPLETION_PHOTOS_MIN", 1)),
+            install_audit_arrival_grace_min=max(0, _int_env("INSTALL_AUDIT_ARRIVAL_GRACE_MIN", 15)),
+            install_audit_meal_break_after_hours=max(0.0, _float_env("INSTALL_AUDIT_MEAL_BREAK_AFTER_HOURS", 5.0)),
+            install_audit_second_meal_after_hours=max(0.0, _float_env("INSTALL_AUDIT_SECOND_MEAL_AFTER_HOURS", 10.0)),
+            install_audit_meal_break_min_minutes=max(0, _int_env("INSTALL_AUDIT_MEAL_BREAK_MIN_MINUTES", 30)),
             notifications_test_send=_bool_env("NOTIFICATIONS_TEST_SEND", False),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
             claude_model=_env("CLAUDE_MODEL", "claude-sonnet-4-20250514"),

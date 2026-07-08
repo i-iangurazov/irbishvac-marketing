@@ -14,6 +14,7 @@ from .clients.servicetitan import ServiceTitanClient, ServiceTitanJob
 from .clients.slack import SlackClient
 from .config import HealthReport, Settings
 from .domain.campaign_health import CampaignHealthService
+from .domain.install_audit import INSTALL_AUDIT_TEST_MESSAGE, InstallAuditService, InstallAuditSummary
 from .domain.owner_mapping import OwnerResolver
 from .domain.pm_audit import PM_AUDIT_TEST_MESSAGE, PMAuditService, PMAuditSummary
 from .domain.formatting import format_friday_roundup_email
@@ -103,6 +104,7 @@ class AgentApp:
         self.service_titan_weekly_summary = ServiceTitanWeeklySummaryService(settings, self.db, self.slack)
         self.service_titan_scope_discovery = ServiceTitanScopeDiscovery(settings, self.service_titan)
         self.pm_audit = PMAuditService(settings, self.service_titan, self.slack)
+        self.install_audit = InstallAuditService(settings, self.db, self.service_titan, self.slack)
 
     def initialize_storage(self) -> None:
         self.db.initialize()
@@ -121,6 +123,7 @@ class AgentApp:
         self._log_service_titan_startup_config()
         self._log_service_titan_weekly_summary_config()
         self._log_pm_audit_config()
+        self._log_install_audit_config()
 
         scheduler = Scheduler(self.settings, self.db)
         scheduler.register(ScheduledJob("monday_push", monday_8am, self.run_monday_push))
@@ -138,6 +141,8 @@ class AgentApp:
             )
         if self.settings.pm_audit_enabled and self.settings.pm_audit_schedule_enabled:
             scheduler.register(ScheduledJob("pm_audit", self.should_run_pm_audit_at, self.run_pm_audit_scheduled))
+        if self.settings.install_audit_enabled and self.settings.install_audit_schedule_enabled:
+            scheduler.register(ScheduledJob("install_audit", self.should_run_install_audit_at, self.run_install_audit_scheduled))
 
         http_server = AgentHttpServer(
             "0.0.0.0",
@@ -166,6 +171,15 @@ class AgentApp:
                     target=self._pm_audit_startup_loop,
                     args=(stop_event,),
                     name="pm-audit-startup",
+                    daemon=True,
+                )
+            )
+        if self.settings.install_audit_enabled and self.settings.install_audit_run_on_startup:
+            threads.append(
+                threading.Thread(
+                    target=self._install_audit_startup_loop,
+                    args=(stop_event,),
+                    name="install-audit-startup",
                     daemon=True,
                 )
             )
@@ -233,6 +247,25 @@ class AgentApp:
                 },
             )
 
+    def _log_install_audit_config(self) -> None:
+        if not self.settings.install_audit_enabled:
+            logger.info("install_audit_skipped_disabled")
+            return
+        logger.info(
+            "install_audit_config",
+            extra={
+                "dry_run": self.settings.install_audit_dry_run,
+                "schedule_enabled": self.settings.install_audit_schedule_enabled,
+                "run_on_startup": self.settings.install_audit_run_on_startup,
+                "run_hour": self.settings.install_audit_run_hour,
+                "run_minute": self.settings.install_audit_run_minute,
+                "weekdays_only": self.settings.install_audit_weekdays_only,
+                "enabled_rules": self.settings.install_audit_rule_ids,
+                "business_unit_ids_configured": bool(self.settings.install_audit_business_unit_ids),
+                "slack_channel_configured": bool(self.settings.install_audit_slack_channel_id),
+            },
+        )
+
     def _log_service_titan_weekly_summary_config(self) -> None:
         if not self.settings.service_titan_weekly_summary_enabled:
             logger.info("servicetitan_weekly_summary_disabled")
@@ -272,6 +305,9 @@ class AgentApp:
     def run_pm_audit_once(self, now: datetime | None = None) -> PMAuditSummary:
         return self.pm_audit.run_once(now)
 
+    def run_install_audit_once(self, now: datetime | None = None) -> InstallAuditSummary:
+        return self.install_audit.run_once(now, require_enabled=False)
+
     def should_run_pm_audit_at(self, now: datetime) -> bool:
         if not self.settings.pm_audit_enabled or not self.settings.pm_audit_schedule_enabled:
             return False
@@ -279,8 +315,18 @@ class AgentApp:
             return False
         return now.hour == self.settings.pm_audit_run_hour and now.minute == self.settings.pm_audit_run_minute
 
+    def should_run_install_audit_at(self, now: datetime) -> bool:
+        if not self.settings.install_audit_enabled or not self.settings.install_audit_schedule_enabled:
+            return False
+        if self.settings.install_audit_weekdays_only and now.weekday() >= 5:
+            return False
+        return now.hour == self.settings.install_audit_run_hour and now.minute == self.settings.install_audit_run_minute
+
     def run_pm_audit_scheduled(self, now: datetime | None = None) -> PMAuditSummary | None:
         return self.run_pm_audit_automatic("scheduled", now)
+
+    def run_install_audit_scheduled(self, now: datetime | None = None) -> InstallAuditSummary | None:
+        return self.run_install_audit_automatic("scheduled", now)
 
     def run_pm_audit_automatic(self, trigger: str, now: datetime | None = None) -> PMAuditSummary | None:
         if not self.settings.pm_audit_enabled:
@@ -324,6 +370,40 @@ class AgentApp:
         tz = ZoneInfo(self.settings.timezone)
         return (now or datetime.now(tz)).astimezone(tz)
 
+    def run_install_audit_automatic(self, trigger: str, now: datetime | None = None) -> InstallAuditSummary | None:
+        if not self.settings.install_audit_enabled:
+            logger.info("install_audit_skipped_disabled", extra={"trigger": trigger})
+            return None
+        local_now = self._pm_audit_local_now(now)
+        run_date = local_now.date().isoformat()
+        marker_key = "install_audit_auto_last_run_date"
+        if self.db.get_kv(marker_key) == run_date:
+            logger.info("install_audit_skipped_already_ran_today", extra={"trigger": trigger, "date": run_date})
+            return None
+        self.db.set_kv(marker_key, run_date)
+        logger.info(
+            "install_audit_started",
+            extra={
+                "trigger": trigger,
+                "dry_run": self.settings.install_audit_dry_run,
+                "slack_channel_configured": bool(self.settings.install_audit_slack_channel_id),
+                "enabled_rules": self.settings.install_audit_rule_ids,
+            },
+        )
+        summary = self.install_audit.run_once(local_now.astimezone(timezone.utc), require_enabled=True)
+        logger.info(
+            "install_audit_finished",
+            extra={
+                "trigger": trigger,
+                "status": summary.status,
+                "jobs_scanned": summary.jobs_scanned,
+                "fails": summary.fail_count,
+                "skips": summary.skip_count,
+                "slack_sent": summary.alerts_sent,
+            },
+        )
+        return summary
+
     def _pm_audit_startup_loop(self, stop_event: threading.Event) -> None:
         if stop_event.wait(5):
             return
@@ -331,6 +411,14 @@ class AgentApp:
             self.run_pm_audit_automatic("startup")
         except Exception:
             logger.exception("pm_audit_startup_failed")
+
+    def _install_audit_startup_loop(self, stop_event: threading.Event) -> None:
+        if stop_event.wait(5):
+            return
+        try:
+            self.run_install_audit_automatic("startup")
+        except Exception:
+            logger.exception("install_audit_startup_failed")
 
     def pm_audit_slack_test_text(self) -> tuple[bool, str]:
         send = self.settings.pm_audit_test_send
@@ -359,6 +447,34 @@ class AgentApp:
             lines.append(f"- Slack send: sent to PM_AUDIT_SLACK_CHANNEL_ID (ts={ts})")
             return True, "\n".join(lines)
         lines.append("- Slack send: failed. Check bot token, PM channel ID, and whether the bot is invited to the channel.")
+        return False, "\n".join(lines)
+
+    def install_audit_slack_test_text(self) -> tuple[bool, str]:
+        send = not self.settings.install_audit_dry_run
+        channel = self.settings.install_audit_slack_channel_id
+        lines = [
+            "Install Audit Slack test diagnostics",
+            f"- INSTALL_AUDIT_DRY_RUN: {self.settings.install_audit_dry_run}",
+            "- calls ServiceTitan: false",
+            "- uses PM audit channel fallback: false",
+            f"- INSTALL_AUDIT_SLACK_CHANNEL_ID present: {bool(channel)}",
+            f"- SLACK_BOT_TOKEN present: {bool(self.settings.slack_bot_token)}",
+            "- payload:",
+            INSTALL_AUDIT_TEST_MESSAGE,
+        ]
+        ok = bool(self.settings.slack_bot_token and channel)
+        if not send:
+            lines.append("- Slack send: skipped because INSTALL_AUDIT_DRY_RUN=true")
+            lines.append("- No Slack messages were sent.")
+            return ok, "\n".join(lines)
+        if not self.settings.slack_bot_token or not channel:
+            lines.append("- Slack send: not attempted because Slack token or install audit channel is missing")
+            return False, "\n".join(lines)
+        ts = self.slack.post_message(channel, INSTALL_AUDIT_TEST_MESSAGE)
+        if ts:
+            lines.append(f"- Slack send: sent to INSTALL_AUDIT_SLACK_CHANNEL_ID (ts={ts})")
+            return True, "\n".join(lines)
+        lines.append("- Slack send: failed. Check bot token, install channel ID, and whether the bot is invited to the channel.")
         return False, "\n".join(lines)
 
     def notifications_test_text(self) -> tuple[bool, str]:

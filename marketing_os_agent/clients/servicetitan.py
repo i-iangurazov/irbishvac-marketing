@@ -215,6 +215,11 @@ class ServiceTitanClient:
             "projects_evaluated": 0,
             "tasks_loaded": 0,
         }
+        self.last_install_audit_stats: dict[str, int] = {
+            "raw_jobs_fetched": 0,
+            "jobs_skipped_out_of_scope": 0,
+            "jobs_enriched": 0,
+        }
 
     @property
     def available(self) -> bool:
@@ -245,6 +250,50 @@ class ServiceTitanClient:
             records = self._prefilter_scope_records(records)
         jobs = [self._enrich_job(parse_service_titan_job(record, self.settings)) for record in records]
         self.last_scope_filter_stats["jobs_enriched"] = len(jobs)
+        return jobs
+
+    def query_install_audit_jobs(
+        self,
+        *,
+        business_unit_ids: set[str],
+        window_start: datetime,
+        window_end: datetime,
+        max_appointments: int,
+    ) -> list[ServiceTitanJob]:
+        since = window_start.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+        records = self._get_paginated(
+            f"/jpm/v2/tenant/{self.settings.servicetitan_tenant_id}/jobs",
+            {
+                "modifiedOnOrAfter": since,
+                "pageSize": str(self.settings.service_titan_audit_page_size),
+                "includeTotal": "true",
+                "sort": "+ModifiedOn",
+            },
+        )
+        stats = {
+            "raw_jobs_fetched": len(records),
+            "jobs_skipped_out_of_scope": 0,
+            "jobs_enriched": 0,
+        }
+        jobs: list[ServiceTitanJob] = []
+        clean_business_unit_ids = {value.strip() for value in business_unit_ids if value.strip()}
+        for record in records:
+            parsed = parse_service_titan_job(record, self.settings)
+            if clean_business_unit_ids and parsed.business_unit_id not in clean_business_unit_ids:
+                stats["jobs_skipped_out_of_scope"] += 1
+                continue
+            enriched = self._enrich_job(parsed)
+            if clean_business_unit_ids and enriched.business_unit_id not in clean_business_unit_ids:
+                stats["jobs_skipped_out_of_scope"] += 1
+                continue
+            if _job_known_outside_install_window(enriched, window_start, window_end):
+                stats["jobs_skipped_out_of_scope"] += 1
+                continue
+            jobs.append(enriched)
+            if len(jobs) >= max(1, max_appointments):
+                break
+        stats["jobs_enriched"] = len(jobs)
+        self.last_install_audit_stats = stats
         return jobs
 
     def query_pm_projects(
@@ -624,6 +673,8 @@ class ServiceTitanClient:
         warranty_claim_documented = job.warranty_claim_documented
         completed_phases = list(job.completed_phases)
         options_presented = job.options_presented
+        invoice_item_records: list[dict[str, Any]] = []
+        non_job_timesheets: list[dict[str, Any]] = []
 
         appointments, appointments_error = self._related_records(
             "appointments",
@@ -693,7 +744,6 @@ class ServiceTitanClient:
             missing_data.setdefault("payments", invoices_error)
         else:
             invoice_ids = [value for value in [invoice_id, *[str(_raw_value(record, ("id", "invoiceId")) or "") for record in invoices]] if value]
-            invoice_item_records: list[dict[str, Any]] = []
             if invoices:
                 invoice_id = invoice_ids[0] if invoice_ids else invoice_id
                 invoice_status = invoice_status or _display_value(_raw_value(invoices[0], ("status", "invoiceStatus", "status.name")))
@@ -1068,6 +1118,17 @@ class ServiceTitanClient:
             related_counts=related_counts,
             available_keys=available_keys,
             missing_data=missing_data,
+            raw={
+                **job.raw,
+                "appointments": appointments,
+                "invoices": invoices,
+                "invoiceItems": invoice_item_records,
+                "forms": form_records,
+                "equipment": equipment_records,
+                "purchaseOrders": purchase_order_records,
+                "technicianTimesheets": timesheets,
+                "nonJobTimesheets": non_job_timesheets,
+            },
         )
 
     def _related_records(self, category: str, path: str, params: dict[str, str]) -> tuple[list[dict[str, Any]], str | None]:
@@ -1558,6 +1619,36 @@ def _pm_project_matches_scope(
         if any(keyword in text for keyword in exclude_keywords):
             return False
     return True
+
+
+def _job_known_outside_install_window(job: ServiceTitanJob, window_start: datetime, window_end: datetime) -> bool:
+    records = job.raw.get("appointments")
+    appointments = [item for item in records if isinstance(item, dict)] if isinstance(records, list) else []
+    starts: list[datetime] = []
+    ends: list[datetime] = []
+    for appointment in appointments:
+        status = _normalize_key(str(_raw_value(appointment, ("status", "appointmentStatus", "status.name")) or ""))
+        if any(word in status for word in ("cancel", "rescheduled", "no access")):
+            continue
+        start = _parse_datetime(
+            _raw_value(appointment, ("arrivalWindowStart", "scheduledStart", "scheduledStartOn", "start", "startDate"))
+        )
+        end = _parse_datetime(
+            _raw_value(appointment, ("arrivalWindowEnd", "scheduledEnd", "scheduledEndOn", "end", "endDate"))
+        )
+        if start:
+            starts.append(start)
+        if end:
+            ends.append(end)
+    if not starts and job.arrival_window_start:
+        starts.append(job.arrival_window_start)
+    if not ends and job.arrival_window_end:
+        ends.append(job.arrival_window_end)
+    if not starts and not ends:
+        return False
+    earliest_start = min(starts or ends).astimezone(timezone.utc)
+    latest_end = max(ends or starts).astimezone(timezone.utc)
+    return latest_end < window_start.astimezone(timezone.utc) or earliest_start > window_end.astimezone(timezone.utc)
 
 
 def _pm_invoice_matches_project(record: dict[str, Any], project: ServiceTitanProject, job_id: str) -> bool:

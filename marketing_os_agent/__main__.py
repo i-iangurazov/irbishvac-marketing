@@ -30,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("servicetitan-weekly-summary-once", help="Build and optionally send one ServiceTitan weekly violation summary")
     sub.add_parser("pm-audit-once", help="Run one Project Management audit cycle")
     sub.add_parser("pm-audit-test-slack", help="Validate and optionally send a synthetic PM Audit Slack test message")
+    sub.add_parser("install-audit-once", help="Run one Installer Audit cycle")
+    sub.add_parser("install-audit-test-slack", help="Validate and optionally send a synthetic Installer Audit Slack test message")
     sub.add_parser("notifications-test", help="Validate notification configuration and optionally send a Slack test message")
     sub.add_parser("servicetitan-alert-test", help="Build a synthetic ServiceTitan alert and optionally send it to Slack")
     email_test = sub.add_parser("email-test", help="Validate SMTP configuration and optionally send a safe test email")
@@ -139,6 +141,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "pm-audit-test-slack":
         ok, text = app.pm_audit_slack_test_text()
+        print(text)
+        return 0 if ok else 1
+
+    if command == "install-audit-once":
+        app.initialize_storage()
+        summary = app.run_install_audit_once()
+        print("\n".join(summary.to_lines()))
+        return 1 if summary.status in {"config_error", "api_error", "slack_error"} else 0
+
+    if command == "install-audit-test-slack":
+        ok, text = app.install_audit_slack_test_text()
         print(text)
         return 0 if ok else 1
 
