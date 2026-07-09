@@ -277,13 +277,15 @@ class ServiceTitanClient:
         }
         jobs: list[ServiceTitanJob] = []
         clean_business_unit_ids = {value.strip() for value in business_unit_ids if value.strip()}
+        install_keywords = [value.strip() for value in self.settings.install_audit_job_type_match_keywords if value.strip()]
         for record in records:
             parsed = parse_service_titan_job(record, self.settings)
-            if clean_business_unit_ids and parsed.business_unit_id not in clean_business_unit_ids:
+            if not _install_prefilter_matches(parsed, clean_business_unit_ids, install_keywords):
                 stats["jobs_skipped_out_of_scope"] += 1
                 continue
             enriched = self._enrich_job(parsed)
-            if clean_business_unit_ids and enriched.business_unit_id not in clean_business_unit_ids:
+            stats["jobs_enriched"] += 1
+            if not _install_prefilter_matches(enriched, clean_business_unit_ids, install_keywords):
                 stats["jobs_skipped_out_of_scope"] += 1
                 continue
             if _job_known_outside_install_window(enriched, window_start, window_end):
@@ -292,7 +294,6 @@ class ServiceTitanClient:
             jobs.append(enriched)
             if len(jobs) >= max(1, max_appointments):
                 break
-        stats["jobs_enriched"] = len(jobs)
         self.last_install_audit_stats = stats
         return jobs
 
@@ -1619,6 +1620,32 @@ def _pm_project_matches_scope(
         if any(keyword in text for keyword in exclude_keywords):
             return False
     return True
+
+
+def _install_prefilter_matches(job: ServiceTitanJob, business_unit_ids: set[str], keywords: list[str]) -> bool:
+    text_values = [job.job_type_name, job.business_unit_name]
+    normalized_values = [_normalize_key(value) for value in text_values if value]
+    excluded_words = (
+        "service call",
+        "maintenance",
+        "warranty",
+        "recall",
+        "sales",
+        "estimate",
+        "standby",
+        "internal",
+        "placeholder",
+    )
+    if any(any(word in value for word in excluded_words) for value in normalized_values):
+        return False
+    if business_unit_ids and job.business_unit_id in business_unit_ids:
+        return True
+    normalized_keywords = [_normalize_key(keyword) for keyword in keywords if keyword]
+    if normalized_keywords and any(keyword in value for keyword in normalized_keywords for value in normalized_values):
+        return True
+    if not business_unit_ids and not normalized_keywords:
+        return True
+    return False
 
 
 def _job_known_outside_install_window(job: ServiceTitanJob, window_start: datetime, window_end: datetime) -> bool:

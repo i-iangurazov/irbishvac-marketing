@@ -74,10 +74,12 @@ Defaults:
 - `DISPATCHER_AUDIT_ENABLED=false`
 - `INSTALL_AUDIT_ENABLED=false`
 - `INSTALL_AUDIT_DRY_RUN=true`
-- `INSTALL_AUDIT_BUSINESS_UNIT_IDS=[]`
+- `INSTALL_AUDIT_JOB_TYPE_MATCH_KEYWORDS=["Installation"]`
+- `INSTALL_AUDIT_BUSINESS_UNIT_IDS=["1809","64313020"]`
+- `ST_BU_INSTALLERS=1809,64313020`
 - `INSTALL_AUDIT_RULE_IDS_JSON=[]`
 - `SERVICE_TITAN_RULE_SCOPE_CONFIG_JSON={}`
-- `SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON={"1810":"HVAC Service","1812":"HVAC Sales / Comfort Advisors","64326403":"Plumbing Sales","64315277":"Plumbing Service"}`
+- `SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON={"1809":"HVAC Install","1810":"HVAC Service","1812":"HVAC Sales / Comfort Advisors","64313020":"Plumbing Install","64326403":"Plumbing Sales","64315277":"Plumbing Service"}`
 - `BUDGET_OVERRUN_THRESHOLD_PERCENT=0`, which flags any actual spend at or over plan.
 - `CAMPAIGN_RISK_WINDOW_PERCENT=80`
 - `CAMPAIGN_RISK_TASK_COMPLETION_PERCENT=20`
@@ -184,7 +186,7 @@ Use `process-pending-transitions` when `debug-tasks` shows `notion_status` diffe
 Use `repost-missing-slack-updates` after fixing Slack channel membership if an earlier transition was recorded before a Slack timestamp was stored.
 Use `servicetitan-audit-once` after configuring ServiceTitan credentials to run one operations audit cycle without waiting for the background interval.
 Use `servicetitan-discover-scopes` to print sanitized ServiceTitan business units, job types, statuses, tags, material context, related-record counts, and payload key availability before narrowing production rule scopes.
-Use `install-audit-once` after configuring `INSTALL_AUDIT_BUSINESS_UNIT_IDS` to run one read-only Installer Audit cycle. It stays dry-run unless `INSTALL_AUDIT_DRY_RUN=false`.
+Use `install-audit-once` after configuring ServiceTitan credentials and Installer Audit scope to run one read-only Installer Audit cycle. It stays dry-run unless `INSTALL_AUDIT_DRY_RUN=false`.
 Use `pm-audit-once` after configuring ServiceTitan credentials to run one disabled-by-default Project Management audit cycle. It stays dry-run unless `PM_AUDIT_ENABLED=true` and `PM_AUDIT_DRY_RUN=false`.
 Use `debug-tasks` when a Notion edit is being read but no transition posts. It prints current Notion status next to the saved local baseline status.
 Use `transition-counts` to inspect observed status transitions, including repeated completions that the service actually saw.
@@ -243,15 +245,35 @@ python3 -m marketing_os_agent install-audit-once
 python3 -m marketing_os_agent install-audit-test-slack
 ```
 
-Installer Audit only scans jobs in `INSTALL_AUDIT_BUSINESS_UNIT_IDS`. The first enabled live set should stay narrow:
+Installer Audit v3 only evaluates real install jobs. Scope is based only on job type name or business unit name containing `Installation`, case-insensitive, plus the known install BU IDs in `INSTALL_AUDIT_BUSINESS_UNIT_IDS` / `ST_BU_INSTALLERS`. It does not use notes, customer summaries, or form names for scope, so an `Installation Completion Form` on a service job cannot make that job in scope. Service Call, Maintenance, Warranty, Recall, Sales/Estimate, standby, internal placeholder, and non-install jobs are excluded.
 
 ```env
-INSTALL_AUDIT_RULE_IDS_JSON=["I1","I2","I3","I7","I8"]
+INSTALL_AUDIT_JOB_TYPE_MATCH_KEYWORDS=["Installation"]
+INSTALL_AUDIT_BUSINESS_UNIT_IDS=["1809","64313020"]
+ST_BU_INSTALLERS=1809,64313020
+INSTALL_AUDIT_RULE_IDS_JSON=[]
 ```
 
-Implemented rules are I1 job not marked complete, I2 completion form not completed, I3 authorization form not completed, I4 arrival not marked, I5 late arrival, I6 meal break not recorded, I7 deposit reminder, I8 payment milestone short, I9 photos missing, I10 materials not scanned, I11 equipment not registered, and I12 review not requested. I12 is implemented but not enabled by default unless explicitly allowlisted.
+`INSTALL_AUDIT_RULE_IDS_JSON=[]` runs all implemented v3 rules I1-I12. Use an explicit list such as `["I1"]` or `["I1","I2","I3"]` only for targeted validation.
+
+Implemented rules are I1 job not marked complete, I2 completion form not completed, I3 authorization form not completed, I4 arrival not marked, I5 late arrival, I6 meal break not recorded, I7 deposit reminder, I8 payment milestone short, I9 photos missing, I10 materials not scanned, I11 equipment not registered, and I12 review not requested. Rules with unavailable ServiceTitan fields return `skip` with a reason such as `form_status_unavailable`, `timesheet_breaks_unavailable`, `photo_count_unavailable`, `materials_scan_unavailable`, `equipment_registration_unavailable`, or `review_requested_field_unavailable`; they do not create fake failures.
 
 Install alerts send only to `INSTALL_AUDIT_SLACK_CHANNEL_ID`; there is no fallback to `PM_AUDIT_SLACK_CHANNEL_ID` or `SLACK_ALERT_CHANNEL_ID`. Slack/log output omits customer addresses, phone numbers, emails, raw notes, and raw customer summaries.
+
+Installer Slack alerts use the existing operations style:
+
+```text
+HIGH - Installs: Job Not Marked Complete
+Technician: <crew lead>
+Appointment: <date, window>
+Arrived: <time or unavailable>
+Invoice: $<total> total / $<balance> balance
+Issue: <concrete issue>
+Action: <what to check>
+Open in ServiceTitan: https://go.servicetitan.com/#/Job/Index/<job_id>
+```
+
+Installer violations are persisted with ruleset `Installer Audit`, so the weekly ServiceTitan summary includes Installs counts alongside Sales/HVAC/Plumbing counts.
 
 Installer Audit can run from the main app scheduler with `INSTALL_AUDIT_ENABLED=true` plus `INSTALL_AUDIT_SCHEDULE_ENABLED=true`; `INSTALL_AUDIT_RUN_ON_STARTUP=true` runs once after startup. Automatic runs dedupe by local day. Manual `install-audit-once` ignores automatic daily dedupe and can be used for dry-run validation while automatic runs remain disabled.
 

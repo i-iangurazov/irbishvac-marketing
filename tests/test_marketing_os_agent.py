@@ -128,10 +128,11 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         install_audit_run_on_startup=False,
         install_audit_schedule_enabled=False,
         install_audit_slack_channel_id="",
-        install_audit_business_unit_ids=[],
+        install_audit_job_type_match_keywords=["Installation"],
+        install_audit_business_unit_ids=["1809", "64313020"],
         install_audit_rule_ids=[],
         install_audit_max_appointments=100,
-        install_audit_lookback_days=7,
+        install_audit_lookback_days=14,
         install_audit_lookahead_days=2,
         install_audit_run_hour=8,
         install_audit_run_minute=0,
@@ -532,7 +533,10 @@ def install_job(
     job_id: str = "install-1001",
     *,
     status: str = "In Progress",
-    business_unit_id: str = "install-bu",
+    business_unit_id: str = "1809",
+    business_unit_name: str = "HVAC Installation",
+    job_type_id: str = "1930",
+    job_type_name: str = "HVAC Installation",
     technician_name: str = "Install Lead",
     start: datetime | None = datetime(2026, 6, 24, 8, tzinfo=timezone.utc),
     end: datetime | None = datetime(2026, 6, 24, 16, tzinfo=timezone.utc),
@@ -560,6 +564,7 @@ def install_job(
     lunch_break_minutes: int | None = 30,
     time_available: bool = True,
     review_requested: str | None = "Sent",
+    job_progress: object | None = None,
     raw_extra: dict[str, object] | None = None,
 ) -> ServiceTitanJob:
     if appointments is None and start is not None:
@@ -583,6 +588,8 @@ def install_job(
         "customFields": custom_fields,
         **(raw_extra or {}),
     }
+    if job_progress is not None:
+        raw["progress"] = job_progress
     if forms_available:
         raw["forms"] = forms or []
     present_fields = {"status", "business_unit", "job_type", "arrival_window", "technician"}
@@ -606,9 +613,9 @@ def install_job(
             status=status,
             technician_name=technician_name,
             business_unit_id=business_unit_id,
-            business_unit_name="HVAC - Install",
-            job_type_id="install-type",
-            job_type_name="Install",
+            business_unit_name=business_unit_name,
+            job_type_id=job_type_id,
+            job_type_name=job_type_name,
             department="Install",
             trade="HVAC",
             workflow="Install",
@@ -936,8 +943,7 @@ class FakeInstallServiceTitan:
         self.query_kwargs = kwargs
         if self.fail:
             raise ServiceTitanApiError(503, {"message": "unavailable"})
-        business_unit_ids = set(kwargs.get("business_unit_ids") or set())
-        jobs = [job for job in self.jobs if not business_unit_ids or job.business_unit_id in business_unit_ids]
+        jobs = list(self.jobs)
         self.last_install_audit_stats = {
             "raw_jobs_fetched": len(self.jobs),
             "jobs_skipped_out_of_scope": len(self.jobs) - len(jobs),
@@ -1201,7 +1207,6 @@ class MarketingOsAgentTests(unittest.TestCase):
             self.h.settings.sqlite_path,
             install_audit_enabled=True,
             install_audit_dry_run=True,
-            install_audit_business_unit_ids=["install-bu"],
             **overrides,
         )
         return InstallAuditService(audit_settings, self.h.db, FakeInstallServiceTitan(jobs), self.h.slack).run_once(
@@ -1267,10 +1272,11 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertFalse(audit_settings.install_audit_run_on_startup)
         self.assertFalse(audit_settings.install_audit_schedule_enabled)
         self.assertEqual(audit_settings.install_audit_slack_channel_id, "")
-        self.assertEqual(audit_settings.install_audit_business_unit_ids, [])
+        self.assertEqual(audit_settings.install_audit_job_type_match_keywords, ["Installation"])
+        self.assertEqual(audit_settings.install_audit_business_unit_ids, ["1809", "64313020"])
         self.assertEqual(audit_settings.install_audit_rule_ids, [])
         self.assertEqual(audit_settings.install_audit_max_appointments, 100)
-        self.assertEqual(audit_settings.install_audit_lookback_days, 7)
+        self.assertEqual(audit_settings.install_audit_lookback_days, 14)
         self.assertEqual(audit_settings.install_audit_lookahead_days, 2)
         self.assertEqual(audit_settings.install_audit_run_hour, 8)
         self.assertEqual(audit_settings.install_audit_run_minute, 0)
@@ -1327,15 +1333,90 @@ class MarketingOsAgentTests(unittest.TestCase):
             install_audit_rule_ids=["I1", "I2", "I3", "I7", "I8"],
         )
         self.assertEqual({result.rule_id for result in summary.results}, {"I1", "I2", "I3", "I7", "I8"})
+        self.assertIn("  - I1: pass 1, fail 0, skip 0", "\n".join(summary.to_lines()))
         default_rules = {rule.rule_id for rule in active_install_audit_rules(settings(self.h.settings.sqlite_path))}
         self.assertIn("I11", default_rules)
-        self.assertNotIn("I12", default_rules)
+        self.assertIn("I12", default_rules)
+        self.assertEqual(default_rules, {f"I{index}" for index in range(1, 13)})
+
+    def test_install_audit_scope_matches_job_type_or_business_unit_installation(self) -> None:
+        by_job_type = install_job(
+            "install-job-type",
+            business_unit_id="other-bu",
+            business_unit_name="HVAC Operations",
+            job_type_name="Furnace Installation",
+        )
+        by_business_unit = install_job(
+            "install-business-unit",
+            business_unit_id="other-bu-2",
+            business_unit_name="WH Installation",
+            job_type_name="Water Heater",
+        )
+        summary = self._run_install_audit([by_job_type, by_business_unit], install_audit_rule_ids=["I1"])
+        self.assertEqual(summary.jobs_scanned, 2)
+        self.assertEqual({result.job_id for result in summary.results}, {"install-job-type", "install-business-unit"})
+
+    def test_install_audit_scope_excludes_non_install_job_names(self) -> None:
+        jobs = [
+            install_job("service-call", business_unit_name="HVAC Service Call", job_type_name="Service Call"),
+            install_job("maintenance", business_unit_name="HVAC Maintenance", job_type_name="Maintenance"),
+            install_job("warranty", business_unit_name="HVAC Warranty", job_type_name="Warranty"),
+            install_job("recall", business_unit_name="HVAC Recall", job_type_name="Recall"),
+            install_job("sales", business_unit_name="HVAC Sales", job_type_name="Estimate"),
+            install_job("internal", business_unit_name="Internal", job_type_name="Internal Placeholder"),
+        ]
+        summary = self._run_install_audit(jobs, install_audit_rule_ids=["I1"])
+        self.assertEqual(summary.jobs_scanned, 0)
+        self.assertEqual(summary.results, [])
+
+    def test_install_audit_scope_does_not_match_installation_form_name(self) -> None:
+        job = install_job(
+            "form-name-only",
+            business_unit_id="other-bu",
+            business_unit_name="HVAC Service",
+            job_type_name="Diagnostic",
+            forms=[{"name": "Installation Completion Form", "status": "Completed"}],
+        )
+        summary = self._run_install_audit([job], install_audit_rule_ids=["I1"], install_audit_business_unit_ids=[])
+        self.assertEqual(summary.jobs_scanned, 0)
+        self.assertEqual(summary.results, [])
+
+    def test_install_audit_scope_supports_known_install_business_unit_ids(self) -> None:
+        job = install_job(
+            "known-bu-id",
+            business_unit_id="64313020",
+            business_unit_name="Plumbing - Install",
+            job_type_name="Water Heater",
+        )
+        summary = self._run_install_audit([job], install_audit_rule_ids=["I1"])
+        self.assertEqual(summary.jobs_scanned, 1)
+
+    def test_install_audit_st_bu_installers_env_adds_business_unit_ids(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"INSTALL_AUDIT_BUSINESS_UNIT_IDS": '["1809"]', "ST_BU_INSTALLERS": "64313020"},
+            clear=False,
+        ):
+            loaded = Settings.from_env()
+        self.assertEqual(loaded.install_audit_business_unit_ids, ["1809", "64313020"])
 
     def test_install_i1_pass_fail_skip(self) -> None:
         self.assertEqual(self._install_result(install_job(status="Completed"), "I1").status, INSTALL_PASS)
         fail = self._install_result(install_job(status="In Progress", end=datetime(2026, 6, 24, 12, tzinfo=timezone.utc)), "I1")
         self.assertEqual(fail.status, INSTALL_FAIL)
         self.assertIn("job status is still", fail.issue)
+        screenshot_case = self._install_result(
+            install_job(
+                "130652551",
+                status="In Progress",
+                business_unit_name="HVAC Installation",
+                job_type_name="HVAC Installation",
+                job_progress=100,
+            ),
+            "I1",
+        )
+        self.assertEqual(screenshot_case.status, INSTALL_FAIL)
+        self.assertIn("Job progress is 100%", screenshot_case.issue)
         future = self._install_result(
             install_job(
                 status="In Progress",
@@ -1357,7 +1438,16 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(self._install_result(missing_auth, "I3").status, INSTALL_FAIL)
 
         forms_unavailable = install_job(status="Completed", forms_available=False, forms=[])
-        self.assertEqual(self._install_result(forms_unavailable, "I2").status, INSTALL_SKIP)
+        forms_result = self._install_result(forms_unavailable, "I2")
+        self.assertEqual(forms_result.status, INSTALL_SKIP)
+        self.assertEqual(forms_result.issue, "form_status_unavailable")
+        raw_unscoped_forms = replace(
+            install_job(status="Completed", forms_available=True, forms=[]),
+            present_fields={"status", "business_unit", "job_type", "arrival_window", "technician"},
+        )
+        unscoped_result = self._install_result(raw_unscoped_forms, "I2")
+        self.assertEqual(unscoped_result.status, INSTALL_SKIP)
+        self.assertEqual(unscoped_result.issue, "form_status_unavailable")
         not_started = install_job(status="Scheduled", arrived_at=None, clock_in_at=None, forms=[{"name": "Homeowner Authorization Form", "status": "Completed"}])
         self.assertEqual(self._install_result(not_started, "I3").status, INSTALL_SKIP)
 
@@ -1381,7 +1471,9 @@ class MarketingOsAgentTests(unittest.TestCase):
         unknown_agreement = install_job(lunch_break_minutes=0)
         self.assertEqual(self._install_result(unknown_agreement, "I6").status, INSTALL_SKIP)
         unavailable = install_job(time_available=False, clock_in_at=None, clock_out_at=None, lunch_break_minutes=None)
-        self.assertEqual(self._install_result(unavailable, "I6").status, INSTALL_SKIP)
+        unavailable_result = self._install_result(unavailable, "I6")
+        self.assertEqual(unavailable_result.status, INSTALL_SKIP)
+        self.assertEqual(unavailable_result.issue, "timesheet_breaks_unavailable")
         short_day = install_job(clock_in_at=datetime(2026, 6, 24, 8, tzinfo=timezone.utc), clock_out_at=datetime(2026, 6, 24, 12, tzinfo=timezone.utc), lunch_break_minutes=0)
         self.assertEqual(self._install_result(short_day, "I6").status, INSTALL_SKIP)
 
@@ -1443,10 +1535,14 @@ class MarketingOsAgentTests(unittest.TestCase):
             equipment_complete=None,
             review_requested=None,
         )
-        self.assertEqual(self._install_result(job, "I9").status, INSTALL_SKIP)
-        self.assertEqual(self._install_result(job, "I10").status, INSTALL_SKIP)
-        self.assertEqual(self._install_result(job, "I11").status, INSTALL_SKIP)
-        self.assertEqual(self._install_result(job, "I12").status, INSTALL_SKIP)
+        i9 = self._install_result(job, "I9")
+        i10 = self._install_result(job, "I10")
+        i11 = self._install_result(job, "I11")
+        i12 = self._install_result(job, "I12")
+        self.assertEqual((i9.status, i9.issue), (INSTALL_SKIP, "photo_count_unavailable"))
+        self.assertEqual((i10.status, i10.issue), (INSTALL_SKIP, "materials_scan_unavailable"))
+        self.assertEqual((i11.status, i11.issue), (INSTALL_SKIP, "equipment_registration_unavailable"))
+        self.assertEqual((i12.status, i12.issue), (INSTALL_SKIP, "review_requested_field_unavailable"))
 
     def test_install_audit_live_slack_uses_install_channel_and_omits_customer_pii(self) -> None:
         pii_job = install_job(
@@ -1458,6 +1554,7 @@ class MarketingOsAgentTests(unittest.TestCase):
                 "summary": "Raw customer summary with 123 Main St",
             },
         )
+        pii_job = replace(pii_job, url="")
         audit_settings = settings(
             self.h.settings.sqlite_path,
             install_audit_enabled=True,
@@ -1474,9 +1571,21 @@ class MarketingOsAgentTests(unittest.TestCase):
             require_enabled=True,
         )
         self.assertEqual(summary.alerts_sent, 1)
+        persisted = self.h.db.get_service_titan_violation(summary.failures[0].violation_key)
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted["rule_id"], "install_job_not_marked_complete")
+        self.assertEqual(persisted["ruleset"], "Installer Audit")
         self.assertEqual(self.h.slack.messages[0][0], "C-INSTALL")
         text = self.h.slack.messages[0][1]
         self.assertIn("HIGH - Installs: Job Not Marked Complete", text)
+        self.assertIn("Technician:", text)
+        self.assertIn("Appointment:", text)
+        self.assertIn("Arrived:", text)
+        self.assertIn("Invoice:", text)
+        self.assertIn("Issue:", text)
+        self.assertIn("Action:", text)
+        self.assertIn("Open in ServiceTitan:", text)
+        self.assertIn("https://go.servicetitan.com/#/Job/Index/install-pii", text)
         for forbidden in ("Private Customer", "private@example.com", "555-1212", "123 Main St", "Raw customer summary"):
             self.assertNotIn(forbidden, text)
 
@@ -3911,19 +4020,32 @@ class MarketingOsAgentTests(unittest.TestCase):
             severity="high",
             metadata={},
         )
+        _insert_service_titan_violation(
+            self.h.db,
+            violation_key="weekly-install-open",
+            rule_id="install_job_not_marked_complete",
+            ruleset="Installer Audit",
+            severity="high",
+            metadata={"business_unit_id": "1809,64313020", "business_unit_name": "Installer Audit"},
+        )
         service = ServiceTitanWeeklySummaryService(audit_settings, self.h.db, self.h.slack)
         summary = service.build_summary(datetime(2020, 1, 1, tzinfo=timezone.utc), datetime(2030, 1, 1, tzinfo=timezone.utc))
         text = summary.message_text()
 
-        self.assertEqual(summary.total_violations, 3)
+        self.assertEqual(summary.total_violations, 4)
         self.assertEqual(summary.business_unit_counts["HVAC Sales / Comfort Advisors"], 2)
         self.assertEqual(summary.business_unit_counts["Unknown Business Unit"], 1)
-        self.assertEqual(summary.severity_counts, {"high": 2, "medium": 1})
-        self.assertEqual(summary.status_counts, {"open": 2, "resolved": 1})
+        self.assertEqual(summary.business_unit_counts["Installs"], 1)
+        self.assertEqual(summary.severity_counts, {"high": 3, "medium": 1})
+        self.assertEqual(summary.status_counts, {"open": 3, "resolved": 1})
         self.assertIn("HVAC Sales / Comfort Advisors", text)
         self.assertIn("BU ID: 1812", text)
         self.assertIn("sales_options_fewer_than_three [high] open: 1", text)
         self.assertIn("sales_arrival_after_first_half [medium] resolved: 1", text)
+        self.assertIn("Installs", text)
+        self.assertIn("BU ID: 1809,64313020", text)
+        self.assertIn("Ruleset: Installer Audit", text)
+        self.assertIn("install_job_not_marked_complete [high] open: 1", text)
         self.assertIn("Unknown Business Unit", text)
         self.assertNotIn("Private Customer", text)
         self.assertNotIn("123 Secret St", text)

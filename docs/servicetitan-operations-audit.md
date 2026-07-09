@@ -61,6 +61,7 @@ Current rollout status:
 - Sales / Comfort Advisor Audit: live with strict Render scope.
 - HVAC Service Audit: implemented and disabled by default; only the payment rule is a controlled-rollout candidate.
 - Plumbing Service Audit: implemented and disabled by default; the options rule is a controlled-rollout candidate.
+- Installer Audit: implemented as a separate read-only v3 ruleset, disabled and dry-run by default.
 - PM Audit: implemented, disabled by default, and dry-run first only.
 - Weekly Summary: implemented and disabled by default.
 
@@ -158,12 +159,93 @@ Ruleset: Sales / Comfort Advisor Audit
 - sales_options_fewer_than_three [high] open: 8
 - sales_arrival_after_first_half [medium] open: 2
 
+Installs
+BU ID: 1809,64313020
+BU Name: Installer Audit
+Ruleset: Installer Audit
+- install_job_not_marked_complete [high] open: 1
+- install_completion_form_not_completed [high] open: 1
+
 Totals:
-- Violations: 25
-- High: 20
+- Violations: 27
+- High: 22
 - Medium: 5
-- open: 25
+- open: 27
 ```
+
+## Installer Audit
+
+The Installer Audit is a separate read-only v3 ruleset. It does not run Sales options rules, Sales first-half arrival rules, PM permit rules, or generic dispatcher rules. It uses `INSTALL_AUDIT_DRY_RUN`; do not use `SERVICE_TITAN_AUDIT_DRY_RUN` for Installer Audit validation.
+
+Scope is intentionally strict because scope was the main v3 risk. A job is in scope only when the job type name or business unit name contains `Installation`, case-insensitive, or when the job business unit ID is one of the configured install IDs. Scope uses only job type and business unit fields; it does not use free text, notes, form names, customer summaries, or the presence of an `Installation Completion Form`.
+
+Default scope:
+
+```env
+INSTALL_AUDIT_JOB_TYPE_MATCH_KEYWORDS=["Installation"]
+INSTALL_AUDIT_BUSINESS_UNIT_IDS=["1809","64313020"]
+ST_BU_INSTALLERS=1809,64313020
+```
+
+Excluded by scope: Service Call, Maintenance, Warranty, Recall, Sales/Estimate, standby, internal placeholders, and non-install jobs. If job type and business unit fields are missing and the configured BU IDs do not match, Installer Audit skips the job instead of guessing.
+
+Rules:
+
+- `I1 / install_job_not_marked_complete` high: final install work appears done, progress is 100%, completion form is done, or full payment is in, but job status is not Completed.
+- `I2 / install_completion_form_not_completed` high: final install day is done or job is complete, but Installation Completion Form is missing or not completed. Skips when form status is unavailable.
+- `I3 / install_authorization_form_not_completed` high: installation has begun, but Homeowner Authorization Form is missing or not completed. Skips when form status or crew-start signal is unavailable.
+- `I4 / install_arrival_not_marked` medium: scheduled start has passed or job is in progress/complete, but no arrival timestamp is recorded. Skips when the arrival field is unavailable.
+- `I5 / install_arrived_late` medium: arrival is more than `INSTALL_AUDIT_ARRIVAL_GRACE_MIN` after scheduled start. Missing arrival is handled by I4.
+- `I6 / install_meal_break_not_taken` high: per technician/day CA compliance check for shifts over 5 hours without a 30-minute meal break, or over 10 hours without a second 30-minute break. Skips with `timesheet_breaks_unavailable` when time/break data is unavailable.
+- `I7 / install_deposit_not_collected_before_day1` reminder: install starts today/tomorrow and no structured deposit payment is recorded, unless financed or deposit-waived/customer-arranged. Skips when payment/deposit relationship is unclear.
+- `I8 / install_payment_milestone_short` high/medium: final day unpaid balance or day-1 50% milestone short. Skips financed jobs, same-day end-of-day money windows, and unclear invoice/payment relationships.
+- `I9 / install_photos_missing` medium: completed install has fewer than `INSTALL_AUDIT_COMPLETION_PHOTOS_MIN` attached photos. Skips when photo/attachment count is unavailable.
+- `I10 / install_materials_not_scanned` medium: completed install has no scanned materials. Skips when material/Ply data is unavailable or the job is bare-labor/no-material.
+- `I11 / install_equipment_not_registered` medium: completed install has missing equipment registration/labels. Skips when equipment registration data is unavailable.
+- `I12 / install_review_not_requested` low: completed install has no review-requested flag. Skips when the review-requested field is unavailable.
+
+`INSTALL_AUDIT_RULE_IDS_JSON=[]` runs all v3 rules I1-I12. Use explicit values like `["I1"]` or `["I1","I2","I3"]` for targeted validation.
+
+Render env for a dry-run validation:
+
+```env
+INSTALL_AUDIT_ENABLED=true
+INSTALL_AUDIT_DRY_RUN=true
+INSTALL_AUDIT_RUN_ON_STARTUP=false
+INSTALL_AUDIT_SCHEDULE_ENABLED=false
+INSTALL_AUDIT_SLACK_CHANNEL_ID=
+INSTALL_AUDIT_RULE_IDS_JSON=[]
+INSTALL_AUDIT_MAX_APPOINTMENTS=100
+INSTALL_AUDIT_LOOKBACK_DAYS=14
+INSTALL_AUDIT_LOOKAHEAD_DAYS=2
+INSTALL_AUDIT_RUN_HOUR=8
+INSTALL_AUDIT_RUN_MINUTE=0
+INSTALL_AUDIT_WEEKDAYS_ONLY=true
+```
+
+Installer Audit can run manually with:
+
+```bash
+python3 -m marketing_os_agent install-audit-once
+python3 -m marketing_os_agent install-audit-test-slack
+```
+
+It is wired into `python -m marketing_os_agent run` when `INSTALL_AUDIT_ENABLED=true`. `INSTALL_AUDIT_RUN_ON_STARTUP=true` runs one startup audit after the app starts. `INSTALL_AUDIT_SCHEDULE_ENABLED=true` runs at `INSTALL_AUDIT_RUN_HOUR` / `INSTALL_AUDIT_RUN_MINUTE`, weekdays only when `INSTALL_AUDIT_WEEKDAYS_ONLY=true`. Automatic runs dedupe by local date; manual `install-audit-once` is independent.
+
+Slack alert shape:
+
+```text
+HIGH - Installs: Job Not Marked Complete
+Technician: <crew lead>
+Appointment: <date, window>
+Arrived: <time or unavailable>
+Invoice: $<total> total / $<balance> balance
+Issue: <one concrete sentence naming the value>
+Action: <what to check / who to coach>
+Open in ServiceTitan: https://go.servicetitan.com/#/Job/Index/<job_id>
+```
+
+Known skip-safe fields from current validation work: form status, timesheet/break data, job-scoped photo/attachment counts, material/Ply scan data, equipment registration, and review-requested fields may be unavailable depending on ServiceTitan tenant access. When unavailable, the rule returns `skip` with clear reasons such as `form_status_unavailable`, `timesheet_breaks_unavailable`, `photo_count_unavailable`, `materials_scan_unavailable`, `equipment_registration_unavailable`, or `review_requested_field_unavailable`; it does not send Slack.
 
 ## HVAC Service Audit
 

@@ -24,7 +24,8 @@ INSTALL_PASS = "pass"
 INSTALL_FAIL = "fail"
 INSTALL_SKIP = "skip"
 
-INSTALL_RULESET = "Installs"
+INSTALL_RULESET = "Installer Audit"
+INSTALL_ALERT_LABEL = "Installs"
 INSTALL_AUDIT_RUN_TYPE = "install_audit"
 
 COMPLETION_FORM_NAMES = (
@@ -44,11 +45,39 @@ INSTALL_REVIEW_FIELD_NAMES = (
 COMPLETE_STATUS_WORDS = ("complete", "completed", "closed", "done")
 ACTIVE_STATUS_WORDS = ("working", "in progress", "started", "dispatched", *COMPLETE_STATUS_WORDS)
 EXCLUDED_APPOINTMENT_STATUS_WORDS = ("cancel", "rescheduled", "no access")
+OUT_OF_SCOPE_JOB_WORDS = (
+    "service call",
+    "maintenance",
+    "warranty",
+    "recall",
+    "sales",
+    "estimate",
+    "standby",
+    "internal",
+    "placeholder",
+)
+
+INSTALL_STORAGE_RULE_IDS = {
+    "I1": "install_job_not_marked_complete",
+    "I2": "install_completion_form_not_completed",
+    "I3": "install_authorization_form_not_completed",
+    "I4": "install_arrival_not_marked",
+    "I5": "install_arrived_late",
+    "I6": "install_meal_break_not_taken",
+    "I7": "install_deposit_not_collected_before_day1",
+    "I8": "install_payment_milestone_short",
+    "I9": "install_photos_missing",
+    "I10": "install_materials_not_scanned",
+    "I11": "install_equipment_not_registered",
+    "I12": "install_review_not_requested",
+}
 
 
 INSTALL_AUDIT_TEST_MESSAGE = """HIGH - Installs: Job Not Marked Complete
 Technician: Test Installer
 Appointment: Jul 8, 8:00 AM-4:00 PM
+Arrived: 8:00 AM
+Invoice: $10,000.00 total / $1,000.00 balance
 Issue: final install window passed, but job status is still In Progress
 Action: mark job Completed or confirm why it is still open
 Open in ServiceTitan: https://go.servicetitan.com/#/Job/Index/INSTALL-TEST-1001"""
@@ -94,6 +123,7 @@ class InstallAuditSummary:
     alerts_would_send: int = 0
     alerts_skipped_dedupe: int = 0
     errors: int = 0
+    scope_text: str = ""
     config_errors: list[str] = field(default_factory=list)
     results: list[InstallRuleResult] = field(default_factory=list)
     data_fields: dict[str, bool] = field(default_factory=dict)
@@ -110,11 +140,28 @@ class InstallAuditSummary:
         counts: Counter[str] = Counter(result.issue for result in self.results if result.status == INSTALL_SKIP)
         return counts.most_common(limit)
 
+    def rule_result_counts(self) -> list[tuple[str, int, int, int]]:
+        ordered_rules = [rule.rule_id for rule in install_audit_rules()]
+        counts: dict[str, Counter[str]] = {rule_id: Counter() for rule_id in ordered_rules}
+        for result in self.results:
+            counts.setdefault(result.rule_id, Counter())[result.status] += 1
+        return [
+            (
+                rule_id,
+                counts.get(rule_id, Counter()).get(INSTALL_PASS, 0),
+                counts.get(rule_id, Counter()).get(INSTALL_FAIL, 0),
+                counts.get(rule_id, Counter()).get(INSTALL_SKIP, 0),
+            )
+            for rule_id in ordered_rules
+            if counts.get(rule_id)
+        ]
+
     def to_lines(self) -> list[str]:
         lines = [
             f"Install audit: {self.status}",
             f"- enabled: {self.enabled}",
             f"- dry_run: {self.dry_run}",
+            f"- scope: {self.scope_text or 'Installer Audit scope: job type / BU contains Installation'}",
             f"- raw jobs fetched: {self.raw_jobs_fetched}",
             f"- out-of-scope jobs skipped: {self.jobs_skipped_out_of_scope}",
             f"- jobs enriched: {self.jobs_enriched}",
@@ -136,6 +183,11 @@ class InstallAuditSummary:
             lines.append("- data fields:")
             for name, readable in sorted(self.data_fields.items()):
                 lines.append(f"  - {name}: {'readable' if readable else 'missing'}")
+        rule_counts = self.rule_result_counts()
+        if rule_counts:
+            lines.append("- rule results:")
+            for rule_id, pass_count, fail_count, skip_count in rule_counts:
+                lines.append(f"  - {rule_id}: pass {pass_count}, fail {fail_count}, skip {skip_count}")
         top_fail = self.top_fail_rules(3)
         if top_fail:
             lines.append("- top fail rules:")
@@ -168,7 +220,11 @@ class InstallAuditService:
 
     def run_once(self, now: datetime | None = None, *, require_enabled: bool = True) -> InstallAuditSummary:
         now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        summary = InstallAuditSummary(enabled=self.settings.install_audit_enabled, dry_run=self.settings.install_audit_dry_run)
+        summary = InstallAuditSummary(
+            enabled=self.settings.install_audit_enabled,
+            dry_run=self.settings.install_audit_dry_run,
+            scope_text=_install_scope_text(self.settings),
+        )
         if require_enabled and not self.settings.install_audit_enabled:
             summary.status = "disabled"
             logger.info("install_audit_disabled")
@@ -187,7 +243,17 @@ class InstallAuditService:
             {
                 "dry_run": summary.dry_run,
                 "rule_ids": self.settings.install_audit_rule_ids,
-                "business_unit_ids_configured": bool(self.settings.install_audit_business_unit_ids),
+                "scope": "job type / BU contains Installation",
+                "business_unit_ids": self.settings.install_audit_business_unit_ids,
+                "job_type_match_keywords": self.settings.install_audit_job_type_match_keywords,
+            },
+        )
+        logger.info(
+            "install_audit_scope",
+            extra={
+                "scope": "job type / BU contains Installation",
+                "business_unit_ids": self.settings.install_audit_business_unit_ids,
+                "job_type_match_keywords": self.settings.install_audit_job_type_match_keywords,
             },
         )
         try:
@@ -301,7 +367,6 @@ class InstallAuditService:
             "SERVICETITAN_CLIENT_SECRET": self.settings.servicetitan_client_secret,
             "SERVICETITAN_TENANT_ID": self.settings.servicetitan_tenant_id,
             "SERVICETITAN_APP_KEY": self.settings.servicetitan_app_key,
-            "INSTALL_AUDIT_BUSINESS_UNIT_IDS": self.settings.install_audit_business_unit_ids,
         }
         for key, value in required.items():
             if not value:
@@ -322,13 +387,15 @@ class InstallAuditService:
             technician_name=result.technician_name,
             dispatcher_id="",
             dispatcher_name="",
-            rule_id=result.rule_id,
+            rule_id=_storage_rule_id(result.rule_id),
             ruleset=INSTALL_RULESET,
             severity=result.severity,
             title=result.title,
             description=result.issue,
             recommended_action=result.action,
             metadata={
+                "business_unit_id": ",".join(self.settings.install_audit_business_unit_ids) or str(result.metadata.get("business_unit_id") or ""),
+                "business_unit_name": "Installer Audit",
                 "appointment": result.appointment_text,
                 "issue": result.issue,
                 "action": result.action,
@@ -348,6 +415,7 @@ class InstallAuditService:
 
     def _data_field_summary(self, jobs: list[ServiceTitanJob]) -> dict[str, bool]:
         return {
+            "install_job_type_match_keywords_configured": bool(self.settings.install_audit_job_type_match_keywords),
             "install_business_unit_ids_configured": bool(self.settings.install_audit_business_unit_ids),
             "homeowner_authorization_form_status_readable": any(_form_status(job, AUTHORIZATION_FORM_NAMES) is not None for job in jobs),
             "installation_completion_form_status_readable": any(_form_status(job, COMPLETION_FORM_NAMES) is not None for job in jobs),
@@ -362,7 +430,11 @@ class InstallAuditService:
 def active_install_audit_rules(settings: Settings) -> list[InstallAuditRule]:
     allowlist = {rule_id.strip().upper() for rule_id in settings.install_audit_rule_ids if rule_id.strip()}
     rules = install_audit_rules()
-    return [rule for rule in rules if (not allowlist and rule.enabled_by_default) or rule.rule_id in allowlist]
+    return [rule for rule in rules if not allowlist or rule.rule_id in allowlist]
+
+
+def _storage_rule_id(rule_id: str) -> str:
+    return INSTALL_STORAGE_RULE_IDS.get(rule_id, rule_id)
 
 
 def install_audit_rules() -> list[InstallAuditRule]:
@@ -378,7 +450,7 @@ def install_audit_rules() -> list[InstallAuditRule]:
         InstallAuditRule("I9", "Photos Missing", "medium", True, _rule_i9),
         InstallAuditRule("I10", "Materials Not Scanned", "medium", True, _rule_i10),
         InstallAuditRule("I11", "Equipment Not Registered", "medium", True, _rule_i11),
-        InstallAuditRule("I12", "Review Not Requested", "low", False, _rule_i12),
+        InstallAuditRule("I12", "Review Not Requested", "low", True, _rule_i12),
     ]
 
 
@@ -388,6 +460,18 @@ def _rule_i1(job: ServiceTitanJob, settings: Settings, now: datetime) -> Install
     final_end = _install_final_end(job)
     completion_done = _form_completed(job, COMPLETION_FORM_NAMES)
     full_payment = _full_payment_in(job)
+    progress = _job_progress_percent(job)
+    if progress is not None and progress >= 100:
+        return _result(
+            job,
+            "I1",
+            "Job Not Marked Complete",
+            "high",
+            INSTALL_FAIL,
+            f"Job progress is 100%, but job status is still {job.status or 'not completed'}.",
+            "mark job Completed or confirm why it is still open",
+            metadata={"job_progress_percent": progress},
+        )
     if completion_done is True:
         return _result(
             job,
@@ -425,7 +509,7 @@ def _rule_i1(job: ServiceTitanJob, settings: Settings, now: datetime) -> Install
 
 def _rule_i2(job: ServiceTitanJob, settings: Settings, now: datetime) -> InstallRuleResult:
     if not _forms_available(job):
-        return _result(job, "I2", "Completion Form Not Completed", "high", INSTALL_SKIP, "Form status is unavailable.", "Confirm ServiceTitan form source.")
+        return _result(job, "I2", "Completion Form Not Completed", "high", INSTALL_SKIP, "form_status_unavailable", "Confirm ServiceTitan form source.")
     final_done = _final_install_condition(job, now)
     if final_done is None and not _job_completed(job):
         return _result(job, "I2", "Completion Form Not Completed", "high", INSTALL_SKIP, "Final-day condition cannot be determined.", "Confirm final install schedule.")
@@ -435,7 +519,7 @@ def _rule_i2(job: ServiceTitanJob, settings: Settings, now: datetime) -> Install
         return _result(job, "I2", "Completion Form Not Completed", "high", INSTALL_FAIL, "Installation Completion Form is missing.", "complete the Installation Completion Form")
     status = _form_status(job, COMPLETION_FORM_NAMES)
     if status is None:
-        return _result(job, "I2", "Completion Form Not Completed", "high", INSTALL_SKIP, "Installation Completion Form status is unavailable.", "Confirm ServiceTitan form status source.")
+        return _result(job, "I2", "Completion Form Not Completed", "high", INSTALL_SKIP, "form_status_unavailable", "Confirm ServiceTitan form status source.")
     if status is False:
         return _result(job, "I2", "Completion Form Not Completed", "high", INSTALL_FAIL, "Installation Completion Form is not completed.", "complete the Installation Completion Form")
     return _result(job, "I2", "Completion Form Not Completed", "high", INSTALL_PASS, "Installation Completion Form is completed.", "No action needed.")
@@ -443,7 +527,7 @@ def _rule_i2(job: ServiceTitanJob, settings: Settings, now: datetime) -> Install
 
 def _rule_i3(job: ServiceTitanJob, settings: Settings, now: datetime) -> InstallRuleResult:
     if not _forms_available(job):
-        return _result(job, "I3", "Authorization Form Not Completed", "high", INSTALL_SKIP, "Form status is unavailable.", "Confirm ServiceTitan form source.")
+        return _result(job, "I3", "Authorization Form Not Completed", "high", INSTALL_SKIP, "form_status_unavailable", "Confirm ServiceTitan form source.")
     started = _install_started(job)
     if started is None:
         return _result(job, "I3", "Authorization Form Not Completed", "high", INSTALL_SKIP, "Started condition cannot be determined.", "Confirm arrival/start data.")
@@ -453,7 +537,7 @@ def _rule_i3(job: ServiceTitanJob, settings: Settings, now: datetime) -> Install
         return _result(job, "I3", "Authorization Form Not Completed", "high", INSTALL_FAIL, "Homeowner Authorization Form is missing.", "complete the Homeowner Authorization Form")
     status = _form_status(job, AUTHORIZATION_FORM_NAMES)
     if status is None:
-        return _result(job, "I3", "Authorization Form Not Completed", "high", INSTALL_SKIP, "Homeowner Authorization Form status is unavailable.", "Confirm ServiceTitan form status source.")
+        return _result(job, "I3", "Authorization Form Not Completed", "high", INSTALL_SKIP, "form_status_unavailable", "Confirm ServiceTitan form status source.")
     if status is False:
         return _result(job, "I3", "Authorization Form Not Completed", "high", INSTALL_FAIL, "Homeowner Authorization Form is not completed.", "complete the Homeowner Authorization Form")
     return _result(job, "I3", "Authorization Form Not Completed", "high", INSTALL_PASS, "Homeowner Authorization Form is completed.", "No action needed.")
@@ -588,7 +672,7 @@ def _rule_i9(job: ServiceTitanJob, settings: Settings, now: datetime) -> Install
     if not _job_completed(job):
         return _result(job, "I9", "Photos Missing", "medium", INSTALL_SKIP, "Install is not marked complete.", "No action needed.")
     if "photos" not in job.present_fields or job.photo_count is None:
-        return _result(job, "I9", "Photos Missing", "medium", INSTALL_SKIP, "Photo/attachment count unavailable.", "Confirm photo source.")
+        return _result(job, "I9", "Photos Missing", "medium", INSTALL_SKIP, "photo_count_unavailable", "Confirm photo source.")
     if job.photo_count < settings.install_audit_completion_photos_min:
         return _result(job, "I9", "Photos Missing", "medium", INSTALL_FAIL, "install is complete, but required completion photos are missing", "attach install completion photos")
     return _result(job, "I9", "Photos Missing", "medium", INSTALL_PASS, "Required install photos are attached.", "No action needed.")
@@ -600,7 +684,7 @@ def _rule_i10(job: ServiceTitanJob, settings: Settings, now: datetime) -> Instal
     if _bare_labor_job(job):
         return _result(job, "I10", "Materials Not Scanned", "medium", INSTALL_SKIP, "Bare-labor/no-material job type.", "No material scan needed.")
     if not job.ply_data_available and "purchase_orders" not in job.present_fields:
-        return _result(job, "I10", "Materials Not Scanned", "medium", INSTALL_SKIP, "Material/Ply sync data unavailable.", "Confirm material scan source.")
+        return _result(job, "I10", "Materials Not Scanned", "medium", INSTALL_SKIP, "materials_scan_unavailable", "Confirm material scan source.")
     if (job.purchase_orders_count or 0) <= 0:
         return _result(job, "I10", "Materials Not Scanned", "medium", INSTALL_FAIL, "install is complete, but no materials were scanned onto the job", "scan install materials or confirm bare-labor exception")
     return _result(job, "I10", "Materials Not Scanned", "medium", INSTALL_PASS, "Materials are recorded on the job.", "No action needed.")
@@ -610,7 +694,7 @@ def _rule_i11(job: ServiceTitanJob, settings: Settings, now: datetime) -> Instal
     if not _job_completed(job):
         return _result(job, "I11", "Equipment Not Registered", "medium", INSTALL_SKIP, "Install is not marked complete.", "No action needed.")
     if "equipment" not in job.present_fields:
-        return _result(job, "I11", "Equipment Not Registered", "medium", INSTALL_SKIP, "Equipment registration data unavailable.", "Confirm equipment source.")
+        return _result(job, "I11", "Equipment Not Registered", "medium", INSTALL_SKIP, "equipment_registration_unavailable", "Confirm equipment source.")
     if not job.equipment_count or job.equipment_complete is False:
         return _result(job, "I11", "Equipment Not Registered", "medium", INSTALL_FAIL, "install is complete, but equipment registration or labels are missing", "register equipment and add equipment labels")
     return _result(job, "I11", "Equipment Not Registered", "medium", INSTALL_PASS, "Equipment registration data is present.", "No action needed.")
@@ -621,7 +705,7 @@ def _rule_i12(job: ServiceTitanJob, settings: Settings, now: datetime) -> Instal
         return _result(job, "I12", "Review Not Requested", "low", INSTALL_SKIP, "Install is not marked complete.", "No action needed.")
     requested = _review_requested(job)
     if requested is None:
-        return _result(job, "I12", "Review Not Requested", "low", INSTALL_SKIP, "Review-requested field unavailable.", "Confirm review request source.")
+        return _result(job, "I12", "Review Not Requested", "low", INSTALL_SKIP, "review_requested_field_unavailable", "Confirm review request source.")
     if not requested:
         return _result(job, "I12", "Review Not Requested", "low", INSTALL_FAIL, "install is complete, but review-requested step is empty", "request review or update review-requested flag")
     return _result(job, "I12", "Review Not Requested", "low", INSTALL_PASS, "Review-requested step is recorded.", "No action needed.")
@@ -649,7 +733,7 @@ def _meal_break_results(jobs: list[ServiceTitanJob], settings: Settings, now: da
                     sample,
                     day,
                     INSTALL_SKIP,
-                    "Timesheet/break source is unavailable.",
+                    "timesheet_breaks_unavailable",
                     "review timesheet/break record",
                     settings,
                     worked_hours=None,
@@ -723,7 +807,17 @@ def _result(
         job_id=job.job_id,
         appointment_id=job.appointment_id,
         url=job.url,
-        metadata={"technician_id": job.technician_id, **(metadata or {})},
+        metadata={
+            "technician_id": job.technician_id,
+            "business_unit_id": job.business_unit_id,
+            "business_unit_name": job.business_unit_name,
+            "job_type_id": job.job_type_id,
+            "job_type_name": job.job_type_name,
+            "arrived_at": job.arrived_at.isoformat() if job.arrived_at else "",
+            "invoice_total": job.invoice_total,
+            "invoice_balance": job.invoice_balance,
+            **(metadata or {}),
+        },
     )
 
 
@@ -754,26 +848,74 @@ def _workday_result(
 
 
 def _alert_text(result: InstallRuleResult) -> str:
-    lines = [f"{result.severity.upper()} - {INSTALL_RULESET}: {result.title}"]
+    lines = [f"{result.severity.upper()} - {INSTALL_ALERT_LABEL}: {result.title}"]
     lines.append(f"Technician: {result.technician_name or 'unassigned'}")
     if result.rule_id == "I6":
         lines.append(f"Date: {result.appointment_text or '<unknown>'}")
+        lines.extend(
+            [
+                f"Issue: {result.issue}",
+                f"Action: {result.action}",
+            ]
+        )
+        return "\n".join(lines)
     elif result.appointment_text:
         lines.append(f"Appointment: {result.appointment_text}")
+    else:
+        lines.append("Appointment: unavailable")
+    lines.append(f"Arrived: {_format_arrived(result)}")
+    lines.append(f"Invoice: {_format_invoice(result)}")
     lines.extend(
         [
             f"Issue: {result.issue}",
             f"Action: {result.action}",
         ]
     )
-    if result.url:
-        lines.append(f"Open in ServiceTitan: {result.url}")
+    url = result.url or (f"https://go.servicetitan.com/#/Job/Index/{result.job_id}" if result.job_id else "")
+    if url:
+        lines.append(f"Open in ServiceTitan: {url}")
     return "\n".join(lines)
 
 
 def _job_matches_install_scope(job: ServiceTitanJob, settings: Settings) -> bool:
     configured_ids = {value.strip() for value in settings.install_audit_business_unit_ids if value.strip()}
-    return bool(configured_ids and job.business_unit_id in configured_ids)
+    text_fields = [job.job_type_name, job.business_unit_name]
+    if any(_scope_text_excluded(value) for value in text_fields if value):
+        return False
+    keywords = [_normalize_key(value) for value in settings.install_audit_job_type_match_keywords if value.strip()]
+    text_match = any(keyword and keyword in _normalize_key(value) for keyword in keywords for value in text_fields if value)
+    bu_match = bool(configured_ids and job.business_unit_id in configured_ids)
+    return text_match or bu_match
+
+
+def _scope_text_excluded(value: str) -> bool:
+    normalized = _normalize_key(value)
+    return any(word in normalized for word in OUT_OF_SCOPE_JOB_WORDS)
+
+
+def _install_scope_text(settings: Settings) -> str:
+    bu_ids = ",".join(settings.install_audit_business_unit_ids) or "<none>"
+    keywords = ",".join(settings.install_audit_job_type_match_keywords) or "Installation"
+    return f"Installer Audit scope: job type / BU contains {keywords}; BU IDs: {bu_ids}"
+
+
+def _format_arrived(result: InstallRuleResult) -> str:
+    value = result.metadata.get("arrived_at")
+    if isinstance(value, str) and value:
+        parsed = _parse_datetime(value)
+        if parsed:
+            return _format_time(parsed)
+    return "unavailable"
+
+
+def _format_invoice(result: InstallRuleResult) -> str:
+    total = result.metadata.get("invoice_total")
+    balance = result.metadata.get("invoice_balance")
+    if isinstance(total, (int, float)) or isinstance(balance, (int, float)):
+        total_text = _format_money(float(total)) if isinstance(total, (int, float)) else "unavailable"
+        balance_text = _format_money(float(balance)) if isinstance(balance, (int, float)) else "unavailable"
+        return f"{total_text} total / {balance_text} balance"
+    return "unavailable"
 
 
 def _crew_lead(job: ServiceTitanJob) -> str:
@@ -861,12 +1003,20 @@ def _appointment_text(job: ServiceTitanJob) -> str:
     return text
 
 
+def _format_time(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%-I:%M %p") if _supports_dash_strftime() else value.astimezone(timezone.utc).strftime("%I:%M %p").lstrip("0")
+
+
+def _format_money(value: float) -> str:
+    return f"${value:,.2f}"
+
+
 def _supports_dash_strftime() -> bool:
     return True
 
 
 def _forms_available(job: ServiceTitanJob) -> bool:
-    return "forms" in job.present_fields or isinstance(job.raw.get("forms"), list)
+    return "forms" in job.present_fields
 
 
 def _form_records(job: ServiceTitanJob) -> list[dict[str, object]]:
@@ -971,6 +1121,23 @@ def _full_payment_in(job: ServiceTitanJob) -> bool | None:
         return float(balance) <= 0.01
     if total is not None and paid is not None:
         return float(paid) + 0.01 >= float(total)
+    return None
+
+
+def _job_progress_percent(job: ServiceTitanJob) -> float | None:
+    for value in (
+        _raw_value(job.raw, ("progress", "jobProgress", "completionProgress", "percentComplete", "completionPercent")),
+        _raw_value(job.raw, ("progress.percent", "jobProgress.percent", "completion.percent")),
+    ):
+        parsed = _float_value(value)
+        if parsed is not None:
+            return parsed * 100.0 if 0 < parsed <= 1 else parsed
+    for name, value in job.operational_data.items():
+        normalized = _normalize_key(name)
+        if any(token in normalized for token in ("progress", "percent complete", "completion percent")):
+            parsed = _float_value(value)
+            if parsed is not None:
+                return parsed * 100.0 if 0 < parsed <= 1 else parsed
     return None
 
 
@@ -1116,6 +1283,20 @@ def _bool_value(value: object) -> bool | None:
             return True
         if normalized in {"false", "no", "0", "open", "draft", "incomplete"}:
             return False
+    return None
+
+
+def _float_value(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.replace("%", "").replace(",", "").strip()
+        if not cleaned:
+            return None
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
     return None
 
 

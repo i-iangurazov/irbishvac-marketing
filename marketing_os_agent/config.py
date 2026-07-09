@@ -90,6 +90,24 @@ def _json_string_list_env(name: str, default: list[str]) -> list[str]:
     return parsed
 
 
+def _csv_string_list_env(name: str, default: list[str] | None = None) -> list[str]:
+    raw = _env(name, "").strip()
+    if not raw:
+        return list(default or [])
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            result.append(cleaned)
+    return result
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw = _env(name, "")
     if raw == "":
@@ -144,8 +162,11 @@ def _json_object_env(name: str, default: dict[str, Any] | None = None) -> dict[s
 
 
 DEFAULT_SERVICE_TITAN_BUSINESS_UNIT_LABELS = {
+    "1809": "HVAC Install",
     "1810": "HVAC Service",
     "1812": "HVAC Sales / Comfort Advisors",
+    "64313020": "Plumbing Install",
+    "1809,64313020": "Installs",
     "64326403": "Plumbing Sales",
     "64315277": "Plumbing Service",
 }
@@ -228,6 +249,7 @@ class Settings:
     install_audit_run_on_startup: bool
     install_audit_schedule_enabled: bool
     install_audit_slack_channel_id: str
+    install_audit_job_type_match_keywords: list[str]
     install_audit_business_unit_ids: list[str]
     install_audit_rule_ids: list[str]
     install_audit_max_appointments: int
@@ -493,10 +515,16 @@ class Settings:
             install_audit_run_on_startup=_bool_env("INSTALL_AUDIT_RUN_ON_STARTUP", False),
             install_audit_schedule_enabled=_bool_env("INSTALL_AUDIT_SCHEDULE_ENABLED", False),
             install_audit_slack_channel_id=_env("INSTALL_AUDIT_SLACK_CHANNEL_ID"),
-            install_audit_business_unit_ids=_json_string_list_env("INSTALL_AUDIT_BUSINESS_UNIT_IDS", []),
+            install_audit_job_type_match_keywords=_json_string_list_env("INSTALL_AUDIT_JOB_TYPE_MATCH_KEYWORDS", ["Installation"]),
+            install_audit_business_unit_ids=_dedupe_strings(
+                [
+                    *_json_string_list_env("INSTALL_AUDIT_BUSINESS_UNIT_IDS", ["1809", "64313020"]),
+                    *_csv_string_list_env("ST_BU_INSTALLERS", []),
+                ]
+            ),
             install_audit_rule_ids=_json_string_list_env("INSTALL_AUDIT_RULE_IDS_JSON", []),
             install_audit_max_appointments=max(1, _int_env("INSTALL_AUDIT_MAX_APPOINTMENTS", 100)),
-            install_audit_lookback_days=max(0, _int_env("INSTALL_AUDIT_LOOKBACK_DAYS", 7)),
+            install_audit_lookback_days=max(0, _int_env("INSTALL_AUDIT_LOOKBACK_DAYS", 14)),
             install_audit_lookahead_days=max(0, _int_env("INSTALL_AUDIT_LOOKAHEAD_DAYS", 2)),
             install_audit_run_hour=_hour_env("INSTALL_AUDIT_RUN_HOUR", 8),
             install_audit_run_minute=max(0, min(59, _int_env("INSTALL_AUDIT_RUN_MINUTE", 0))),
