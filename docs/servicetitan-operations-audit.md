@@ -722,12 +722,14 @@ Rule readiness interpretation:
 - Production-ready now when source fields are present: `missing_job_completion_notes`, `job_notes_too_short`.
 - Partially-ready and able to produce real `fail` results when the related ServiceTitan endpoint is scoped and returns usable fields: arrival rules, photos, equipment registration, HHR/service form, repair options, Home Comfort Plan option, same-day estimate, price authorization, diagnostic fee/payment, follow-up task indicator, special-order notes/downpayment, lead turnover documentation, PO reconciliation, PO vendor document, PO attachments, scope-change escalation, cancellation-after-materials escalation, and defective part warranty claim data.
 - Insufficient-data only until additional integration exists: `po_not_synced_to_service_titan`, `ply_st_material_sync_blocked`, and `special_order_missing_service_titan_reminder`.
-- Every handbook rule is enabled by default unless listed in `SERVICE_TITAN_DISABLED_RULE_IDS_JSON`.
+- Handbook matrix rules are not attached automatically by `DISPATCHER_AUDIT_ENABLED`; enable only dedicated Dispatcher rules unless a handbook rule is explicitly reviewed and configured.
 - Every `fail` result is routed as an immediate ServiceTitan Slack alert. There is no ServiceTitan digest sender in this codebase.
 
 ## Slack Alerts
 
-Alerts go to `SLACK_ALERT_CHANNEL_ID` only. Business Unit labels are included in the message text for grouping, but they do not route alerts to separate channels.
+Sales/HVAC/Plumbing ServiceTitan alerts go to `SLACK_ALERT_CHANNEL_ID`. Dispatcher Audit uses `DISPATCHER_AUDIT_SLACK_CHANNEL_ID` when configured, otherwise it falls back to `SLACK_ALERT_CHANNEL_ID`. PM Audit and Installer Audit use their own `PM_AUDIT_SLACK_CHANNEL_ID` / `INSTALL_AUDIT_SLACK_CHANNEL_ID` settings. Business Unit labels are included in the ServiceTitan message text for grouping; they do not route alerts to separate channels.
+
+Dispatcher Audit is disabled by default and should be enabled with a narrow `DISPATCHER_AUDIT_RULE_IDS_JSON` allowlist plus strict ServiceTitan scope. Keep `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false` in production so old Dispatcher findings cannot flood Slack.
 
 ### Production Double-Check
 

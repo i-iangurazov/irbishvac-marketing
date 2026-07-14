@@ -19,6 +19,7 @@ from .service_titan_rules import (
     RESULT_INSUFFICIENT,
     RESULT_NOT_APPLICABLE,
     RESULT_PASS,
+    RULESET_DISPATCHER,
     RULESET_HVAC,
     RULESET_PLUMBING,
     RULESET_SALES,
@@ -1052,7 +1053,7 @@ class ServiceTitanAuditService:
                 },
             )
             return "limited"
-        channel = self.settings.slack_alert_channel_id
+        channel = self._alert_channel_for(result)
         if self.settings.service_titan_audit_backfill_alerts:
             logger.warning(
                 "servicetitan_controlled_backfill_alert_attempt",
@@ -1071,6 +1072,11 @@ class ServiceTitanAuditService:
         self.db.mark_service_titan_alert_sent(result.violation_key)
         logger.info("servicetitan_alert_sent", extra={"violation_key": result.violation_key, "rule_id": result.rule_id, "severity": result.severity})
         return "sent"
+
+    def _alert_channel_for(self, result: RuleResult) -> str:
+        if result.ruleset == RULESET_DISPATCHER and self.settings.dispatcher_audit_slack_channel_id:
+            return self.settings.dispatcher_audit_slack_channel_id
+        return self.settings.slack_alert_channel_id
 
     def _alert_limit_reached(self, alert_attempts: int) -> bool:
         if self.settings.service_titan_audit_dry_run:

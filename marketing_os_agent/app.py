@@ -214,6 +214,10 @@ class AgentApp:
                 "plumbing_service_enabled": self.settings.plumbing_service_audit_enabled,
                 "technician_compliance_enabled": self.settings.technician_compliance_enabled,
                 "dispatcher_audit_enabled": self.settings.dispatcher_audit_enabled,
+                "dispatcher_audit_rules": self.settings.dispatcher_audit_rule_ids,
+                "dispatcher_slack_channel_configured": bool(
+                    self.settings.dispatcher_audit_slack_channel_id or self.settings.slack_alert_channel_id
+                ),
                 "slack_channel_configured": bool(channel),
             },
         )

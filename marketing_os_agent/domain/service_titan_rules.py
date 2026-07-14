@@ -205,8 +205,11 @@ def active_service_titan_rules(settings: Settings) -> list[AuditRule]:
     if settings.technician_compliance_enabled:
         rules.extend(technician_compliance_rules())
     if settings.dispatcher_audit_enabled:
-        rules.extend(dispatcher_audit_rules())
-        rules.extend(handbook_audit_rules())
+        dispatcher_rules = dispatcher_audit_rules()
+        dispatcher_allowlist = {rule_id.strip() for rule_id in settings.dispatcher_audit_rule_ids if rule_id.strip()}
+        if dispatcher_allowlist:
+            dispatcher_rules = [rule for rule in dispatcher_rules if rule.rule_id in dispatcher_allowlist]
+        rules.extend(dispatcher_rules)
     disabled = {rule_id.strip() for rule_id in settings.service_titan_disabled_rule_ids if rule_id.strip()}
     return [
         _effective_rule(rule, settings)

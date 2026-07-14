@@ -72,6 +72,8 @@ Defaults:
 - `PLUMBING_SERVICE_AUDIT_ENABLED=false`
 - `TECHNICIAN_COMPLIANCE_ENABLED=false`
 - `DISPATCHER_AUDIT_ENABLED=false`
+- `DISPATCHER_AUDIT_SLACK_CHANNEL_ID=`
+- `DISPATCHER_AUDIT_RULE_IDS_JSON=[]`
 - `INSTALL_AUDIT_ENABLED=false`
 - `INSTALL_AUDIT_DRY_RUN=true`
 - `INSTALL_AUDIT_JOB_TYPE_MATCH_KEYWORDS=["Installation"]`
@@ -230,7 +232,9 @@ Rules return `pass`, `fail`, `insufficient_data`, `not_applicable`, or `error`. 
 
 Use `SERVICE_TITAN_AUDIT_DRY_RUN=true` for command-level one-off validation only, or for a deliberately paused dry-run environment. Dry-run fetches real ServiceTitan jobs, evaluates rules, prints the one-time run summary, and skips Slack alerts and audit dedupe writes. The `servicetitan-audit-once` command runs one cycle and exits, even when continuous polling is still disabled. Do not set `SERVICE_TITAN_AUDIT_DRY_RUN=true` globally on a live Render service unless intentionally pausing live Sales/HVAC/Plumbing alerts. Set `SERVICE_TITAN_AUDIT_DEBUG_FIELDS=true` only when you need sanitized field availability logs for ServiceTitan payloads.
 
-ServiceTitan alerts use `SLACK_ALERT_CHANNEL_ID` only. Business Unit labels from `SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON` are included in compact alert text for grouping; they do not route alerts to separate channels. Normal Slack alerts omit internal scope/debug fields and customer PII.
+Sales/HVAC/Plumbing ServiceTitan alerts use `SLACK_ALERT_CHANNEL_ID`. Dispatcher Audit can use `DISPATCHER_AUDIT_SLACK_CHANNEL_ID`; if it is empty, Dispatcher falls back to `SLACK_ALERT_CHANNEL_ID`. PM Audit and Installer Audit do not use `SLACK_ALERT_CHANNEL_ID`; they use `PM_AUDIT_SLACK_CHANNEL_ID` and `INSTALL_AUDIT_SLACK_CHANNEL_ID`. Business Unit labels from `SERVICE_TITAN_BUSINESS_UNIT_LABELS_JSON` are included in compact alert text for grouping; they do not route alerts to separate channels. Normal Slack alerts omit internal scope/debug fields and customer PII.
+
+Dispatcher Audit is disabled by default. When `DISPATCHER_AUDIT_ENABLED=true`, only the dedicated Dispatcher rules are attached; old handbook matrix rules are not enabled automatically. Use `DISPATCHER_AUDIT_RULE_IDS_JSON` for a narrow production allowlist and keep `SERVICE_TITAN_AUDIT_BACKFILL_ALERTS=false` to prevent historical floods.
 
 Weekly ServiceTitan violation summaries are disabled by default. Set `SERVICE_TITAN_WEEKLY_SUMMARY_ENABLED=true` plus `SERVICE_TITAN_WEEKLY_SUMMARY_DAY`, `SERVICE_TITAN_WEEKLY_SUMMARY_HOUR`, and `SERVICE_TITAN_WEEKLY_SUMMARY_LOOKBACK_DAYS` to post a grouped stored-violation summary to `SLACK_ALERT_CHANNEL_ID`. The summary reads existing SQLite violation records; it does not fetch ServiceTitan or re-run the audit. Use command-level `SERVICE_TITAN_AUDIT_DRY_RUN=true python3 -m marketing_os_agent servicetitan-weekly-summary-once` to print the summary without sending Slack; do not copy that override into live Render unless intentionally pausing ServiceTitan sends.
 

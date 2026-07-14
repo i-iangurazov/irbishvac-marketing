@@ -556,6 +556,9 @@ class ServiceTitanClient:
         )
 
     def _should_fetch_related_category(self, category: str) -> bool:
+        active_categories = self._active_related_categories()
+        if active_categories is not None:
+            return category in active_categories
         disabled_rules = set(self.settings.service_titan_disabled_rule_ids)
         if self._should_prefilter_sales_only():
             allowed = {"appointments", "appointment_assignments", "estimates", "opportunities"}
@@ -582,6 +585,49 @@ class ServiceTitanClient:
                 allowed.add("forms")
             return category in allowed
         return True
+
+    def _active_related_categories(self) -> set[str] | None:
+        from ..domain.service_titan_rules import active_service_titan_rules
+
+        rule_ids = {rule.rule_id for rule in active_service_titan_rules(self.settings)}
+        if not rule_ids:
+            return set()
+
+        categories: set[str] = set()
+        rule_categories: dict[str, set[str]] = {
+            "job_left_open_after_visit": {"appointments", "appointment_assignments"},
+            "sales_options_fewer_than_three": {"estimates", "opportunities"},
+            "sales_photos_missing": {"attachments", "forms"},
+            "sales_arrival_after_first_half": {"appointments", "appointment_assignments"},
+            "hvac_options_fewer_than_three": {"estimates", "opportunities"},
+            "hvac_payment_missing_on_completed_job": {"invoices"},
+            "hvac_diagnosis_form_missing": {"forms"},
+            "hvac_required_photos_missing": {"attachments", "forms"},
+            "hvac_arrival_outside_window": {"appointments", "appointment_assignments"},
+            "plumbing_options_fewer_than_three": {"appointments", "appointment_assignments", "invoices", "estimates", "opportunities"},
+            "plumbing_payment_missing_on_completed_job": {"invoices"},
+            "plumbing_required_photos_missing": {"attachments", "forms"},
+            "plumbing_diagnosis_form_missing": {"forms"},
+            "plumbing_arrival_outside_window": {"appointments", "appointment_assignments"},
+            "dispatch_arrival_outside_first_30": {"appointments", "appointment_assignments"},
+            "dispatch_diagnostic_fee_missing": {"invoices", "invoice_items"},
+            "dispatch_options_not_presented": {"estimates", "opportunities"},
+            "dispatch_notes_missing": {"notes"},
+            "dispatch_photos_missing": {"attachments", "forms"},
+            "dispatch_supporting_evidence_missing": {"attachments", "forms", "invoices", "invoice_items"},
+            "tech_clock_in_missing": {"technician_time", "non_job_timesheets"},
+            "tech_clock_out_missing": {"technician_time", "non_job_timesheets"},
+            "tech_lunch_break_missing": {"technician_time", "non_job_timesheets"},
+            "tech_invoice_diagnostic_fee_missing": {"invoices", "invoice_items"},
+            "tech_required_phases_incomplete": {"job_history"},
+            "tech_required_operational_data_incomplete": {"forms", "equipment", "purchase_orders"},
+        }
+        unknown_rule_ids = rule_ids - set(rule_categories)
+        if unknown_rule_ids:
+            return None
+        for rule_id in rule_ids:
+            categories.update(rule_categories[rule_id])
+        return categories
 
     def _should_fetch_hvac_only(self) -> bool:
         return bool(

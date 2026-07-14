@@ -42,7 +42,14 @@ from marketing_os_agent.domain.service_titan_audit import (
 )
 from marketing_os_agent.domain.service_titan_handbook import handbook_rule_matrix
 from marketing_os_agent.domain.service_titan_discovery import ServiceTitanScopeDiscovery
-from marketing_os_agent.domain.service_titan_rules import RESULT_FAIL, RESULT_INSUFFICIENT, RESULT_NOT_APPLICABLE, RESULT_PASS, active_service_titan_rules
+from marketing_os_agent.domain.service_titan_rules import (
+    RESULT_FAIL,
+    RESULT_INSUFFICIENT,
+    RESULT_NOT_APPLICABLE,
+    RESULT_PASS,
+    active_service_titan_rules,
+    handbook_audit_rules,
+)
 from marketing_os_agent.domain.task_processor import TaskProcessor
 from marketing_os_agent.models import Campaign, Owner, Task
 from marketing_os_agent.persistence import Persistence
@@ -233,6 +240,8 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         plumbing_service_audit_enabled=False,
         technician_compliance_enabled=True,
         dispatcher_audit_enabled=True,
+        dispatcher_audit_slack_channel_id="",
+        dispatcher_audit_rule_ids=[],
         owner_slack_map={"Emil": "UEMIL", "Vadim": "UVADIM"},
         owner_email_map={},
         task_status_map={
@@ -1133,6 +1142,9 @@ class Harness:
 
 def _st_rule(audit_settings: Settings, rule_id: str):
     for rule in active_service_titan_rules(audit_settings):
+        if rule.rule_id == rule_id:
+            return rule
+    for rule in handbook_audit_rules():
         if rule.rule_id == rule_id:
             return rule
     raise AssertionError(f"Rule not found: {rule_id}")
@@ -3499,6 +3511,56 @@ class MarketingOsAgentTests(unittest.TestCase):
         rule_ids = {rule.rule_id for rule in active_service_titan_rules(audit_settings)}
         self.assertNotIn("tech_clock_out_missing", rule_ids)
         self.assertIn("dispatch_notes_missing", rule_ids)
+
+    def test_dispatcher_audit_does_not_auto_attach_handbook_rules(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=True,
+        )
+        rule_ids = {rule.rule_id for rule in active_service_titan_rules(audit_settings)}
+        self.assertIn("dispatch_notes_missing", rule_ids)
+        self.assertNotIn("missing_hhr_or_service_form", rule_ids)
+        self.assertNotIn("po_not_synced_to_service_titan", rule_ids)
+
+    def test_dispatcher_audit_rule_allowlist_limits_dispatch_rules(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            sales_comfort_advisor_audit_enabled=False,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=True,
+            dispatcher_audit_rule_ids=["dispatch_notes_missing"],
+        )
+        rule_ids = {rule.rule_id for rule in active_service_titan_rules(audit_settings)}
+        self.assertEqual(rule_ids, {"dispatch_notes_missing"})
+
+    def test_dispatcher_alert_uses_dispatcher_channel_when_configured(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            service_titan_audit_enabled=True,
+            service_titan_audit_dry_run=False,
+            service_titan_audit_backfill_alerts=True,
+            service_titan_audit_max_alerts_per_cycle=1,
+            sales_comfort_advisor_audit_enabled=False,
+            hvac_service_audit_enabled=False,
+            plumbing_service_audit_enabled=False,
+            technician_compliance_enabled=False,
+            dispatcher_audit_enabled=True,
+            dispatcher_audit_slack_channel_id="C-DISPATCH",
+            dispatcher_audit_rule_ids=["dispatch_notes_missing"],
+            slack_alert_channel_id="C-GENERAL",
+        )
+        job = st_job("dispatch-1", notes="", present_fields={"status", "notes", "business_unit", "job_type"})
+        audit = ServiceTitanAuditService(audit_settings, self.h.db, FakeServiceTitan([job]), self.h.slack)
+
+        summary = audit.audit_once(datetime(2026, 5, 15, 16, tzinfo=timezone.utc))
+
+        self.assertEqual(summary.alerts_sent, 1)
+        self.assertEqual(self.h.slack.messages[0][0], "C-DISPATCH")
+        self.assertNotEqual(self.h.slack.messages[0][0], "C-GENERAL")
 
     def test_handbook_rule_matrix_loads_required_metadata(self) -> None:
         matrix = handbook_rule_matrix()

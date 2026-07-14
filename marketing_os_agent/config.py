@@ -360,6 +360,8 @@ class Settings:
     plumbing_service_audit_enabled: bool
     technician_compliance_enabled: bool
     dispatcher_audit_enabled: bool
+    dispatcher_audit_slack_channel_id: str
+    dispatcher_audit_rule_ids: list[str]
 
     owner_slack_map: dict[str, str] = field(default_factory=dict)
     owner_email_map: dict[str, str] = field(default_factory=dict)
@@ -537,6 +539,8 @@ class Settings:
             install_audit_meal_break_after_hours=max(0.0, _float_env("INSTALL_AUDIT_MEAL_BREAK_AFTER_HOURS", 5.0)),
             install_audit_second_meal_after_hours=max(0.0, _float_env("INSTALL_AUDIT_SECOND_MEAL_AFTER_HOURS", 10.0)),
             install_audit_meal_break_min_minutes=max(0, _int_env("INSTALL_AUDIT_MEAL_BREAK_MIN_MINUTES", 30)),
+            dispatcher_audit_slack_channel_id=_env("DISPATCHER_AUDIT_SLACK_CHANNEL_ID"),
+            dispatcher_audit_rule_ids=_json_string_list_env("DISPATCHER_AUDIT_RULE_IDS_JSON", []),
             notifications_test_send=_bool_env("NOTIFICATIONS_TEST_SEND", False),
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
             claude_model=_env("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
