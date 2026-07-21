@@ -266,6 +266,7 @@ class AgentApp:
                 "weekdays_only": self.settings.install_audit_weekdays_only,
                 "enabled_rules": self.settings.install_audit_rule_ids,
                 "job_type_match_keywords": self.settings.install_audit_job_type_match_keywords,
+                "business_unit_names": self.settings.install_audit_business_unit_names,
                 "business_unit_ids": self.settings.install_audit_business_unit_ids,
                 "slack_channel_configured": bool(self.settings.install_audit_slack_channel_id),
             },

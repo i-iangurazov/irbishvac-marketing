@@ -250,6 +250,7 @@ class Settings:
     install_audit_schedule_enabled: bool
     install_audit_slack_channel_id: str
     install_audit_job_type_match_keywords: list[str]
+    install_audit_business_unit_names: list[str]
     install_audit_business_unit_ids: list[str]
     install_audit_rule_ids: list[str]
     install_audit_max_appointments: int
@@ -518,6 +519,10 @@ class Settings:
             install_audit_schedule_enabled=_bool_env("INSTALL_AUDIT_SCHEDULE_ENABLED", False),
             install_audit_slack_channel_id=_env("INSTALL_AUDIT_SLACK_CHANNEL_ID"),
             install_audit_job_type_match_keywords=_json_string_list_env("INSTALL_AUDIT_JOB_TYPE_MATCH_KEYWORDS", ["Installation"]),
+            install_audit_business_unit_names=_json_string_list_env(
+                "INSTALL_AUDIT_BUSINESS_UNIT_NAMES",
+                ["Electrical - Install", "HVAC - Install", "Plumbing - Install"],
+            ),
             install_audit_business_unit_ids=_dedupe_strings(
                 [
                     *_json_string_list_env("INSTALL_AUDIT_BUSINESS_UNIT_IDS", ["1809", "64313020"]),

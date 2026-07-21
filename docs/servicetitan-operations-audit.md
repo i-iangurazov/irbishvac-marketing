@@ -61,7 +61,7 @@ Current rollout status:
 - Sales / Comfort Advisor Audit: live with strict Render scope.
 - HVAC Service Audit: implemented and disabled by default; only the payment rule is a controlled-rollout candidate.
 - Plumbing Service Audit: implemented and disabled by default; the options rule is a controlled-rollout candidate.
-- Installer Audit: implemented as a separate read-only v3 ruleset, disabled and dry-run by default.
+- Installer Audit: implemented as a separate read-only v4 ruleset, disabled and dry-run by default.
 - PM Audit: implemented, disabled by default, and dry-run first only.
 - Weekly Summary: implemented and disabled by default.
 
@@ -175,19 +175,20 @@ Totals:
 
 ## Installer Audit
 
-The Installer Audit is a separate read-only v3 ruleset. It does not run Sales options rules, Sales first-half arrival rules, PM permit rules, or generic dispatcher rules. It uses `INSTALL_AUDIT_DRY_RUN`; do not use `SERVICE_TITAN_AUDIT_DRY_RUN` for Installer Audit validation.
+The Installer Audit is a separate read-only v4 ruleset. It does not run Sales options rules, Sales first-half arrival rules, PM permit rules, or generic dispatcher rules. It uses `INSTALL_AUDIT_DRY_RUN`; do not use `SERVICE_TITAN_AUDIT_DRY_RUN` for Installer Audit validation.
 
-Scope is intentionally strict because scope was the main v3 risk. A job is in scope only when the job type name or business unit name contains `Installation`, case-insensitive, or when the job business unit ID is one of the configured install IDs. Scope uses only job type and business unit fields; it does not use free text, notes, form names, customer summaries, or the presence of an `Installation Completion Form`.
+Scope is intentionally fail-closed because scope was the main v3 production risk. A job is in scope only when both v4 gates pass: its normalized business-unit name exactly matches Electrical - Install, HVAC - Install, or Plumbing - Install, and its job-type name contains `Installation` case-insensitively. Scope uses only job type and business unit fields. It never uses free text, notes, form names, customer summaries, or the presence of an `Installation Completion Form`.
 
 Default scope:
 
 ```env
 INSTALL_AUDIT_JOB_TYPE_MATCH_KEYWORDS=["Installation"]
+INSTALL_AUDIT_BUSINESS_UNIT_NAMES=["Electrical - Install","HVAC - Install","Plumbing - Install"]
 INSTALL_AUDIT_BUSINESS_UNIT_IDS=["1809","64313020"]
 ST_BU_INSTALLERS=1809,64313020
 ```
 
-Excluded by scope: Service Call, Maintenance, Warranty, Recall, Sales/Estimate, standby, internal placeholders, and non-install jobs. If job type and business unit fields are missing and the configured BU IDs do not match, Installer Audit skips the job instead of guessing.
+Configured IDs are only raw pre-enrichment hints. They never bypass the exact BU-name gate. Installation Follow-Up in a Service BU and City Inspection in an Install BU both fail scope. Service Call, Maintenance, Warranty, Recall, Sales/Estimate, standby, internal placeholders, and all other non-install jobs are excluded. Missing/unreadable BU or job-type names fail closed, and every dropped record is logged with its non-PII job ID, BU/job-type fields, and failed gate.
 
 Rules:
 
@@ -200,11 +201,11 @@ Rules:
 - `I7 / install_deposit_not_collected_before_day1` reminder: install starts today/tomorrow and no structured deposit payment is recorded, unless financed or deposit-waived/customer-arranged. Skips when payment/deposit relationship is unclear.
 - `I8 / install_payment_milestone_short` high/medium: final day unpaid balance or day-1 50% milestone short. Skips financed jobs, same-day end-of-day money windows, and unclear invoice/payment relationships.
 - `I9 / install_photos_missing` medium: completed install has fewer than `INSTALL_AUDIT_COMPLETION_PHOTOS_MIN` attached photos. Skips when photo/attachment count is unavailable.
-- `I10 / install_materials_not_scanned` medium: completed install has no scanned materials. Skips when material/Ply data is unavailable or the job is bare-labor/no-material.
+- `I10` retired in v4: the materials/Ply scan is a field-execution detail and is no longer part of Installer Audit. The ID is not reused.
 - `I11 / install_equipment_not_registered` medium: completed install has missing equipment registration/labels. Skips when equipment registration data is unavailable.
 - `I12 / install_review_not_requested` low: completed install has no review-requested flag. Skips when the review-requested field is unavailable.
 
-`INSTALL_AUDIT_RULE_IDS_JSON=[]` runs all v3 rules I1-I12. Use explicit values like `["I1"]` or `["I1","I2","I3"]` for targeted validation.
+`INSTALL_AUDIT_RULE_IDS_JSON=[]` runs all active v4 rules: I1-I9, I11, and I12. Use explicit values like `["I1"]` or `["I1","I2","I3"]` for targeted validation. I10 selects no rule because it is retired.
 
 Render env for a dry-run validation:
 
@@ -214,6 +215,9 @@ INSTALL_AUDIT_DRY_RUN=true
 INSTALL_AUDIT_RUN_ON_STARTUP=false
 INSTALL_AUDIT_SCHEDULE_ENABLED=false
 INSTALL_AUDIT_SLACK_CHANNEL_ID=
+INSTALL_AUDIT_JOB_TYPE_MATCH_KEYWORDS=["Installation"]
+INSTALL_AUDIT_BUSINESS_UNIT_NAMES=["Electrical - Install","HVAC - Install","Plumbing - Install"]
+INSTALL_AUDIT_BUSINESS_UNIT_IDS=["1809","64313020"]
 INSTALL_AUDIT_RULE_IDS_JSON=[]
 INSTALL_AUDIT_MAX_APPOINTMENTS=100
 INSTALL_AUDIT_LOOKBACK_DAYS=14
@@ -245,7 +249,7 @@ Action: <what to check / who to coach>
 Open in ServiceTitan: https://go.servicetitan.com/#/Job/Index/<job_id>
 ```
 
-Known skip-safe fields from current validation work: form status, timesheet/break data, job-scoped photo/attachment counts, material/Ply scan data, equipment registration, and review-requested fields may be unavailable depending on ServiceTitan tenant access. When unavailable, the rule returns `skip` with clear reasons such as `form_status_unavailable`, `timesheet_breaks_unavailable`, `photo_count_unavailable`, `materials_scan_unavailable`, `equipment_registration_unavailable`, or `review_requested_field_unavailable`; it does not send Slack.
+Known skip-safe fields from current validation work: form status, timesheet/break data, job-scoped photo/attachment counts, equipment registration, and review-requested fields may be unavailable depending on ServiceTitan tenant access. When unavailable, the rule returns `skip` with clear reasons such as `form_status_unavailable`, `timesheet_breaks_unavailable`, `photo_count_unavailable`, `equipment_registration_unavailable`, or `review_requested_field_unavailable`; it does not send Slack. For production rollout, start with I1 alone; hold I2/I3 until job-scoped form status is confirmed readable, then enable other rules only after their dry-run data is reliable.
 
 ## HVAC Service Audit
 

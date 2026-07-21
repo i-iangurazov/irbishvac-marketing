@@ -249,18 +249,19 @@ python3 -m marketing_os_agent install-audit-once
 python3 -m marketing_os_agent install-audit-test-slack
 ```
 
-Installer Audit v3 only evaluates real install jobs. Scope is based only on job type name or business unit name containing `Installation`, case-insensitive, plus the known install BU IDs in `INSTALL_AUDIT_BUSINESS_UNIT_IDS` / `ST_BU_INSTALLERS`. It does not use notes, customer summaries, or form names for scope, so an `Installation Completion Form` on a service job cannot make that job in scope. Service Call, Maintenance, Warranty, Recall, Sales/Estimate, standby, internal placeholder, and non-install jobs are excluded.
+Installer Audit v4 only evaluates real install jobs. Both scope gates must pass: the normalized business-unit name must exactly match Electrical - Install, HVAC - Install, or Plumbing - Install, and the job-type name must contain `Installation` case-insensitively. Known IDs in `INSTALL_AUDIT_BUSINESS_UNIT_IDS` / `ST_BU_INSTALLERS` are used only to avoid enriching obviously unrelated raw jobs; an ID never bypasses the final BU-name gate. Notes, customer summaries, form names, Service Call, Maintenance, Warranty, Recall, Sales/Estimate, standby, internal placeholders, City Inspection, and other non-install jobs cannot make a job in scope.
 
 ```env
 INSTALL_AUDIT_JOB_TYPE_MATCH_KEYWORDS=["Installation"]
+INSTALL_AUDIT_BUSINESS_UNIT_NAMES=["Electrical - Install","HVAC - Install","Plumbing - Install"]
 INSTALL_AUDIT_BUSINESS_UNIT_IDS=["1809","64313020"]
 ST_BU_INSTALLERS=1809,64313020
 INSTALL_AUDIT_RULE_IDS_JSON=[]
 ```
 
-`INSTALL_AUDIT_RULE_IDS_JSON=[]` runs all implemented v3 rules I1-I12. Use an explicit list such as `["I1"]` or `["I1","I2","I3"]` only for targeted validation.
+`INSTALL_AUDIT_RULE_IDS_JSON=[]` runs all active v4 rules: I1-I9, I11, and I12. Use an explicit list such as `["I1"]` or `["I1","I2","I3"]` for controlled rollout. I10 is retired and is not reused.
 
-Implemented rules are I1 job not marked complete, I2 completion form not completed, I3 authorization form not completed, I4 arrival not marked, I5 late arrival, I6 meal break not recorded, I7 deposit reminder, I8 payment milestone short, I9 photos missing, I10 materials not scanned, I11 equipment not registered, and I12 review not requested. Rules with unavailable ServiceTitan fields return `skip` with a reason such as `form_status_unavailable`, `timesheet_breaks_unavailable`, `photo_count_unavailable`, `materials_scan_unavailable`, `equipment_registration_unavailable`, or `review_requested_field_unavailable`; they do not create fake failures.
+Implemented rules are I1 job not marked complete, I2 completion form not completed, I3 authorization form not completed, I4 arrival not marked, I5 late arrival, I6 meal break not recorded, I7 deposit reminder, I8 payment milestone short, I9 photos missing, I11 equipment not registered, and I12 review not requested. I10 materials not scanned was removed by v4. Rules with unavailable ServiceTitan fields return `skip` with a reason such as `form_status_unavailable`, `timesheet_breaks_unavailable`, `photo_count_unavailable`, `equipment_registration_unavailable`, or `review_requested_field_unavailable`; they do not create fake failures. Keep I2/I3 held until job-scoped form status is confirmed readable.
 
 Install alerts send only to `INSTALL_AUDIT_SLACK_CHANNEL_ID`; there is no fallback to `PM_AUDIT_SLACK_CHANNEL_ID` or `SLACK_ALERT_CHANNEL_ID`. Slack/log output omits customer addresses, phone numbers, emails, raw notes, and raw customer summaries.
 

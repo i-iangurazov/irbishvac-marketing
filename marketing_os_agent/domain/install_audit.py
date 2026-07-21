@@ -7,7 +7,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from ..clients.servicetitan import ServiceTitanApiError, ServiceTitanClient, ServiceTitanJob
+from ..clients.servicetitan import (
+    ServiceTitanApiError,
+    ServiceTitanClient,
+    ServiceTitanJob,
+    install_strict_scope_failed_gates,
+)
 from ..clients.slack import SlackClient
 from ..config import Settings
 from ..persistence import Persistence
@@ -45,18 +50,6 @@ INSTALL_REVIEW_FIELD_NAMES = (
 COMPLETE_STATUS_WORDS = ("complete", "completed", "closed", "done")
 ACTIVE_STATUS_WORDS = ("working", "in progress", "started", "dispatched", *COMPLETE_STATUS_WORDS)
 EXCLUDED_APPOINTMENT_STATUS_WORDS = ("cancel", "rescheduled", "no access")
-OUT_OF_SCOPE_JOB_WORDS = (
-    "service call",
-    "maintenance",
-    "warranty",
-    "recall",
-    "sales",
-    "estimate",
-    "standby",
-    "internal",
-    "placeholder",
-)
-
 INSTALL_STORAGE_RULE_IDS = {
     "I1": "install_job_not_marked_complete",
     "I2": "install_completion_form_not_completed",
@@ -67,7 +60,6 @@ INSTALL_STORAGE_RULE_IDS = {
     "I7": "install_deposit_not_collected_before_day1",
     "I8": "install_payment_milestone_short",
     "I9": "install_photos_missing",
-    "I10": "install_materials_not_scanned",
     "I11": "install_equipment_not_registered",
     "I12": "install_review_not_requested",
 }
@@ -161,7 +153,7 @@ class InstallAuditSummary:
             f"Install audit: {self.status}",
             f"- enabled: {self.enabled}",
             f"- dry_run: {self.dry_run}",
-            f"- scope: {self.scope_text or 'Installer Audit scope: job type / BU contains Installation'}",
+            f"- scope: {self.scope_text or 'Installer Audit scope: exact install BU name AND job type contains Installation'}",
             f"- raw jobs fetched: {self.raw_jobs_fetched}",
             f"- out-of-scope jobs skipped: {self.jobs_skipped_out_of_scope}",
             f"- jobs enriched: {self.jobs_enriched}",
@@ -243,7 +235,8 @@ class InstallAuditService:
             {
                 "dry_run": summary.dry_run,
                 "rule_ids": self.settings.install_audit_rule_ids,
-                "scope": "job type / BU contains Installation",
+                "scope": "exact install BU name AND job type contains Installation",
+                "business_unit_names": self.settings.install_audit_business_unit_names,
                 "business_unit_ids": self.settings.install_audit_business_unit_ids,
                 "job_type_match_keywords": self.settings.install_audit_job_type_match_keywords,
             },
@@ -251,7 +244,8 @@ class InstallAuditService:
         logger.info(
             "install_audit_scope",
             extra={
-                "scope": "job type / BU contains Installation",
+                "scope": "exact install BU name AND job type contains Installation",
+                "business_unit_names": self.settings.install_audit_business_unit_names,
                 "business_unit_ids": self.settings.install_audit_business_unit_ids,
                 "job_type_match_keywords": self.settings.install_audit_job_type_match_keywords,
             },
@@ -261,6 +255,7 @@ class InstallAuditService:
             window_end = now + timedelta(days=self.settings.install_audit_lookahead_days)
             jobs = self.client.query_install_audit_jobs(
                 business_unit_ids=set(self.settings.install_audit_business_unit_ids),
+                business_unit_names=set(self.settings.install_audit_business_unit_names),
                 window_start=window_start,
                 window_end=window_end,
                 max_appointments=self.settings.install_audit_max_appointments,
@@ -282,7 +277,24 @@ class InstallAuditService:
         summary.raw_jobs_fetched = int(stats.get("raw_jobs_fetched", len(jobs)))
         summary.jobs_skipped_out_of_scope = int(stats.get("jobs_skipped_out_of_scope", 0))
         summary.jobs_enriched = int(stats.get("jobs_enriched", len(jobs)))
-        scoped_jobs = [_job for _job in jobs if _job_matches_install_scope(_job, self.settings)]
+        scoped_jobs: list[ServiceTitanJob] = []
+        for job in jobs:
+            failed_gates = _install_scope_failed_gates(job, self.settings)
+            if failed_gates:
+                summary.jobs_skipped_out_of_scope += 1
+                logger.info(
+                    "install_audit_scope_drop",
+                    extra={
+                        "job_id": job.job_id,
+                        "business_unit_id": job.business_unit_id,
+                        "business_unit_name": job.business_unit_name,
+                        "job_type_id": job.job_type_id,
+                        "job_type_name": job.job_type_name,
+                        "failed_gates": list(failed_gates),
+                    },
+                )
+                continue
+            scoped_jobs.append(job)
         summary.jobs_scanned = len(scoped_jobs)
         summary.appointments_evaluated = sum(max(1, len(_install_appointments(job))) for job in scoped_jobs)
         summary.data_fields = self._data_field_summary(scoped_jobs)
@@ -416,6 +428,7 @@ class InstallAuditService:
     def _data_field_summary(self, jobs: list[ServiceTitanJob]) -> dict[str, bool]:
         return {
             "install_job_type_match_keywords_configured": bool(self.settings.install_audit_job_type_match_keywords),
+            "install_business_unit_names_configured": bool(self.settings.install_audit_business_unit_names),
             "install_business_unit_ids_configured": bool(self.settings.install_audit_business_unit_ids),
             "homeowner_authorization_form_status_readable": any(_form_status(job, AUTHORIZATION_FORM_NAMES) is not None for job in jobs),
             "installation_completion_form_status_readable": any(_form_status(job, COMPLETION_FORM_NAMES) is not None for job in jobs),
@@ -448,7 +461,6 @@ def install_audit_rules() -> list[InstallAuditRule]:
         InstallAuditRule("I7", "Deposit Not Collected", "reminder", True, _rule_i7),
         InstallAuditRule("I8", "Payment Milestone Short", "high", True, _rule_i8),
         InstallAuditRule("I9", "Photos Missing", "medium", True, _rule_i9),
-        InstallAuditRule("I10", "Materials Not Scanned", "medium", True, _rule_i10),
         InstallAuditRule("I11", "Equipment Not Registered", "medium", True, _rule_i11),
         InstallAuditRule("I12", "Review Not Requested", "low", True, _rule_i12),
     ]
@@ -678,18 +690,6 @@ def _rule_i9(job: ServiceTitanJob, settings: Settings, now: datetime) -> Install
     return _result(job, "I9", "Photos Missing", "medium", INSTALL_PASS, "Required install photos are attached.", "No action needed.")
 
 
-def _rule_i10(job: ServiceTitanJob, settings: Settings, now: datetime) -> InstallRuleResult:
-    if not _job_completed(job):
-        return _result(job, "I10", "Materials Not Scanned", "medium", INSTALL_SKIP, "Install is not marked complete.", "No action needed.")
-    if _bare_labor_job(job):
-        return _result(job, "I10", "Materials Not Scanned", "medium", INSTALL_SKIP, "Bare-labor/no-material job type.", "No material scan needed.")
-    if not job.ply_data_available and "purchase_orders" not in job.present_fields:
-        return _result(job, "I10", "Materials Not Scanned", "medium", INSTALL_SKIP, "materials_scan_unavailable", "Confirm material scan source.")
-    if (job.purchase_orders_count or 0) <= 0:
-        return _result(job, "I10", "Materials Not Scanned", "medium", INSTALL_FAIL, "install is complete, but no materials were scanned onto the job", "scan install materials or confirm bare-labor exception")
-    return _result(job, "I10", "Materials Not Scanned", "medium", INSTALL_PASS, "Materials are recorded on the job.", "No action needed.")
-
-
 def _rule_i11(job: ServiceTitanJob, settings: Settings, now: datetime) -> InstallRuleResult:
     if not _job_completed(job):
         return _result(job, "I11", "Equipment Not Registered", "medium", INSTALL_SKIP, "Install is not marked complete.", "No action needed.")
@@ -878,25 +878,25 @@ def _alert_text(result: InstallRuleResult) -> str:
 
 
 def _job_matches_install_scope(job: ServiceTitanJob, settings: Settings) -> bool:
-    configured_ids = {value.strip() for value in settings.install_audit_business_unit_ids if value.strip()}
-    text_fields = [job.job_type_name, job.business_unit_name]
-    if any(_scope_text_excluded(value) for value in text_fields if value):
-        return False
-    keywords = [_normalize_key(value) for value in settings.install_audit_job_type_match_keywords if value.strip()]
-    text_match = any(keyword and keyword in _normalize_key(value) for keyword in keywords for value in text_fields if value)
-    bu_match = bool(configured_ids and job.business_unit_id in configured_ids)
-    return text_match or bu_match
+    return not _install_scope_failed_gates(job, settings)
 
 
-def _scope_text_excluded(value: str) -> bool:
-    normalized = _normalize_key(value)
-    return any(word in normalized for word in OUT_OF_SCOPE_JOB_WORDS)
+def _install_scope_failed_gates(job: ServiceTitanJob, settings: Settings) -> tuple[str, ...]:
+    return install_strict_scope_failed_gates(
+        job,
+        set(settings.install_audit_business_unit_names),
+        settings.install_audit_job_type_match_keywords,
+    )
 
 
 def _install_scope_text(settings: Settings) -> str:
+    bu_names = ",".join(settings.install_audit_business_unit_names) or "<none>"
     bu_ids = ",".join(settings.install_audit_business_unit_ids) or "<none>"
     keywords = ",".join(settings.install_audit_job_type_match_keywords) or "Installation"
-    return f"Installer Audit scope: job type / BU contains {keywords}; BU IDs: {bu_ids}"
+    return (
+        f"Installer Audit scope: BU name in {bu_names} AND job type contains {keywords}; "
+        f"BU IDs used for pre-enrichment: {bu_ids}"
+    )
 
 
 def _format_arrived(result: InstallRuleResult) -> str:
@@ -1223,11 +1223,6 @@ def _field_matches(job: ServiceTitanJob, names: tuple[str, ...]) -> list[tuple[s
         if value is not None:
             matches.append((raw_name, str(value)))
     return matches
-
-
-def _bare_labor_job(job: ServiceTitanJob) -> bool:
-    text = _normalize_key(" ".join([job.job_type_name, *job.tag_names]))
-    return any(token in text for token in ("bare labor", "no material", "no materials", "labor only"))
 
 
 def _on_duty_meal_agreement_status(jobs: list[ServiceTitanJob]) -> bool | None:

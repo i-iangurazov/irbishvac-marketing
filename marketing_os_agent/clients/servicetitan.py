@@ -256,6 +256,7 @@ class ServiceTitanClient:
         self,
         *,
         business_unit_ids: set[str],
+        business_unit_names: set[str],
         window_start: datetime,
         window_end: datetime,
         max_appointments: int,
@@ -276,26 +277,84 @@ class ServiceTitanClient:
             "jobs_enriched": 0,
         }
         jobs: list[ServiceTitanJob] = []
+        business_unit_name_map = self.query_install_business_unit_names()
+        job_type_name_map = self.query_install_job_type_names()
         clean_business_unit_ids = {value.strip() for value in business_unit_ids if value.strip()}
+        clean_business_unit_names = {value.strip() for value in business_unit_names if value.strip()}
         install_keywords = [value.strip() for value in self.settings.install_audit_job_type_match_keywords if value.strip()]
         for record in records:
-            parsed = parse_service_titan_job(record, self.settings)
-            if not _install_prefilter_matches(parsed, clean_business_unit_ids, install_keywords):
+            parsed = _hydrate_install_scope_names(
+                parse_service_titan_job(record, self.settings),
+                business_unit_name_map,
+                job_type_name_map,
+            )
+            if not _install_prefilter_matches(parsed, clean_business_unit_ids, clean_business_unit_names, install_keywords):
                 stats["jobs_skipped_out_of_scope"] += 1
+                _log_install_scope_drop(parsed, _install_prefilter_failed_gates(parsed, clean_business_unit_ids, clean_business_unit_names, install_keywords))
                 continue
             enriched = self._enrich_job(parsed)
             stats["jobs_enriched"] += 1
-            if not _install_prefilter_matches(enriched, clean_business_unit_ids, install_keywords):
+            failed_gates = install_strict_scope_failed_gates(enriched, clean_business_unit_names, install_keywords)
+            if failed_gates:
                 stats["jobs_skipped_out_of_scope"] += 1
+                _log_install_scope_drop(enriched, failed_gates)
                 continue
             if _job_known_outside_install_window(enriched, window_start, window_end):
                 stats["jobs_skipped_out_of_scope"] += 1
+                _log_install_scope_drop(enriched, ("appointment_window",))
                 continue
             jobs.append(enriched)
             if len(jobs) >= max(1, max_appointments):
                 break
         self.last_install_audit_stats = stats
         return jobs
+
+    def query_install_business_unit_names(self) -> dict[str, str]:
+        return self._install_scope_name_map(
+            self._tenant_path("settings", "business-units"),
+            ("id", "businessUnitId"),
+            ("name", "businessUnitName", "displayName"),
+            "business_units",
+        )
+
+    def query_install_job_type_names(self) -> dict[str, str]:
+        return self._install_scope_name_map(
+            self._tenant_path("jpm", "job-types"),
+            ("id", "jobTypeId"),
+            ("name", "jobTypeName", "displayName"),
+            "job_types",
+        )
+
+    def _install_scope_name_map(
+        self,
+        path: str,
+        id_fields: tuple[str, ...],
+        name_fields: tuple[str, ...],
+        category: str,
+    ) -> dict[str, str]:
+        try:
+            records = self._get_paginated(
+                path,
+                {"pageSize": "200", "includeTotal": "true"},
+                related_category=f"install_{category}",
+            )
+        except Exception as exc:
+            logger.warning(
+                "install_audit_scope_metadata_unavailable",
+                extra={"category": category, "error_type": type(exc).__name__},
+            )
+            return {}
+        result: dict[str, str] = {}
+        for record in records:
+            identifier = str(_raw_value(record, id_fields) or "").strip()
+            name = str(_raw_value(record, name_fields) or "").strip()
+            if identifier and name:
+                result[identifier] = name
+        logger.info(
+            "install_audit_scope_metadata_loaded",
+            extra={"category": category, "records": len(result)},
+        )
+        return result
 
     def query_pm_projects(
         self,
@@ -1668,30 +1727,108 @@ def _pm_project_matches_scope(
     return True
 
 
-def _install_prefilter_matches(job: ServiceTitanJob, business_unit_ids: set[str], keywords: list[str]) -> bool:
-    text_values = [job.job_type_name, job.business_unit_name]
-    normalized_values = [_normalize_key(value) for value in text_values if value]
-    excluded_words = (
-        "service call",
-        "maintenance",
-        "warranty",
-        "recall",
-        "sales",
-        "estimate",
-        "standby",
-        "internal",
-        "placeholder",
+def _install_prefilter_matches(
+    job: ServiceTitanJob,
+    business_unit_ids: set[str],
+    business_unit_names: set[str],
+    keywords: list[str],
+) -> bool:
+    return not _install_prefilter_failed_gates(job, business_unit_ids, business_unit_names, keywords)
+
+
+def _install_prefilter_failed_gates(
+    job: ServiceTitanJob,
+    business_unit_ids: set[str],
+    business_unit_names: set[str],
+    keywords: list[str],
+) -> tuple[str, ...]:
+    allowed_names = {_normalize_key(value) for value in business_unit_names if value}
+    normalized_keywords = {_normalize_key(value) for value in keywords if value}
+    business_unit_name = _normalize_key(job.business_unit_name) if job.business_unit_name else ""
+    business_unit_candidate = business_unit_name in allowed_names or bool(job.business_unit_id and job.business_unit_id in business_unit_ids)
+    job_type_name = _normalize_key(job.job_type_name) if job.job_type_name else ""
+    job_type_candidate = bool(job_type_name and any(keyword in job_type_name for keyword in normalized_keywords))
+    failed: list[str] = []
+    if not business_unit_candidate:
+        failed.append("business_unit")
+    if not job_type_candidate or _install_job_type_excluded(job_type_name):
+        failed.append("job_type")
+    return tuple(failed)
+
+
+def install_strict_scope_failed_gates(
+    job: ServiceTitanJob,
+    business_unit_names: set[str],
+    keywords: list[str],
+) -> tuple[str, ...]:
+    allowed_names = {_normalize_key(value) for value in business_unit_names if value}
+    normalized_keywords = {_normalize_key(value) for value in keywords if value}
+    business_unit_name = _normalize_key(job.business_unit_name) if job.business_unit_name else ""
+    job_type_name = _normalize_key(job.job_type_name) if job.job_type_name else ""
+    failed: list[str] = []
+    if not business_unit_name or business_unit_name not in allowed_names:
+        failed.append("business_unit")
+    if (
+        not job_type_name
+        or not any(keyword in job_type_name for keyword in normalized_keywords)
+        or _install_job_type_excluded(job_type_name)
+    ):
+        failed.append("job_type")
+    return tuple(failed)
+
+
+def _install_job_type_excluded(normalized_job_type: str) -> bool:
+    return any(
+        word in normalized_job_type
+        for word in (
+            "service call",
+            "maintenance",
+            "warranty",
+            "recall",
+            "sales",
+            "estimate",
+            "standby",
+            "internal",
+            "placeholder",
+            "city inspection",
+        )
     )
-    if any(any(word in value for word in excluded_words) for value in normalized_values):
-        return False
-    if business_unit_ids and job.business_unit_id in business_unit_ids:
-        return True
-    normalized_keywords = [_normalize_key(keyword) for keyword in keywords if keyword]
-    if normalized_keywords and any(keyword in value for keyword in normalized_keywords for value in normalized_values):
-        return True
-    if not business_unit_ids and not normalized_keywords:
-        return True
-    return False
+
+
+def _hydrate_install_scope_names(
+    job: ServiceTitanJob,
+    business_unit_name_map: dict[str, str],
+    job_type_name_map: dict[str, str],
+) -> ServiceTitanJob:
+    business_unit_name = job.business_unit_name or business_unit_name_map.get(job.business_unit_id, "")
+    job_type_name = job.job_type_name or job_type_name_map.get(job.job_type_id, "")
+    if business_unit_name == job.business_unit_name and job_type_name == job.job_type_name:
+        return job
+    present_fields = set(job.present_fields)
+    if business_unit_name:
+        present_fields.add("business_unit")
+    if job_type_name:
+        present_fields.add("job_type")
+    return replace(
+        job,
+        business_unit_name=business_unit_name,
+        job_type_name=job_type_name,
+        present_fields=present_fields,
+    )
+
+
+def _log_install_scope_drop(job: ServiceTitanJob, failed_gates: tuple[str, ...]) -> None:
+    logger.info(
+        "install_audit_scope_drop",
+        extra={
+            "job_id": job.job_id,
+            "business_unit_id": job.business_unit_id,
+            "business_unit_name": job.business_unit_name,
+            "job_type_id": job.job_type_id,
+            "job_type_name": job.job_type_name,
+            "failed_gates": list(failed_gates),
+        },
+    )
 
 
 def _job_known_outside_install_window(job: ServiceTitanJob, window_start: datetime, window_end: datetime) -> bool:
