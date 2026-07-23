@@ -259,6 +259,10 @@ class Settings:
     install_audit_run_hour: int
     install_audit_run_minute: int
     install_audit_weekdays_only: bool
+    install_audit_evening_report_enabled: bool
+    install_audit_evening_report_hour: int
+    install_audit_evening_report_minute: int
+    install_audit_evening_report_max_jobs: int
     install_audit_first_day_collect_pct: float
     install_audit_final_day_collect_pct: float
     install_audit_deposit_reminder_lead_days: int
@@ -536,6 +540,13 @@ class Settings:
             install_audit_run_hour=_hour_env("INSTALL_AUDIT_RUN_HOUR", 8),
             install_audit_run_minute=max(0, min(59, _int_env("INSTALL_AUDIT_RUN_MINUTE", 0))),
             install_audit_weekdays_only=_bool_env("INSTALL_AUDIT_WEEKDAYS_ONLY", True),
+            install_audit_evening_report_enabled=_bool_env("INSTALL_AUDIT_EVENING_REPORT_ENABLED", False),
+            install_audit_evening_report_hour=_hour_env("INSTALL_AUDIT_EVENING_REPORT_HOUR", 20),
+            install_audit_evening_report_minute=max(
+                0,
+                min(59, _int_env("INSTALL_AUDIT_EVENING_REPORT_MINUTE", 0)),
+            ),
+            install_audit_evening_report_max_jobs=max(1, _int_env("INSTALL_AUDIT_EVENING_REPORT_MAX_JOBS", 100)),
             install_audit_first_day_collect_pct=max(0.0, _float_env("INSTALL_AUDIT_FIRST_DAY_COLLECT_PCT", 50.0)),
             install_audit_final_day_collect_pct=max(0.0, _float_env("INSTALL_AUDIT_FINAL_DAY_COLLECT_PCT", 100.0)),
             install_audit_deposit_reminder_lead_days=max(0, _int_env("INSTALL_AUDIT_DEPOSIT_REMINDER_LEAD_DAYS", 1)),

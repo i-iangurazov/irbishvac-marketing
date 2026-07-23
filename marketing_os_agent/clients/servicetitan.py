@@ -220,6 +220,11 @@ class ServiceTitanClient:
             "jobs_skipped_out_of_scope": 0,
             "jobs_enriched": 0,
         }
+        self.last_install_evening_report_stats: dict[str, int] = {
+            "raw_jobs_fetched": 0,
+            "jobs_skipped_out_of_scope": 0,
+            "jobs_enriched": 0,
+        }
 
     @property
     def available(self) -> bool:
@@ -308,6 +313,218 @@ class ServiceTitanClient:
                 break
         self.last_install_audit_stats = stats
         return jobs
+
+    def query_install_jobs_by_appointment_window(
+        self,
+        *,
+        business_unit_ids: set[str],
+        business_unit_names: set[str],
+        window_start: datetime,
+        window_end: datetime,
+        max_jobs: int,
+    ) -> list[ServiceTitanJob]:
+        """Load only true install jobs with an appointment in the requested window."""
+        records = self._get_paginated(
+            f"/jpm/v2/tenant/{self.settings.servicetitan_tenant_id}/jobs",
+            {
+                "appointmentStartsOnOrAfter": window_start.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+                "appointmentStartsBefore": window_end.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+                "pageSize": str(self.settings.service_titan_audit_page_size),
+                "includeTotal": "true",
+            },
+        )
+        stats = {
+            "raw_jobs_fetched": len(records),
+            "jobs_skipped_out_of_scope": 0,
+            "jobs_enriched": 0,
+        }
+        business_unit_name_map = self.query_install_business_unit_names()
+        job_type_name_map = self.query_install_job_type_names()
+        clean_business_unit_ids = {value.strip() for value in business_unit_ids if value.strip()}
+        clean_business_unit_names = {value.strip() for value in business_unit_names if value.strip()}
+        install_keywords = [value.strip() for value in self.settings.install_audit_job_type_match_keywords if value.strip()]
+        jobs: list[ServiceTitanJob] = []
+        for record in records:
+            parsed = _hydrate_install_scope_names(
+                parse_service_titan_job(record, self.settings),
+                business_unit_name_map,
+                job_type_name_map,
+            )
+            if not _install_prefilter_matches(parsed, clean_business_unit_ids, clean_business_unit_names, install_keywords):
+                stats["jobs_skipped_out_of_scope"] += 1
+                continue
+            enriched = self._enrich_install_evening_job(parsed)
+            stats["jobs_enriched"] += 1
+            if install_strict_scope_failed_gates(enriched, clean_business_unit_names, install_keywords):
+                stats["jobs_skipped_out_of_scope"] += 1
+                continue
+            if _job_known_outside_install_window(enriched, window_start, window_end):
+                stats["jobs_skipped_out_of_scope"] += 1
+                continue
+            jobs.append(enriched)
+            if len(jobs) >= max(1, max_jobs):
+                break
+        self.last_install_evening_report_stats = stats
+        return jobs
+
+    def _enrich_install_evening_job(self, job: ServiceTitanJob) -> ServiceTitanJob:
+        """Fetch only appointments, assignments, and invoices needed by the evening report."""
+        present_fields = set(job.present_fields)
+        missing_data = dict(job.missing_data)
+        related_counts = dict(job.related_counts)
+        available_keys = dict(job.available_keys)
+
+        appointments, appointments_error = self._install_evening_related_records(
+            "appointments",
+            self._tenant_path("jpm", "appointments"),
+            {"jobId": job.job_id},
+        )
+        related_counts["appointments"] = len(appointments)
+        available_keys["appointments"] = _records_keys(appointments)
+        appointment_id = job.appointment_id
+        appointment_status = job.appointment_status
+        arrival_window_start = job.arrival_window_start
+        arrival_window_end = job.arrival_window_end
+        arrived_at = job.arrived_at
+        if appointments_error:
+            _mark_missing(missing_data, ("appointment_id", "arrival_window", "arrived_at"), appointments_error)
+        elif appointments:
+            selected = _select_appointment(appointments)
+            appointment_id = appointment_id or str(_raw_value(selected, ("id", "appointmentId")) or "")
+            appointment_status = appointment_status or _display_value(
+                _raw_value(selected, ("status", "appointmentStatus", "status.name"))
+            )
+            arrival_window_start = arrival_window_start or _parse_datetime(
+                _raw_value(selected, ("arrivalWindowStart", "scheduledStart", "start"))
+            )
+            arrival_window_end = arrival_window_end or _parse_datetime(
+                _raw_value(selected, ("arrivalWindowEnd", "scheduledEnd", "end"))
+            )
+            arrived_at = arrived_at or _parse_datetime(
+                _raw_value(selected, ("arrivedOn", "arrivedAt", "arrivalTime", "technicianArrivedOn"))
+            )
+            present_fields.update({"appointment_id", "arrival_window"})
+            if arrived_at:
+                present_fields.add("arrived_at")
+
+        appointment_ids = [
+            str(_raw_value(record, ("id", "appointmentId")) or "")
+            for record in appointments
+            if str(_raw_value(record, ("id", "appointmentId")) or "")
+        ]
+        assignments: list[dict[str, Any]] = []
+        if appointment_ids:
+            assignments, assignments_error = self._install_evening_related_records(
+                "appointment_assignments",
+                self._tenant_path("dispatch", "appointment-assignments"),
+                {"appointmentIds": ",".join(appointment_ids)},
+            )
+            related_counts["appointment_assignments"] = len(assignments)
+            available_keys["appointment_assignments"] = _records_keys(assignments)
+            if assignments_error:
+                missing_data.setdefault("technician", assignments_error)
+
+        technician_id = job.technician_id
+        technician_name = job.technician_name
+        if assignments:
+            technician_id = technician_id or str(
+                _raw_value(assignments[0], ("technicianId", "employeeId", "technician.id", "employee.id")) or ""
+            )
+            technician_name = technician_name or str(
+                _raw_value(assignments[0], ("technicianName", "employeeName", "name", "technician.name", "employee.name")) or ""
+            )
+            if technician_id or technician_name:
+                present_fields.add("technician")
+
+        invoices, invoices_error = self._install_evening_related_records(
+            "invoices",
+            self._tenant_path("accounting", "invoices"),
+            {"jobId": job.job_id},
+        )
+        related_counts["invoices"] = len(invoices)
+        available_keys["invoices"] = _records_keys(invoices)
+        invoice_id = job.invoice_id
+        invoice_status = job.invoice_status
+        invoice_total = job.invoice_total
+        invoice_balance = job.invoice_balance
+        payment_total = job.payment_total
+        payments_count = job.payments_count
+        if invoices_error:
+            missing_data.setdefault("payments", invoices_error)
+        elif invoices:
+            invoice_id = invoice_id or str(_raw_value(invoices[0], ("id", "invoiceId")) or "")
+            invoice_status = invoice_status or _display_value(
+                _raw_value(invoices[0], ("status", "invoiceStatus", "status.name"))
+            )
+            invoice_total = invoice_total if invoice_total is not None else _first_float(
+                invoices,
+                ("total", "subtotal", "amount"),
+            )
+            invoice_balance = invoice_balance if invoice_balance is not None else _first_float(
+                invoices,
+                ("balance", "remainingBalance", "amountDue"),
+            )
+            payment_summary = _payment_summary(invoices)
+            payment_total = payment_total if payment_total is not None else payment_summary["payment_total"]
+            payments_count = payments_count if payments_count is not None else payment_summary["payments_count"]
+            present_fields.update({"invoice_status", "payments"})
+
+        raw = dict(job.raw)
+        raw["appointments"] = appointments
+        raw["appointment_assignments"] = assignments
+        raw["invoices"] = invoices
+        return replace(
+            job,
+            appointment_id=appointment_id,
+            appointment_status=appointment_status,
+            arrival_window_start=arrival_window_start,
+            arrival_window_end=arrival_window_end,
+            arrived_at=arrived_at,
+            technician_id=technician_id,
+            technician_name=technician_name,
+            invoice_id=invoice_id,
+            invoice_status=invoice_status,
+            invoice_total=invoice_total,
+            invoice_balance=invoice_balance,
+            payment_total=payment_total,
+            payments_count=payments_count,
+            present_fields=present_fields,
+            missing_data=missing_data,
+            related_counts=related_counts,
+            available_keys=available_keys,
+            raw=raw,
+        )
+
+    def _install_evening_related_records(
+        self,
+        category: str,
+        path: str,
+        params: dict[str, str],
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Fetch report-required data independently of live audit rule allowlists."""
+        report_category = f"install_evening_{category}"
+        payload = {
+            "pageSize": str(self.settings.service_titan_audit_page_size),
+            "includeTotal": "true",
+            **{key: value for key, value in params.items() if value},
+        }
+        try:
+            records = self._get_paginated(path, payload, related_category=report_category)
+            if report_category in self._disabled_related_categories:
+                return [], self._disabled_related_reasons.get(report_category) or f"{category} endpoint unavailable"
+            return records, None
+        except ServiceTitanApiError as exc:
+            logger.warning(
+                "install_evening_related_fetch_unavailable",
+                extra={"category": category, "path": path, "status": exc.status, "error_message": exc.message},
+            )
+            return [], f"{path} returned HTTP {exc.status}"
+        except Exception as exc:
+            logger.warning(
+                "install_evening_related_fetch_failed",
+                extra={"category": category, "path": path, "error_type": type(exc).__name__},
+            )
+            return [], f"{path} request failed"
 
     def query_install_business_unit_names(self) -> dict[str, str]:
         return self._install_scope_name_map(

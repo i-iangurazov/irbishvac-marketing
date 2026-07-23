@@ -15,6 +15,7 @@ from .clients.slack import SlackClient
 from .config import HealthReport, Settings
 from .domain.campaign_health import CampaignHealthService
 from .domain.install_audit import INSTALL_AUDIT_TEST_MESSAGE, InstallAuditService, InstallAuditSummary
+from .domain.install_evening_report import InstallEveningReportService, InstallEveningReportSummary
 from .domain.owner_mapping import OwnerResolver
 from .domain.pm_audit import PM_AUDIT_TEST_MESSAGE, PMAuditService, PMAuditSummary
 from .domain.formatting import format_friday_roundup_email
@@ -105,6 +106,7 @@ class AgentApp:
         self.service_titan_scope_discovery = ServiceTitanScopeDiscovery(settings, self.service_titan)
         self.pm_audit = PMAuditService(settings, self.service_titan, self.slack)
         self.install_audit = InstallAuditService(settings, self.db, self.service_titan, self.slack)
+        self.install_evening_report = InstallEveningReportService(settings, self.db, self.service_titan, self.slack)
 
     def initialize_storage(self) -> None:
         self.db.initialize()
@@ -124,6 +126,7 @@ class AgentApp:
         self._log_service_titan_weekly_summary_config()
         self._log_pm_audit_config()
         self._log_install_audit_config()
+        self._log_install_evening_report_config()
 
         scheduler = Scheduler(self.settings, self.db)
         scheduler.register(ScheduledJob("monday_push", monday_8am, self.run_monday_push))
@@ -143,6 +146,14 @@ class AgentApp:
             scheduler.register(ScheduledJob("pm_audit", self.should_run_pm_audit_at, self.run_pm_audit_scheduled))
         if self.settings.install_audit_enabled and self.settings.install_audit_schedule_enabled:
             scheduler.register(ScheduledJob("install_audit", self.should_run_install_audit_at, self.run_install_audit_scheduled))
+        if self.settings.install_audit_evening_report_enabled:
+            scheduler.register(
+                ScheduledJob(
+                    "install_evening_report",
+                    self.should_run_install_evening_report_at,
+                    self.run_install_evening_report_scheduled,
+                )
+            )
 
         http_server = AgentHttpServer(
             "0.0.0.0",
@@ -272,6 +283,22 @@ class AgentApp:
             },
         )
 
+    def _log_install_evening_report_config(self) -> None:
+        if not self.settings.install_audit_evening_report_enabled:
+            logger.info("install_evening_report_scheduler_disabled")
+            return
+        logger.info(
+            "install_evening_report_scheduler_enabled",
+            extra={
+                "dry_run": self.settings.install_audit_dry_run,
+                "run_hour": self.settings.install_audit_evening_report_hour,
+                "run_minute": self.settings.install_audit_evening_report_minute,
+                "timezone": self.settings.timezone,
+                "max_jobs": self.settings.install_audit_evening_report_max_jobs,
+                "slack_channel_configured": bool(self.settings.install_audit_slack_channel_id),
+            },
+        )
+
     def _log_service_titan_weekly_summary_config(self) -> None:
         if not self.settings.service_titan_weekly_summary_enabled:
             logger.info("servicetitan_weekly_summary_disabled")
@@ -314,6 +341,9 @@ class AgentApp:
     def run_install_audit_once(self, now: datetime | None = None) -> InstallAuditSummary:
         return self.install_audit.run_once(now, require_enabled=False)
 
+    def run_install_evening_report_once(self, now: datetime | None = None) -> InstallEveningReportSummary:
+        return self.install_evening_report.run_once(now, require_enabled=False)
+
     def should_run_pm_audit_at(self, now: datetime) -> bool:
         if not self.settings.pm_audit_enabled or not self.settings.pm_audit_schedule_enabled:
             return False
@@ -328,11 +358,59 @@ class AgentApp:
             return False
         return now.hour == self.settings.install_audit_run_hour and now.minute == self.settings.install_audit_run_minute
 
+    def should_run_install_evening_report_at(self, now: datetime) -> bool:
+        if not self.settings.install_audit_evening_report_enabled:
+            return False
+        if self.db.get_kv("install_evening_report_auto_last_run_date") == now.date().isoformat():
+            return False
+        scheduled_minute = self.settings.install_audit_evening_report_hour * 60 + self.settings.install_audit_evening_report_minute
+        current_minute = now.hour * 60 + now.minute
+        if current_minute < scheduled_minute:
+            return False
+        last_attempt_raw = self.db.get_kv("install_evening_report_auto_last_attempt_at")
+        if last_attempt_raw:
+            try:
+                last_attempt = datetime.fromisoformat(last_attempt_raw)
+            except ValueError:
+                last_attempt = None
+            if last_attempt and last_attempt.date() == now.date() and now - last_attempt < timedelta(minutes=15):
+                return False
+        return True
+
     def run_pm_audit_scheduled(self, now: datetime | None = None) -> PMAuditSummary | None:
         return self.run_pm_audit_automatic("scheduled", now)
 
     def run_install_audit_scheduled(self, now: datetime | None = None) -> InstallAuditSummary | None:
         return self.run_install_audit_automatic("scheduled", now)
+
+    def run_install_evening_report_scheduled(self, now: datetime | None = None) -> InstallEveningReportSummary | None:
+        if not self.settings.install_audit_evening_report_enabled:
+            logger.info("install_evening_report_skipped_disabled")
+            return None
+        local_now = self._pm_audit_local_now(now)
+        run_date = local_now.date().isoformat()
+        marker_key = "install_evening_report_auto_last_run_date"
+        if self.db.get_kv(marker_key) == run_date:
+            logger.info("install_evening_report_skipped_already_ran_today", extra={"date": run_date})
+            return None
+        logger.info(
+            "install_evening_report_started",
+            extra={
+                "dry_run": self.settings.install_audit_dry_run,
+                "report_date": run_date,
+                "slack_channel_configured": bool(self.settings.install_audit_slack_channel_id),
+            },
+        )
+        self.db.set_kv("install_evening_report_auto_last_attempt_at", local_now.isoformat())
+        summary = self.install_evening_report.run_once(local_now, require_enabled=True)
+        if summary.status == "completed" and (summary.dry_run or summary.slack_sent == 1):
+            self.db.set_kv(marker_key, run_date)
+        else:
+            logger.warning(
+                "install_evening_report_retry_pending",
+                extra={"date": run_date, "status": summary.status, "errors": summary.errors},
+            )
+        return summary
 
     def run_pm_audit_automatic(self, trigger: str, now: datetime | None = None) -> PMAuditSummary | None:
         if not self.settings.pm_audit_enabled:

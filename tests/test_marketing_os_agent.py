@@ -33,6 +33,7 @@ from marketing_os_agent.app import AgentApp
 from marketing_os_agent.__main__ import _settings_error_diagnostics_text
 from marketing_os_agent.domain.campaign_health import CampaignHealthService
 from marketing_os_agent.domain.install_audit import INSTALL_FAIL, INSTALL_PASS, INSTALL_SKIP, InstallAuditService, active_install_audit_rules
+from marketing_os_agent.domain.install_evening_report import InstallEveningReportService
 from marketing_os_agent.domain.owner_mapping import OwnerResolver
 from marketing_os_agent.domain.pm_audit import PM_FAIL, PM_PASS, PM_SKIP, PMAuditService
 from marketing_os_agent.domain.reports import ReportService, month_bounds, select_campaigns_starting_between, week_bounds
@@ -147,6 +148,10 @@ def settings(sqlite_path: str, **overrides: object) -> Settings:
         install_audit_run_hour=8,
         install_audit_run_minute=0,
         install_audit_weekdays_only=True,
+        install_audit_evening_report_enabled=False,
+        install_audit_evening_report_hour=20,
+        install_audit_evening_report_minute=0,
+        install_audit_evening_report_max_jobs=100,
         install_audit_first_day_collect_pct=50.0,
         install_audit_final_day_collect_pct=100.0,
         install_audit_deposit_reminder_lead_days=1,
@@ -950,6 +955,11 @@ class FakeInstallServiceTitan:
             "jobs_skipped_out_of_scope": 0,
             "jobs_enriched": len(self.jobs),
         }
+        self.last_install_evening_report_stats: dict[str, int] = {
+            "raw_jobs_fetched": len(self.jobs),
+            "jobs_skipped_out_of_scope": 0,
+            "jobs_enriched": len(self.jobs),
+        }
 
     def query_install_audit_jobs(self, **kwargs: object) -> list[ServiceTitanJob]:
         self.query_kwargs = kwargs
@@ -964,14 +974,23 @@ class FakeInstallServiceTitan:
         max_appointments = int(kwargs.get("max_appointments") or len(jobs) or 1)
         return jobs[:max_appointments]
 
+    def query_install_jobs_by_appointment_window(self, **kwargs: object) -> list[ServiceTitanJob]:
+        self.query_kwargs = kwargs
+        if self.fail:
+            raise ServiceTitanApiError(503, {"message": "unavailable"})
+        max_jobs = int(kwargs.get("max_jobs") or len(self.jobs) or 1)
+        return list(self.jobs)[:max_jobs]
+
 
 class FilteringInstallServiceTitan(ServiceTitanClient):
     def __init__(self, audit_settings: Settings, records: list[dict[str, object]]) -> None:
         super().__init__(audit_settings)
         self.records = records
         self.enriched_job_ids: list[str] = []
+        self.query_params: list[dict[str, str]] = []
 
     def _get_paginated(self, path: str, params: dict[str, str], *, related_category: str | None = None) -> list[dict[str, object]]:
+        self.query_params.append(dict(params))
         return self.records
 
     def query_install_business_unit_names(self) -> dict[str, str]:
@@ -988,6 +1007,10 @@ class FilteringInstallServiceTitan(ServiceTitanClient):
         }
 
     def _enrich_job(self, job: ServiceTitanJob) -> ServiceTitanJob:
+        self.enriched_job_ids.append(job.job_id)
+        return job
+
+    def _enrich_install_evening_job(self, job: ServiceTitanJob) -> ServiceTitanJob:
         self.enriched_job_ids.append(job.job_id)
         return job
 
@@ -1271,6 +1294,19 @@ class MarketingOsAgentTests(unittest.TestCase):
         app.install_audit = InstallAuditService(audit_settings, self.h.db, FakeInstallServiceTitan(jobs), self.h.slack)
         return app
 
+    def _install_evening_app(self, jobs: list[ServiceTitanJob], **overrides: object) -> AgentApp:
+        audit_settings = settings(self.h.settings.sqlite_path, **overrides)
+        app = AgentApp(audit_settings)
+        app.db = self.h.db
+        app.slack = self.h.slack
+        app.install_evening_report = InstallEveningReportService(
+            audit_settings,
+            self.h.db,
+            FakeInstallServiceTitan(jobs),
+            self.h.slack,
+        )
+        return app
+
     def test_pm_audit_defaults_disabled(self) -> None:
         audit_settings = settings(self.h.settings.sqlite_path)
         self.assertFalse(audit_settings.pm_audit_enabled)
@@ -1327,6 +1363,10 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(audit_settings.install_audit_run_hour, 8)
         self.assertEqual(audit_settings.install_audit_run_minute, 0)
         self.assertTrue(audit_settings.install_audit_weekdays_only)
+        self.assertFalse(audit_settings.install_audit_evening_report_enabled)
+        self.assertEqual(audit_settings.install_audit_evening_report_hour, 20)
+        self.assertEqual(audit_settings.install_audit_evening_report_minute, 0)
+        self.assertEqual(audit_settings.install_audit_evening_report_max_jobs, 100)
         self.assertEqual(audit_settings.install_audit_first_day_collect_pct, 50.0)
         self.assertEqual(audit_settings.install_audit_final_day_collect_pct, 100.0)
         self.assertEqual(audit_settings.install_audit_deposit_reminder_lead_days, 1)
@@ -1335,6 +1375,147 @@ class MarketingOsAgentTests(unittest.TestCase):
         self.assertEqual(audit_settings.install_audit_meal_break_after_hours, 5.0)
         self.assertEqual(audit_settings.install_audit_second_meal_after_hours, 10.0)
         self.assertEqual(audit_settings.install_audit_meal_break_min_minutes, 30)
+
+    def test_install_evening_report_dry_run_builds_collections_and_tomorrow_schedule(self) -> None:
+        today_job = replace(
+            install_job(
+                "today-install",
+                technician_name="Install Lead",
+                invoice_total=10000.0,
+                invoice_balance=2500.0,
+                payment_total=7500.0,
+            ),
+            customer_name="Private Customer",
+            notes="Private phone 555-111-2222 and private@example.com",
+        )
+        tomorrow_job = install_job(
+            "tomorrow-install",
+            technician_name="Tomorrow Lead",
+            start=datetime(2026, 6, 25, 8, tzinfo=timezone.utc),
+            end=datetime(2026, 6, 25, 16, tzinfo=timezone.utc),
+            invoice_total=None,
+            invoice_balance=None,
+            payment_total=None,
+            invoices=[],
+        )
+        app = self._install_evening_app(
+            [today_job, tomorrow_job],
+            install_audit_evening_report_enabled=True,
+            install_audit_dry_run=True,
+            install_audit_slack_channel_id="C-PM-INSTALL",
+        )
+        summary = app.run_install_evening_report_once(datetime(2026, 6, 24, 20, tzinfo=timezone.utc))
+        self.assertEqual(summary.today_install_jobs, 1)
+        self.assertEqual(summary.tomorrow_install_appointments, 1)
+        self.assertEqual(summary.total_collected, 7500.0)
+        self.assertEqual(summary.total_open_balance, 2500.0)
+        self.assertEqual(summary.payment_records_available, 1)
+        self.assertEqual(summary.payment_records_unavailable, 1)
+        self.assertEqual(summary.slack_would_send, 1)
+        self.assertEqual(self.h.slack.messages, [])
+        self.assertIn("Today's Install Payment Status", summary.message)
+        self.assertIn("Tomorrow's Schedule — Jun 25", summary.message)
+        self.assertIn("Job #J-today-install", summary.message)
+        self.assertIn("$7,500.00 collected to date", summary.message)
+        self.assertIn("Job #J-tomorrow-install", summary.message)
+        self.assertIn("structured payment data unavailable", summary.message)
+        self.assertIn("https://go.servicetitan.com/#/Job/Index/today-install", summary.message)
+        self.assertNotIn("Private Customer", summary.message)
+        self.assertNotIn("555-111-2222", summary.message)
+        self.assertNotIn("private@example.com", summary.message)
+
+    def test_install_evening_report_live_uses_install_channel_and_sends_clean_report(self) -> None:
+        app = self._install_evening_app(
+            [],
+            install_audit_evening_report_enabled=True,
+            install_audit_dry_run=False,
+            install_audit_slack_channel_id="C-PM-INSTALL",
+            slack_alert_channel_id="C-DISPATCH",
+        )
+        summary = app.run_install_evening_report_once(datetime(2026, 6, 24, 20, tzinfo=timezone.utc))
+        self.assertEqual(summary.slack_sent, 1)
+        self.assertEqual(len(self.h.slack.messages), 1)
+        channel, text, _thread = self.h.slack.messages[0]
+        self.assertEqual(channel, "C-PM-INSTALL")
+        self.assertNotEqual(channel, "C-DISPATCH")
+        self.assertIn("No true install appointments found today", text)
+        self.assertIn("No true install appointments found for tomorrow", text)
+
+    def test_install_evening_report_scheduler_runs_at_8pm_and_dedupes_success(self) -> None:
+        app = self._install_evening_app(
+            [],
+            install_audit_evening_report_enabled=True,
+            install_audit_evening_report_hour=20,
+            install_audit_evening_report_minute=0,
+            install_audit_dry_run=True,
+        )
+        scheduled = datetime(2026, 6, 24, 20, 0, tzinfo=timezone.utc)
+        self.assertTrue(app.should_run_install_evening_report_at(scheduled))
+        first = app.run_install_evening_report_scheduled(scheduled)
+        second = app.run_install_evening_report_scheduled(scheduled + timedelta(minutes=1))
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(self.h.db.get_kv("install_evening_report_auto_last_run_date"), "2026-06-24")
+        self.assertFalse(app.should_run_install_evening_report_at(scheduled + timedelta(minutes=2)))
+
+    def test_install_evening_report_scheduler_retries_failed_run_without_marking_success(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            install_audit_evening_report_enabled=True,
+            install_audit_evening_report_hour=20,
+            install_audit_evening_report_minute=0,
+            install_audit_dry_run=True,
+        )
+        app = AgentApp(audit_settings)
+        app.db = self.h.db
+        app.install_evening_report = InstallEveningReportService(
+            audit_settings,
+            self.h.db,
+            FakeInstallServiceTitan(fail=True),
+            self.h.slack,
+        )
+        scheduled = datetime(2026, 6, 24, 20, 0, tzinfo=timezone.utc)
+        summary = app.run_install_evening_report_scheduled(scheduled)
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary.status, "api_error")
+        self.assertIsNone(self.h.db.get_kv("install_evening_report_auto_last_run_date"))
+        self.assertFalse(app.should_run_install_evening_report_at(scheduled + timedelta(minutes=1)))
+        self.assertTrue(app.should_run_install_evening_report_at(scheduled + timedelta(minutes=15)))
+
+    def test_install_evening_report_targeted_query_filters_before_enrichment(self) -> None:
+        audit_settings = settings(
+            self.h.settings.sqlite_path,
+            install_audit_business_unit_ids=["1809"],
+            service_titan_audit_page_size=50,
+        )
+        records = [
+            {
+                "id": "install-job",
+                "number": "J-install-job",
+                "status": "Scheduled",
+                "businessUnitId": "1809",
+                "jobTypeId": "install-type",
+            },
+            {
+                "id": "service-job",
+                "number": "J-service-job",
+                "status": "Scheduled",
+                "businessUnitId": "service-bu",
+                "jobTypeId": "install-type",
+            },
+        ]
+        client = FilteringInstallServiceTitan(audit_settings, records)
+        jobs = client.query_install_jobs_by_appointment_window(
+            business_unit_ids={"1809"},
+            business_unit_names={"HVAC - Install"},
+            window_start=datetime(2026, 6, 24, tzinfo=timezone.utc),
+            window_end=datetime(2026, 6, 26, tzinfo=timezone.utc),
+            max_jobs=10,
+        )
+        self.assertEqual([job.job_id for job in jobs], ["install-job"])
+        self.assertEqual(client.enriched_job_ids, ["install-job"])
+        self.assertEqual(client.query_params[0]["appointmentStartsOnOrAfter"], "2026-06-24T00:00:00+00:00")
+        self.assertEqual(client.query_params[0]["appointmentStartsBefore"], "2026-06-26T00:00:00+00:00")
 
     def test_install_audit_manual_command_path_runs_when_auto_disabled(self) -> None:
         audit_settings = settings(

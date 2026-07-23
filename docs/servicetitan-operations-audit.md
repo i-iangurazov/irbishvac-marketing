@@ -225,6 +225,10 @@ INSTALL_AUDIT_LOOKAHEAD_DAYS=2
 INSTALL_AUDIT_RUN_HOUR=8
 INSTALL_AUDIT_RUN_MINUTE=0
 INSTALL_AUDIT_WEEKDAYS_ONLY=true
+INSTALL_AUDIT_EVENING_REPORT_ENABLED=false
+INSTALL_AUDIT_EVENING_REPORT_HOUR=20
+INSTALL_AUDIT_EVENING_REPORT_MINUTE=0
+INSTALL_AUDIT_EVENING_REPORT_MAX_JOBS=100
 ```
 
 Installer Audit can run manually with:
@@ -232,9 +236,28 @@ Installer Audit can run manually with:
 ```bash
 python3 -m marketing_os_agent install-audit-once
 python3 -m marketing_os_agent install-audit-test-slack
+python3 -m marketing_os_agent install-evening-report-once
 ```
 
 It is wired into `python -m marketing_os_agent run` when `INSTALL_AUDIT_ENABLED=true`. `INSTALL_AUDIT_RUN_ON_STARTUP=true` runs one startup audit after the app starts. `INSTALL_AUDIT_SCHEDULE_ENABLED=true` runs at `INSTALL_AUDIT_RUN_HOUR` / `INSTALL_AUDIT_RUN_MINUTE`, weekdays only when `INSTALL_AUDIT_WEEKDAYS_ONLY=true`. Automatic runs dedupe by local date; manual `install-audit-once` is independent.
+
+### Daily install operations report
+
+The 8 PM report is intentionally separate from Installer Audit violations. Set `INSTALL_AUDIT_EVENING_REPORT_ENABLED=true`, `INSTALL_AUDIT_EVENING_REPORT_HOUR=20`, and `INSTALL_AUDIT_EVENING_REPORT_MINUTE=0` to send one daily report in the configured `TIMEZONE`. It reads only true-install jobs with appointments today or tomorrow, then reports:
+
+- today's invoice total, cumulative amount collected as of the report run, and open balance;
+- tomorrow's appointment window, job number/type, assigned installer, payment signal, and ServiceTitan job link;
+- totals and a count of records whose structured payment data is unavailable.
+
+The report labels invoice-derived amounts `collected to date`: the scoped invoice response does not provide a reliable payment-posted-today breakdown. It never treats unavailable payment data as collected or missing. It does not parse email, SMS, notes, or customer summaries, and it excludes customer contact/address data. It uses only `INSTALL_AUDIT_SLACK_CHANNEL_ID`; it cannot fall back to the Dispatcher or shared ServiceTitan alert channel. Scheduled reports dedupe by local date. A missed or failed report is retried at 15-minute intervals after the configured time until it succeeds later that local day. A clean/empty day still produces a report so silence does not look like a scheduler failure.
+
+Use command-level dry-run for validation without changing Render:
+
+```bash
+INSTALL_AUDIT_EVENING_REPORT_ENABLED=true \
+INSTALL_AUDIT_DRY_RUN=true \
+python3 -m marketing_os_agent install-evening-report-once
+```
 
 Slack alert shape:
 

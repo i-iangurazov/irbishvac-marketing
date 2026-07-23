@@ -167,6 +167,7 @@ python3 -m marketing_os_agent servicetitan-audit-once
 python3 -m marketing_os_agent servicetitan-discover-scopes
 python3 -m marketing_os_agent install-audit-once
 python3 -m marketing_os_agent install-audit-test-slack
+python3 -m marketing_os_agent install-evening-report-once
 python3 -m marketing_os_agent seed-workbooks
 python3 -m marketing_os_agent poll-once
 python3 -m marketing_os_agent monday-push
@@ -189,6 +190,7 @@ Use `repost-missing-slack-updates` after fixing Slack channel membership if an e
 Use `servicetitan-audit-once` after configuring ServiceTitan credentials to run one operations audit cycle without waiting for the background interval.
 Use `servicetitan-discover-scopes` to print sanitized ServiceTitan business units, job types, statuses, tags, material context, related-record counts, and payload key availability before narrowing production rule scopes.
 Use `install-audit-once` after configuring ServiceTitan credentials and Installer Audit scope to run one read-only Installer Audit cycle. It stays dry-run unless `INSTALL_AUDIT_DRY_RUN=false`.
+Use `install-evening-report-once` to preview or send one combined report containing today's structured install collections and tomorrow's scoped install schedule. It uses the Installer Audit dry-run flag and channel but is independent of individual Installer Audit alerts.
 Use `pm-audit-once` after configuring ServiceTitan credentials to run one disabled-by-default Project Management audit cycle. It stays dry-run unless `PM_AUDIT_ENABLED=true` and `PM_AUDIT_DRY_RUN=false`.
 Use `debug-tasks` when a Notion edit is being read but no transition posts. It prints current Notion status next to the saved local baseline status.
 Use `transition-counts` to inspect observed status transitions, including repeated completions that the service actually saw.
@@ -281,6 +283,15 @@ Open in ServiceTitan: https://go.servicetitan.com/#/Job/Index/<job_id>
 Installer violations are persisted with ruleset `Installer Audit`, so the weekly ServiceTitan summary includes Installs counts alongside Sales/HVAC/Plumbing counts.
 
 Installer Audit can run from the main app scheduler with `INSTALL_AUDIT_ENABLED=true` plus `INSTALL_AUDIT_SCHEDULE_ENABLED=true`; `INSTALL_AUDIT_RUN_ON_STARTUP=true` runs once after startup. Automatic runs dedupe by local day. Manual `install-audit-once` ignores automatic daily dedupe and can be used for dry-run validation while automatic runs remain disabled.
+
+The install evening operations report is a separate daily scheduler. Enable it with `INSTALL_AUDIT_EVENING_REPORT_ENABLED=true`; the production defaults are 20:00 in `TIMEZONE` (`America/Los_Angeles`) and 100 scoped jobs. It always builds one report with today's install invoice total, cumulative amount collected as of the run, and open balance, plus tomorrow's true-install appointments. ServiceTitan's scoped invoice response does not expose a reliable payment-posted-today breakdown, so the report says `collected to date` rather than claiming the amount was collected that calendar day. Unsupported values are labeled `structured payment data unavailable`. It sends only to `INSTALL_AUDIT_SLACK_CHANNEL_ID`, never the Dispatcher or ServiceTitan alert channel. Automatic sends dedupe by local date; a missed or failed 8 PM run is retried at 15-minute intervals later that local day until it succeeds. The existing 8 AM individual Installer Audit schedule remains independent.
+
+```env
+INSTALL_AUDIT_EVENING_REPORT_ENABLED=true
+INSTALL_AUDIT_EVENING_REPORT_HOUR=20
+INSTALL_AUDIT_EVENING_REPORT_MINUTE=0
+INSTALL_AUDIT_EVENING_REPORT_MAX_JOBS=100
+```
 
 ## PM Audit Agent
 
