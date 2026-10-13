@@ -20,6 +20,7 @@ from .domain.owner_mapping import OwnerResolver
 from .domain.pm_audit import PM_AUDIT_TEST_MESSAGE, PMAuditService, PMAuditSummary
 from .domain.formatting import format_friday_roundup_email
 from .domain.reports import ReportService, month_bounds, quarter_bounds, week_bounds
+from .domain.recurring_report import RecurringReportService
 from .domain.service_titan_audit import (
     ServiceTitanAuditLoop,
     ServiceTitanAuditService,
@@ -101,6 +102,7 @@ class AgentApp:
             self.campaign_health,
         )
         self.reports = ReportService(settings, self.db, self.slack, self.claude, self.email, self.owner_resolver)
+        self.recurring_report = RecurringReportService(settings, self.db, self.notion, self.slack)
         self.service_titan_audit = ServiceTitanAuditService(settings, self.db, self.service_titan, self.slack)
         self.service_titan_weekly_summary = ServiceTitanWeeklySummaryService(settings, self.db, self.slack)
         self.service_titan_scope_discovery = ServiceTitanScopeDiscovery(settings, self.service_titan)
@@ -134,6 +136,7 @@ class AgentApp:
         scheduler.register(ScheduledJob("monthly_kickoff", first_day_9am, self.run_monthly_kickoff))
         scheduler.register(ScheduledJob("quarterly_kickoff", first_day_quarter_9am, self.run_quarterly_kickoff))
         scheduler.register(ScheduledJob("campaign_health_scan", daily_7am, self.run_campaign_health_scan))
+        self.register_recurring_report_jobs(scheduler)
         if self.settings.service_titan_weekly_summary_enabled:
             scheduler.register(
                 ScheduledJob(
@@ -200,6 +203,18 @@ class AgentApp:
         http_server.shutdown()
         for thread in threads:
             thread.join(timeout=5)
+
+    def register_recurring_report_jobs(self, scheduler: Scheduler) -> None:
+        if not self.settings.marketing_performance_report_enabled:
+            return
+        # These jobs own their success/claim state, so failures are not marked as completed by Scheduler.
+        scheduler.register(ScheduledJob("marketing_performance_report_create", self.recurring_report.should_create,
+                                        self.recurring_report.create_task, dedupe_before_run=False))
+        scheduler.register(ScheduledJob("marketing_performance_report_remind", self.recurring_report.should_remind,
+                                        self.recurring_report.remind, dedupe_before_run=False))
+        logger.info("marketing_performance_report_schedule_enabled", extra={
+            "timezone": self.settings.timezone, "dry_run": self.settings.marketing_performance_report_dry_run,
+        })
 
     def _log_service_titan_startup_config(self) -> None:
         if not self.settings.service_titan_audit_enabled:

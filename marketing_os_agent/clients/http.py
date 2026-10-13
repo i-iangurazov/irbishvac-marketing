@@ -33,11 +33,13 @@ class HttpClient:
         *,
         headers: dict[str, str] | None = None,
         body: dict[str, Any] | None = None,
+        retries: int | None = None,
     ) -> HttpResponse:
         payload = None if body is None else json.dumps(body).encode("utf-8")
         request_headers = {"Content-Type": "application/json", "User-Agent": DEFAULT_USER_AGENT, **(headers or {})}
         last_error: Exception | None = None
-        for attempt in range(self.retries + 1):
+        retry_limit = self.retries if retries is None else retries
+        for attempt in range(retry_limit + 1):
             try:
                 req = urllib.request.Request(url, data=payload, headers=request_headers, method=method.upper())
                 with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
@@ -51,14 +53,14 @@ class HttpClient:
                     data = json.loads(raw) if raw else {}
                 except json.JSONDecodeError:
                     data = {"error": raw}
-                if 400 <= exc.code < 500 and exc.code != 429:
+                if retry_limit == 0 or (400 <= exc.code < 500 and exc.code != 429):
                     logger.warning("http_client_error", extra={"url": url, "status": exc.code, "body": data})
                     return HttpResponse(status=exc.code, data=data, headers=dict(exc.headers.items()))
                 logger.warning("http_retryable_error", extra={"url": url, "status": exc.code, "attempt": attempt})
             except (urllib.error.URLError, TimeoutError) as exc:
                 last_error = exc
                 logger.warning("http_network_error", extra={"url": url, "attempt": attempt, "error": str(exc)})
-            if attempt < self.retries:
+            if attempt < retry_limit:
                 time.sleep(0.5 * (2**attempt))
         raise RuntimeError(f"HTTP request failed after retries: {url}") from last_error
 
