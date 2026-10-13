@@ -14,6 +14,12 @@ from .http import HttpClient
 logger = logging.getLogger(__name__)
 
 
+class SlackDeliveryError(RuntimeError):
+    def __init__(self, message: str, *, uncertain: bool) -> None:
+        self.uncertain = uncertain
+        super().__init__(message)
+
+
 class SlackClient:
     base_url = "https://slack.com/api"
 
@@ -102,6 +108,31 @@ class SlackClient:
             return str(user_id)
         logger.warning("slack_user_lookup_by_email_failed", extra={"email": email})
         return None
+
+    def dm_user_once(self, user_id: str, text: str, client_msg_id: str) -> str:
+        """No blind retry of chat.postMessage after a possibly accepted send."""
+        if not self.available or not user_id:
+            raise SlackDeliveryError("Slack credentials or recipient missing", uncertain=False)
+        opened = self._api("conversations.open", {"users": user_id})
+        channel = ((opened or {}).get("channel") or {}).get("id")
+        if not channel:
+            raise SlackDeliveryError("Could not open recipient DM", uncertain=False)
+        try:
+            response = self.http.request_json(
+                "POST", f"{self.base_url}/chat.postMessage", headers=self._headers(),
+                body={"channel": channel, "text": text, "client_msg_id": client_msg_id}, retries=0,
+            )
+        except Exception as exc:
+            raise SlackDeliveryError("Slack delivery result is unknown", uncertain=True) from exc
+        if response.status >= 500 or response.status == 408:
+            raise SlackDeliveryError("Slack delivery result is unknown", uncertain=True)
+        if response.status >= 400 or not response.data.get("ok"):
+            error = str(response.data.get("error", response.status))
+            uncertain = error in {"internal_error", "fatal_error", "request_timeout", "service_unavailable"}
+            raise SlackDeliveryError(error, uncertain=uncertain)
+        if not response.data.get("ts"):
+            raise SlackDeliveryError("Slack response missing message timestamp", uncertain=True)
+        return str(response.data["ts"])
 
     def verify_signature(self, timestamp: str, body: bytes, signature: str) -> bool:
         if not self.settings.slack_signing_secret:

@@ -39,10 +39,11 @@ class NotionClient:
             "Notion-Version": self.settings.notion_api_version,
         }
 
-    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request(self, method: str, path: str, body: dict[str, Any] | None = None, *, retry_on_failure: bool = True) -> dict[str, Any]:
         if not self.available:
             raise RuntimeError("Notion API key is not configured")
-        response = self.http.request_json(method, f"{self.base_url}{path}", headers=self._headers(), body=body)
+        kwargs = {} if retry_on_failure else {"retries": 0}
+        response = self.http.request_json(method, f"{self.base_url}{path}", headers=self._headers(), body=body, **kwargs)
         if response.status >= 400:
             raise NotionApiError(response.status, response.data)
         return response.data
@@ -52,6 +53,9 @@ class NotionClient:
 
     def retrieve_data_source(self, data_source_id: str) -> dict[str, Any]:
         return self._request("GET", f"/data_sources/{data_source_id}")
+
+    def retrieve_user(self, user_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/users/{user_id}")
 
     def query_data_source(self, data_source_id: str, body: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         pages: list[dict[str, Any]] = []
@@ -146,11 +150,11 @@ class NotionClient:
             created.append(name)
         return created
 
-    def create_page(self, parent: dict[str, Any], properties: dict[str, Any], children: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def create_page(self, parent: dict[str, Any], properties: dict[str, Any], children: list[dict[str, Any]] | None = None, *, retry_on_failure: bool = True) -> dict[str, Any]:
         body: dict[str, Any] = {"parent": parent, "properties": properties}
         if children:
             body["children"] = children
-        return self._request("POST", "/pages", body)
+        return self._request("POST", "/pages", body, retry_on_failure=retry_on_failure)
 
     def query_tasks_modified_since(self, since_iso: str | None) -> list[Task]:
         body: dict[str, Any] = {"sorts": [{"timestamp": "last_edited_time", "direction": "ascending"}]}

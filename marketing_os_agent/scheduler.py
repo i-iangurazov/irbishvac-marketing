@@ -19,6 +19,7 @@ class ScheduledJob:
     name: str
     should_run: object
     run: object
+    dedupe_before_run: bool = True
 
 
 class Scheduler:
@@ -35,15 +36,19 @@ class Scheduler:
         logger.info("scheduler_started", extra={"timezone": self.settings.timezone, "jobs": [job.name for job in self.jobs]})
         while not stop_event.is_set():
             now = datetime.now(self.tz)
-            for job in self.jobs:
-                try:
-                    if job.should_run(now) and self._mark_run_once(job.name, now):
-                        logger.info("scheduled_job_started", extra={"job": job.name})
-                        job.run(now)
-                except Exception:
-                    logger.exception("scheduled_job_unhandled_failure", extra={"job": job.name})
+            self.run_pending(now)
             stop_event.wait(60)
         logger.info("scheduler_stopped")
+
+    def run_pending(self, now: datetime) -> None:
+        now = now.astimezone(self.tz)
+        for job in self.jobs:
+            try:
+                if job.should_run(now) and (not job.dedupe_before_run or self._mark_run_once(job.name, now)):
+                    logger.info("scheduled_job_started", extra={"job": job.name})
+                    job.run(now)
+            except Exception:
+                logger.exception("scheduled_job_unhandled_failure", extra={"job": job.name})
 
     def _mark_run_once(self, job_name: str, now: datetime) -> bool:
         key = f"schedule:{job_name}:{now:%Y-%m-%d-%H-%M}"

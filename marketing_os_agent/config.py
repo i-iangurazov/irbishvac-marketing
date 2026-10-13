@@ -381,6 +381,10 @@ class Settings:
     service_titan_required_operational_fields: list[str] = field(default_factory=list)
     service_titan_rule_scope_config: dict[str, Any] = field(default_factory=dict)
     service_titan_business_unit_labels: dict[str, str] = field(default_factory=dict)
+    marketing_performance_report_enabled: bool = False
+    marketing_performance_report_dry_run: bool = True
+    marketing_performance_report_owner_notion_user_id: str = ""
+    marketing_performance_report_key_property: str = "Deadline rule"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -647,6 +651,10 @@ class Settings:
             dispatcher_audit_enabled=_bool_env("DISPATCHER_AUDIT_ENABLED", False),
             owner_slack_map=_json_map_env("OWNER_SLACK_MAP_JSON"),
             owner_email_map=_json_map_env("OWNER_EMAIL_MAP_JSON"),
+            marketing_performance_report_enabled=_bool_env("MARKETING_PERFORMANCE_REPORT_ENABLED", False),
+            marketing_performance_report_dry_run=_bool_env("MARKETING_PERFORMANCE_REPORT_DRY_RUN", True),
+            marketing_performance_report_owner_notion_user_id=_env("MARKETING_PERFORMANCE_REPORT_OWNER_NOTION_USER_ID"),
+            marketing_performance_report_key_property=_env("MARKETING_PERFORMANCE_REPORT_KEY_PROPERTY", "Deadline rule"),
             task_status_map={
                 "not started": "Not Started",
                 "not_started": "Not Started",
