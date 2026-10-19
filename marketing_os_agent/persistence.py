@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +75,15 @@ class Persistence:
                     slack_user_id TEXT NOT NULL DEFAULT '',
                     deadline_at TEXT NOT NULL,
                     sent_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS recurring_report_actions (
+                    action_key TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    claim_token TEXT NOT NULL,
+                    lease_until REAL NOT NULL,
+                    attempted_at REAL NOT NULL,
+                    result_json TEXT NOT NULL DEFAULT '{}'
                 );
 
                 CREATE TABLE IF NOT EXISTS owner_mappings (
@@ -382,6 +393,52 @@ class Persistence:
         with self._lock, self._connect() as conn:
             row = conn.execute("SELECT 1 FROM dedupe_events WHERE key = ?", (key,)).fetchone()
             return row is not None
+
+    def get_recurring_report_action(self, key: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT * FROM recurring_report_actions WHERE action_key = ?", (key,)).fetchone()
+            return dict(row) if row else None
+
+    def claim_recurring_report_action(self, key: str, now: datetime, *, reconcile: bool = False) -> tuple[str, bool] | None:
+        """Serialize workers sharing SQLite; a stale dispatched action stays uncertain."""
+        timestamp = now.timestamp()
+        token = str(uuid.uuid4())
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM recurring_report_actions WHERE action_key = ?", (key,)).fetchone()
+            uncertain = bool(row and row["status"] == "uncertain")
+            if row and (row["status"] == "succeeded" or row["lease_until"] > timestamp
+                        or timestamp - row["attempted_at"] < 900 or (uncertain and not reconcile)):
+                return None
+            conn.execute(
+                """INSERT INTO recurring_report_actions (action_key, status, claim_token, lease_until, attempted_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(action_key) DO UPDATE SET status=excluded.status, claim_token=excluded.claim_token,
+                       lease_until=excluded.lease_until, attempted_at=excluded.attempted_at""",
+                (key, "uncertain" if uncertain else "running", token, timestamp + 300, timestamp),
+            )
+            return token, uncertain
+
+    def finish_recurring_report_action(self, key: str, token: str, status: str, result: dict[str, Any] | None = None) -> None:
+        if status not in {"ready", "uncertain", "succeeded"}:
+            raise ValueError("Invalid recurring report action status")
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE recurring_report_actions SET status = ?, lease_until = 0, result_json = ? WHERE action_key = ? AND claim_token = ?",
+                (status, json.dumps(result or {}), key, token),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Recurring report claim was lost")
+
+    def dispatch_recurring_report_action(self, key: str, token: str, now: datetime) -> None:
+        # Commit uncertainty BEFORE the external write; a crash cannot authorize another send.
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE recurring_report_actions SET status = 'uncertain' WHERE action_key = ? AND claim_token = ? AND status = 'running' AND lease_until > ?",
+                (key, token, now.timestamp()),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Recurring report claim expired or was lost")
 
     def get_kv(self, key: str) -> str | None:
         with self._lock, self._connect() as conn:

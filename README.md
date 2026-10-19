@@ -208,6 +208,13 @@ The importer needs Emil’s real campaign data. It does not invent campaign entr
 
 ## Automation Behavior
 
+The opt-in [weekly Marketing Performance Report workflow](docs/recurring-marketing-performance-report.md)
+creates Emil's task on Friday at 16:00 with the following Monday's deadline, then sends
+a personal Slack reminder on Monday at 08:00 in `TIMEZONE`. It runs in the existing
+process, has separate disabled/dry-run defaults, and persists per-period claims and
+confirmed outcomes. Start with `python -m marketing_os_agent marketing-performance-report validate`;
+see the linked guide for configuration, duplicate prevention, rollout and recovery.
+
 - Polls Notion Tasks for status transitions to `Completed`, `Delayed`, `Blocked`, or `Canceled`.
 - Posts structured updates to `#marketing-ops`.
 - Comments back on the Notion task for verification gaps.

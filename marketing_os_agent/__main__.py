@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 import threading
+from datetime import datetime
 
 from .app import AgentApp
 from .config import Settings, load_dotenv
@@ -18,6 +19,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=False)
     sub.add_parser("run", help="Run the long-lived service")
     sub.add_parser("init-db", help="Initialize SQLite persistence")
+    report = sub.add_parser("marketing-performance-report", help="Preview, validate or run the recurring report workflow")
+    report.add_argument("action", choices=["preview", "validate", "create", "remind"])
+    report.add_argument("--at", help="Timezone-aware ISO datetime, for preview/validation only")
     sub.add_parser("validate-notion", help="Validate configured Notion databases")
     sub.add_parser("seed-workbooks", help="Create missing required workbook records in the configured Workbooks database")
     sub.add_parser("poll-once", help="Run one Notion polling cycle")
@@ -68,6 +72,20 @@ def main(argv: list[str] | None = None) -> int:
         raise
     configure_logging(settings.log_level)
     app = AgentApp(settings)
+
+    if command == "marketing-performance-report":
+        if args.at and args.action not in {"preview", "validate"}:
+            parser.error("--at is allowed only for read-only preview/validation")
+        now = datetime.fromisoformat(args.at.replace("Z", "+00:00")) if args.at else None
+        if now is not None and now.tzinfo is None:
+            parser.error("--at must include a timezone offset")
+        if args.action in {"create", "remind"}:
+            app.initialize_storage()
+        action = {"preview": app.recurring_report.preview, "validate": app.recurring_report.validate,
+                  "create": app.recurring_report.create_task, "remind": app.recurring_report.remind}[args.action]
+        result = action(now)
+        print(json.dumps(result, indent=2))
+        return 1 if result["status"] in {"failed", "uncertain", "config_error"} else 0
 
     if command == "init-db":
         app.initialize_storage()
